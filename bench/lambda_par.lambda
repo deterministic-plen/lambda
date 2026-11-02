@@ -3,7 +3,7 @@ include "lib/prime.lambda"
 
 nth-prime-par → (λn.
   limit → (upper-bound n)
-  blocks → (float->int (⊘ (⊕ (int->float limit) 65535.0) 65536.0))
+  blocks → (float->int (/ (+ (int->float limit) 65535.0) 65536.0))
   counts → (pmap count-block (range 0 blocks))
   loc → (find-block counts n)
   b → (head loc)
@@ -11,8 +11,8 @@ nth-prime-par → (λn.
   (find-in-block b k))
 
 run → (λk.
-  if (≡ k 0)
+  if (== k 0)
   then 0
-  else (⊕ (nth-prime-par 670000) (run (⊖ k 1))))
+  else (+ (nth-prime-par 670000) (run (- k 1))))
 
 (run 3)

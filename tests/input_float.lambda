@@ -1,1 +1,1 @@
-(⊗ (read-float "") 2.0)
+(* (read-float "") 2.0)

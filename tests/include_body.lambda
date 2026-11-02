@@ -1,2 +1,2 @@
 include "lib/with_body.lambda"
-(⊕ 1 1)
+(+ 1 1)

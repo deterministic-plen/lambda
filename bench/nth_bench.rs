@@ -175,22 +175,42 @@ fn nth_prime_sieve(target: i64) -> i64 {
     let root = (limit as f64).sqrt() as i64;
     let base: Vec<i64> = (2..=root).filter(|&i| is_prime(i)).collect();
     let blocks = (limit + SIEVE_BLOCK - 1) / SIEVE_BLOCK;
-    let counts: Vec<AtomicI64> = (0..blocks).map(|_| AtomicI64::new(0)).collect();
-    let c = &counts;
-    parallel_for(blocks, bench_threads(), |b| {
-        c[b as usize].store(block_mask(b, &base).count_ones() as i64, Ordering::Relaxed);
+    const CHUNK: i64 = 32;
+    let chunks = (blocks + CHUNK - 1) / CHUNK;
+    let chunk_counts: Vec<AtomicI64> = (0..chunks).map(|_| AtomicI64::new(0)).collect();
+    let c = &chunk_counts;
+    parallel_for(chunks, bench_threads(), |ch| {
+        let start = ch * CHUNK;
+        let stop = (start + CHUNK).min(blocks);
+        let mut total = 0i64;
+        for b in start..stop {
+            total += block_mask(b, &base).count_ones() as i64;
+        }
+        c[ch as usize].store(total, Ordering::Relaxed);
     });
     let mut acc = 0i64;
-    let mut block = 0i64;
-    while block < blocks {
-        let count = counts[block as usize].load(Ordering::Relaxed);
+    let mut chunk = 0i64;
+    while chunk < chunks {
+        let count = chunk_counts[chunk as usize].load(Ordering::Relaxed);
         if target <= acc + count {
             break;
         }
         acc += count;
+        chunk += 1;
+    }
+    let mut need = target - acc;
+    let start = chunk * CHUNK;
+    let stop = (start + CHUNK).min(blocks);
+    let mut block = start;
+    while block < stop {
+        let count = block_mask(block, &base).count_ones() as i64;
+        if need <= count {
+            break;
+        }
+        need -= count;
         block += 1;
     }
-    let mut k = target - acc;
+    let mut k = need;
     let mask = block_mask(block, &base);
     for i in 0..64 {
         if mask & (1u64 << i) != 0 {

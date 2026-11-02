@@ -1,5 +1,5 @@
 churn → (λn acc.
-  if (≡ n 0)
+  if (== n 0)
   then (str-len acc)
-  else (churn (⊖ n 1) (str-append "x" "y")))
+  else (churn (- n 1) (str-append "x" "y")))
 (churn 100000 "start")

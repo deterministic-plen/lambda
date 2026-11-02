@@ -1,2 +1,2 @@
-twice → (λx. (⊕ x x))
-inc → (λx. (⊕ x 1))
+twice → (λx. (+ x x))
+inc → (λx. (+ x 1))

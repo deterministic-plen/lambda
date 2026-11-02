@@ -4,7 +4,7 @@ length → (λxs.
   go → (λacc rest.
     if (empty? rest)
     then acc
-    else (go (⊕ acc 1) (tail rest)))
+    else (go (+ acc 1) (tail rest)))
   (go 0 xs))
 
 reverse → (λxs.

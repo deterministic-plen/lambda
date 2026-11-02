@@ -39,7 +39,7 @@ python lambda.py examples/nth_prime_sieve.lambda -o sieve
 python lambda.py tests/input_int.lambda -o ask --input
 echo 41 | ./ask
 
-python run_tests.py          # 89 regression tests
+python run_tests.py          # 96 regression tests
 ```
 
 Requirements: Python 3.10+, LLVM `clang` on `PATH`.
@@ -73,7 +73,7 @@ definitions, then one expression.  A block may appear at the top level, after
 ```lambda
 ; definitions are recursive and visible to each other
 fib → (λn.
-  go → (λa b i. if (≡ i n) then a else (go b (⊕ a b) (⊕ i 1)))
+  go → (λa b i. if (== i n) then a else (go b (+ a b) (+ i 1)))
   (go 0 1 0))
 
 (fib 25)
@@ -86,19 +86,19 @@ is no `letloop`/`letrec` distinction: inference chooses unboxed or boxed code.
 Other forms:
 
 ```lambda
-(λx y. (⊕ x y))                 ; multiple parameters
-(λp x. (⊕ x 1))                 ; parallel-safe marker (must be pure)(λx: Float. (⊗ x x))            ; parameter type annotation
-(let x = (fib 5) in (⊕ x 1))     ; local definition sugar
+(λx y. (+ x y))                 ; multiple parameters
+(λp x. (+ x 1))                 ; parallel-safe marker (must be pure)(λx: Float. (* x x))            ; parameter type annotation
+(let x = (fib 5) in (+ x 1))     ; local definition sugar
 [1, 2, 3]                        ; list literal
-[ (⊗ x x) | x ← [1..10] ]        ; sequential comprehension
-[ (⊗ x x) ∥ x ← [1..10] ]        ; parallel comprehension (pmap)
+[ (* x x) | x ← [1..10] ]        ; sequential comprehension
+[ (* x x) ∥ x ← [1..10] ]        ; parallel comprehension (pmap)
 [0..n]                           ; half-open integer range 0 .. n-1
 "a\nb"                           ; strings
 (if cond then a else b)
 ```
 
 A definition value is one atom, so compound values go in parentheses:
-`f → (⊕ 1 2)` is valid, `f → ⊕ 1 2` is not.
+`f → (+ 1 2)` is valid, `f → + 1 2` is not.
 
 `λp` (no space after the lambda) is the parallel-lambda marker.  To write an
 ordinary lambda whose first parameter is literally named `p`, put a space
@@ -128,8 +128,8 @@ Unconstrained numeric variables default to `Int`.  Use a parameter annotation
 when a generic-looking function should be specialized to `Float`:
 
 ```lambda
-square → (λx: Float. (⊗ x x))     ; without the annotation this defaults to Int
-squarei → (λx. (⊗ x x))           ; Int -> Int
+square → (λx: Float. (* x x))     ; without the annotation this defaults to Int
+squarei → (λx. (* x x))           ; Int -> Int
 ```
 
 `int->float` and `float->int` compile to one `sitofp`/`fptosi` instruction;
@@ -139,13 +139,13 @@ squarei → (λx. (⊗ x x))           ; Int -> Int
 
 | group | names |
 | --- | --- |
-| numeric | `⊕`/`+`, `⊖`/`-`, `⊗`/`*`, `⊘`/`/`, `⊙`/`%` (Int or Float, homogeneous) |
-| comparison | `≺`/`<`, `≼`/`<=`, `≻`/`>`, `≽`/`>=`; `≡`/`==` structural equality |
-| float math | `√`/`sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `ln`, `log10`, `log2`, `floor`, `ceil`, `round`, `trunc`, `pow`/`**`/`^`, `abs`, `π`/`pi`, `e` |
+| numeric | `+`, `-`, `*`, `/`, `%` (Int or Float, homogeneous) |
+| comparison | `<`, `<=`, `>`, `>=`; `==` structural equality |
+| float math | `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `ln`, `log10`, `log2`, `floor`, `ceil`, `round`, `trunc`, `pow`/`**`/`^`, `abs`, `pi`, `e` |
 | conversions | `int->float`, `float->int`, `str->float`, `float->str` |
-| reductions | `∑`/`sum`, `∏`/`product` (same type as the list) |
+| reductions | `sum`, `product` (same type as the list) |
 | lists | `cons`, `head`, `tail`, `empty?`, `nil`, `map`, `pmap`, `range`, `immortalize`/`freeze` |
-| flat arrays | `arrayf`, `arrayi`, `arrayb`, `*-get`, `*-get-ro`, `*-set`, `*-length`, `*-clone`, `arrayi-pmap` |
+| flat arrays | `arrayf`, `arrayi`, `arrayb`, `*-get`, `*-get-ro`, `*-set`, `*-length`, `*-clone`, `arrayi-pmap`, `arrayi-pmap-chunk` |
 | bit-level | `&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
 | strings | `str->int`, `int->str`, `str->list`, `str-len`, `str-append`, `read-file` |
 | IO | `print`, `println` (return their argument), `not` |
@@ -158,12 +158,13 @@ effectful primitives.  Division/modulo are inlined `sdiv`/`srem` for Int and
 
 ### Operator spellings
 
-The ASCII and Unicode arithmetic spellings are currently exact aliases — `+`
-and `⊕`, `-` and `⊖`, `*` and `⊗`, `/` and `⊘`, `%` and `⊙`, `<` and `≺`, etc.
-They do not select different implementations.  The Unicode forms are reserved
-for future distinct operations (for example matrix-aware kernels); if that
-happens they will get their own names or explicit type-directed semantics
-rather than silently changing the meaning of existing programs.
+The ASCII operators are the canonical spelling.  The old Unicode arithmetic
+spellings are still accepted as legacy aliases for backward compatibility; they
+do not select different implementations and should not be used in new code.
+They are reserved for future distinct operations (for example matrix-aware
+kernels); if that happens they will get their own names or explicit
+type-directed semantics rather than silently changing the meaning of existing
+programs.
 
 ## Numbers and machine code
 
@@ -171,7 +172,7 @@ rather than silently changing the meaning of existing programs.
 * `String`, lists, and functions are reference-counted `%Value*`.
 * Arithmetic/comparisons emit `add`, `mul`, `fadd`, `fmul`, `fcmp`, etc.;
   no tags, dictionaries, or allocations on homogeneous numeric paths.
-* `√`, `floor`, `ceil`, `round`, `trunc`, `abs`, and `pow` use LLVM intrinsics
+* `sqrt`, `floor`, `ceil`, `round`, `trunc`, `abs`, and `pow` use LLVM intrinsics
   (`llvm.sqrt.f64`, `llvm.pow.f64`, ...); trig/exp/log use the platform libm.
   IEEE-754 semantics are preserved (no `-ffast-math`), so NaN/Inf behave
   normally.
@@ -201,11 +202,11 @@ elements are unboxed and there is no per-element wrapper.
 
 ```lambda
 sum-squares → (λa i n acc.
-  if (≽ i n)
+  if (>= i n)
   then acc
-  else (sum-squares (arrayi-set a i (⊗ i i))
-                    (⊕ i 1) n
-                    (⊕ acc (arrayi-get a i))))
+  else (sum-squares (arrayi-set a i (* i i))
+                    (+ i 1) n
+                    (+ acc (arrayi-get a i))))
 
 a → (arrayi 1000 0)
 (sum-squares a 0 1000 0)        ; 332833500
@@ -241,6 +242,32 @@ function (for example, to read a shared base-prime array).  Ordinary
 arrays, arrays of arrays, and a typed `Array a` are not implemented yet; the
 three concrete types keep the element representation unboxed.
 
+## Big integers
+
+`lib/bigint.lambda` is a pure-Lambda arbitrary-precision unsigned integer
+library; it adds no compiler primitives.  A number is one `arrayi`:
+
+```
+a[0]        = number of limbs
+a[1..n]     = little-endian base-1e9 limbs
+unused      = zero
+```
+
+Base 1e9 keeps every `a[i] * b[j] + carry` within `i64` and makes decimal output
+trivial.  The library provides add/subtract, schoolbook multiplication,
+Karatsuba above 24 limbs, fast doubling for Fibonacci, and streamed decimal
+printing (most-significant limb first, nine-digit zero-padded lower limbs).
+`F(100)` and `F(1000)` are exact regression cases; `F(1,000,000)` (208,988
+digits) is an example and benchmark:
+
+```
+examples/bigint_fib1m.lambda   ; ~760 ms, exactly 208,988 digits
+```
+
+This is 1.44x Python’s C-backed bigint on the same fast-doubling computation.
+It is not close to GMP’s `F(216,000,000)` territory; that would need FFT/NTT
+limb kernels and much more tuning.
+
 ## Sharing, memory, and ownership
 
 A purity fixpoint marks pure functions and primitives.  A CSE pass finds pure
@@ -248,8 +275,8 @@ applications repeated in one straight-line region and evaluates them once:
 
 ```lambda
 bad → (λn.
-  if (≡ n 0) then 0
-  else (⊕ (bad (⊖ n 1)) (⊕ (bad (⊖ n 1)) (bad (⊖ n 1)))))
+  if (== n 0) then 0
+  else (+ (bad (- n 1)) (+ (bad (- n 1)) (bad (- n 1)))))
 
 (bad 30)   ; 31 recursive calls instead of 3^30
 ```
@@ -278,14 +305,14 @@ count-block → (λp b.
   ... pure block computation ...)
 
 counts → (pmap count-block (range 0 blocks))
-total  → (∑ counts)
+total  → (sum counts)
 ```
 
 Parallel comprehensions are sugar:
 
 ```lambda
-[ (⊗ x x) ∥ x ← [1..10] ]         ; pmap
-[ (⊗ x x) | x ← [1..10] ]         ; map
+[ (* x x) ∥ x ← [1..10] ]         ; pmap
+[ (* x x) | x ← [1..10] ]         ; map
 ```
 
 Independence rule: `pmap`/`λp` bodies may not print, read input, call unknown
@@ -322,7 +349,7 @@ interaction.  Pass `--input` to enable:
 
 ```lambda
 n → (read-int "n: ")
-(⊕ n 1)
+(+ n 1)
 ```
 
 * `read-line : String -> String` prints the prompt, flushes output, and returns
@@ -339,14 +366,14 @@ is `Z`:
 
 ```lambda
 Z → (λf. (λx. f (λv. ((x x) v))) (λx. f (λv. ((x x) v))))
-fact → (Z (λf. λn. if (≡ n 0) then 1 else (⊗ n (f (⊖ n 1)))))
+fact → (Z (λf. λn. if (== n 0) then 1 else (* n (f (- n 1)))))
 (fact 10)     ; works via the dynamic fallback (self-application is untypeable)
 ```
 
 A typed built-in `fix` (alias `Y`) is provided for unary functions:
 
 ```lambda
-((fix (λself. λn. if (≡ n 0) then 1 else (⊗ n (self (⊖ n 1))))) 10)
+((fix (λself. λn. if (== n 0) then 1 else (* n (self (- n 1))))) 10)
 ```
 
 `fix` creates a fresh recursive closure per application without a reference
@@ -357,7 +384,8 @@ cycle.
 Windows x64, clang `-O3`, 16 logical CPUs:
 
 * `nth-prime 670000`: sequential ~1.00 s; parallel trial division ~0.17 s;
-  segmented sieve ~0.24 s (0.037 s at 16 threads).
+  segmented sieve ~0.23 s (0.034 s at 16 threads).
+* Pure-Lambda `F(1,000,000)`: 208,988 digits in ~0.76 s (`live=0`).
 * 100,000-iteration string churn: 100,004 values / 100,002 envs, `live=0`.
 * 100,000-element list construction/teardown: 200,002 values, `live=0`.
 * 100,000 closures created/dropped: 100,004 values / 100,002 envs, `live=0`.
@@ -376,23 +404,30 @@ there is no I/O inside a timed region. CPU: AMD Ryzen 7 9700X, 8 cores /
 
 | kernel | threads | Lambda | C | C++ | Rust | Lambda / C |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| sequential nth-prime | 1 | 1026.0 ms | 1014.9 ms | 1014.3 ms | 1036.5 ms | 1.01x |
-| parallel trial division | 1 | 1209.6 ms | 1199.6 ms | 1241.4 ms | 1206.5 ms | 1.01x |
-| parallel trial division | 16 | 171.8 ms | 171.8 ms | 179.3 ms | 174.3 ms | 1.00x |
-| segmented sieve | 1 | 241.3 ms | 175.7 ms | 167.3 ms | 171.4 ms | 1.37x |
-| segmented sieve | 16 | 36.6 ms | 21.2 ms | 20.7 ms | 20.7 ms | 1.73x |
-| Newton, 100 steps | 1 | 0.367 µs | 0.363 µs | 0.367 µs | 0.365 µs | 1.01x |
-| 10M i64 fill+sum | 1 | 17.7 ms | 14.2 ms | 13.9 ms | 14.1 ms | 1.25x |
+| sequential nth-prime | 1 | 1022.1 ms | 1016.4 ms | 1014.7 ms | 1034.3 ms | 1.01x |
+| parallel trial division | 1 | 1204.1 ms | 1193.5 ms | 1249.1 ms | 1219.8 ms | 1.01x |
+| parallel trial division | 16 | 171.0 ms | 165.1 ms | 173.9 ms | 176.1 ms | 1.04x |
+| segmented sieve | 1 | 230.3 ms | 167.7 ms | 165.0 ms | 165.1 ms | 1.37x |
+| segmented sieve | 16 | 33.9 ms | 21.1 ms | 21.6 ms | 20.6 ms | 1.61x |
+| Newton, 100 steps | 1 | 0.375 µs | 0.366 µs | 0.366 µs | 0.368 µs | 1.02x |
+| 10M i64 fill+sum | 1 | 16.9 ms | 15.0 ms | 13.3 ms | 16.1 ms | 1.13x |
 
 The sequential and parallel trial-division paths and the f64 Newton kernel are
-at parity. The sieve now uses a flat `arrayi` of base primes, `arrayi-pmap`
-counts into a flat result array, and materialises only the selected block’s
-mask. That reduced the gap from 5.1x/8.8x to **1.37x/1.73x**. The remaining
-sieve overhead is the Lambda-level 64-bit mask loop (list-free but still
-recursive calls) plus the per-task closure application; it is no longer
-dominated by list garbage. The 10M-element array test is **1.25x C**, with one
-contiguous allocation per pass and no per-element wrappers. Full protocol and
-raw medians: [bench/results.md](bench/results.md).
+at parity. The sieve now uses a flat `arrayi` of base primes, chunked
+`arrayi-pmap-chunk` counts into a flat result array, and materialises only the
+selected block’s mask. That reduced the gap from 5.1x/8.8x to **1.37x/1.61x**.
+The remaining sieve overhead is the Lambda-level 64-bit mask loop (list-free but
+still recursive calls) and bounds checks; it is no longer dominated by list
+garbage or per-task refcount contention. The 10M-element array test is **1.13x
+C**, with one contiguous allocation per pass and no per-element wrappers.
+
+The pure-Lambda bigint library (`lib/bigint.lambda`) computes
+**F(1,000,000) = 208,988 digits in 760 ms**, exactly matching Python’s
+C-backed bigint at 528 ms (1.44x). It uses base-1e9 limbs in one `arrayi`,
+length in limb 0, Karatsuba multiplication, fast doubling, and streamed decimal
+output (no giant intermediate string). GMP and Boost are not installed here, so
+Python is the available big-number reference. Full protocol and raw medians:
+[bench/results.md](bench/results.md).
 
 Known numerical-methods caveat: `matrix.rs` is not used as a benchmark because
 Lambda has no 2D array/matrix primitive; a list-of-lists matrix would measure
@@ -416,9 +451,30 @@ Rust file also allocates `Vec<Vec<f64>>` and clones rows per elimination, and it
 | `lambda.py` | CLI driver, include loading, clang invocation, runtime variants |
 | `lib/prime.lambda` | shared primality/bounds/block helpers |
 | `lib/list.lambda` | `length`, `reverse`, `filter`, `foldl`, `append` |
-| `run_tests.py` | 89 compile/run/leak regression cases |
+| `lib/bigint.lambda` | pure-Lambda base-1e9 bigint, Karatsuba, fast doubling |
+| `run_tests.py` | 96 compile/run/leak regression cases |
 | `tests/`, `examples/` | test corpus and runnable examples |
 | `bench/` | fair Lambda/C/C++/Rust comparison and results |
+
+## Minimalism review
+
+The bigint layer adds **no compiler primitives**; it is a library over `arrayi`.
+That is the right direction for bootstrapping: language-level algorithms should
+be written in Lambda, with only representation primitives in the runtime.
+
+The array additions are deliberately narrow: three concrete element types, one
+generic read-only accessor promise, and one chunked parallel map.  They avoid a
+generic `Array a`/type-class layer that would complicate inference and boxing.
+`arrayi-pmap-chunk` is the most specialised primitive; it is justified by the
+sieve benchmark, but future parallel work should try to generalise it rather
+than add more sieve-shaped operations.  Tuples and enums should stay out until
+their syntax pays for itself; multiple parameters already cover multi-variable
+iteration, and nullary enums are only named integer tags.
+
+For self-hosting, the practical remaining dependencies are: strings (lexer and
+diagnostics), lists (AST), arrays (token/byte buffers), `read-file`, and the
+primitive `print`.  The compiler proper can then be ordinary Lambda; the only
+required external interface is the clang/process boundary.
 
 ## Known limitations
 
@@ -450,5 +506,7 @@ Rust file also allocates `Vec<Vec<f64>>` and clones rows per elimination, and it
   parameter is moved into `set` with no retain/release, and reads borrow the
   buffer; globals and captured/shared arrays still take the retaining path.
   Bounds checks remain unless a future unchecked mode is added.
-* Tuples, named enums, big integers and FFT are not implemented yet.  The flat
-  arrays are the storage prerequisite for the bigint/fast-doubling work.
+* Tuples, named enums and FFT/NTT multiplication are not implemented yet.
+* `lib/bigint.lambda` is unsigned add/sub/mul/fast-doubling only; capacity is
+  supplied by the caller, and division, FFT/NTT multiplication and arbitrary
+  radix parsing are not implemented.

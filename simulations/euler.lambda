@@ -1,0 +1,11 @@
+deltaT → 0.01
+omega → 1.0
+
+f → (λt x v. 
+if (== t 0)
+then ""
+else
+a→(println x)
+(f (- t 1) (+ x (* v deltaT)) (- v (* (* omega (+ x (* v deltaT))) deltaT)))
+)
+(f 1000 0.1 0.0)

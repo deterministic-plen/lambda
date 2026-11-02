@@ -2,41 +2,41 @@
 ; The parallel versions split the candidate range into fixed-size blocks.
 
 is-prime → (λn.
-  if (≺ n 2)
+  if (< n 2)
   then false
-  else if (≡ n 2)
+  else if (== n 2)
   then true
-  else if (≡ 0 (⊙ n 2))
+  else if (== 0 (% n 2))
   then false
   else
     check → (λd.
-      if (≺ n (⊗ d d))
+      if (< n (* d d))
       then true
-      else if (≡ 0 (⊙ n d))
+      else if (== 0 (% n d))
       then false
-      else (check (⊕ d 2)))
+      else (check (+ d 2)))
     (check 3))
 
 block-size → 65536
 
 ; The k-th block of candidates; marked λp so it can be used with pmap.
 count-block → (λp b.
-  lo → (⊗ b block-size)
-  hi → (⊕ lo block-size)
+  lo → (* b block-size)
+  hi → (+ lo block-size)
   go → (λi acc.
-    if (≽ i hi)
+    if (>= i hi)
     then acc
-    else (go (⊕ i 1) (if (is-prime i) then (⊕ acc 1) else acc)))
-  (go (if (≺ lo 2) then 2 else lo) 0))
+    else (go (+ i 1) (if (is-prime i) then (+ acc 1) else acc)))
+  (go (if (< lo 2) then 2 else lo) 0))
 
 ; Upper bound for the n-th prime: p_n < n(ln n + ln ln n) for n >= 6.
 upper-bound → (λn.
-  if (≺ n 6)
+  if (< n 6)
   then 15
   else
     f → (int->float n)
-    est → (⊗ f (⊕ (ln f) (ln (ln f))))
-    (float->int (⊗ est 1.05)))
+    est → (* f (+ (ln f) (ln (ln f))))
+    (float->int (* est 1.05)))
 
 ; Given per-block counts and a 1-based target, return [block-index, index-within-block].
 find-block → (λcounts need.
@@ -44,28 +44,28 @@ find-block → (λcounts need.
     if (empty? cs)
     then [i, 0]
     else
-      next → (⊕ acc (head cs))
-      if (≼ need next)
-      then [i, (⊖ need acc)]
-      else (go (tail cs) next (⊕ i 1)))
+      next → (+ acc (head cs))
+      if (<= need next)
+      then [i, (- need acc)]
+      else (go (tail cs) next (+ i 1)))
   (go counts 0 0))
 
 ; Sequential scan inside one block (used by the trial-division version).
 find-in-block → (λb k.
-  lo → (⊗ b block-size)
-  hi → (⊕ lo block-size)
+  lo → (* b block-size)
+  hi → (+ lo block-size)
   go → (λi k.
-    if (≽ i hi)
+    if (>= i hi)
     then 0
-    else if (≡ k 0)
-    then (⊖ i 1)
-    else (go (⊕ i 1) (if (is-prime i) then (⊖ k 1) else k)))
-  (go (if (≺ lo 2) then 2 else lo) k))
+    else if (== k 0)
+    then (- i 1)
+    else (go (+ i 1) (if (is-prime i) then (- k 1) else k)))
+  (go (if (< lo 2) then 2 else lo) k))
 
 ; Primes up to `limit`, newest first; the order is irrelevant for sieving.
 base-primes → (λlimit.
   go → (λi acc.
-    if (≺ limit i)
+    if (< limit i)
     then acc
-    else (go (⊕ i 2) (if (is-prime i) then (cons i acc) else acc)))
+    else (go (+ i 2) (if (is-prime i) then (cons i acc) else acc)))
   (go 3 [2]))

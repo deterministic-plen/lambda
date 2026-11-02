@@ -1,26 +1,26 @@
 ; Benchmark-only wrapper: the sequential nth-prime algorithm, repeated 3 times
 ; so process startup is amortized.  Output is the sum of the three results.
 nth-prime → (λtarget.
-  if (≡ target 1)
+  if (== target 1)
   then 2
   else
     find → (λnum count t.
       check → (λd.
-        if (≺ num (⊗ d d))
+        if (< num (* d d))
         then
-          if (≡ (⊕ count 1) t)
+          if (== (+ count 1) t)
           then num
-          else (find (⊕ num 2) (⊕ count 1) t)
+          else (find (+ num 2) (+ count 1) t)
         else
-          if (≡ 0 (⊙ num d))
-          then (find (⊕ num 2) count t)
-          else (check (⊕ d 2)))
+          if (== 0 (% num d))
+          then (find (+ num 2) count t)
+          else (check (+ d 2)))
       (check 3))
     (find 3 1 target))
 
 run → (λk.
-  if (≡ k 0)
+  if (== k 0)
   then 0
-  else (⊕ (nth-prime 670000) (run (⊖ k 1))))
+  else (+ (nth-prime 670000) (run (- k 1))))
 
 (run 3)

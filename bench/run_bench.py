@@ -165,6 +165,16 @@ def median_time(exe: str, mode: str, reps: int, threads: int,
     }
 
 
+def run_capture(cmd, timeout: int = 600):
+    start = time.perf_counter()
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=timeout)
+    elapsed = time.perf_counter() - start
+    if p.returncode != 0:
+        raise RuntimeError(f"{cmd[0]} exited {p.returncode}:\n{p.stderr}")
+    return p.stdout, elapsed
+
+
 def main() -> int:
     os.makedirs(BUILD, exist_ok=True)
     # Check that native builds exist; Lambda variants are built per config.
@@ -274,13 +284,58 @@ def main() -> int:
     ])
     print(array_table)
 
+    # Pure-Lambda bigint: F(1,000,000).  Python's built-in bigint is the
+    # available big-number reference on this machine (GMP/Boost not installed).
+    print()
+    bigint_exe = os.path.join(BUILD, "lam_bigint")
+    build = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "lambda.py"),
+         os.path.join(ROOT, "examples", "bigint_fib1m.lambda"),
+         "-o", bigint_exe],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    if build.returncode != 0:
+        raise RuntimeError("bigint example build failed:\n" + build.stderr)
+    if os.name == "nt" and not bigint_exe.lower().endswith(".exe"):
+        bigint_exe += ".exe"
+    py_ref = [sys.executable, os.path.join(BENCH, "fib1m_ref.py")]
+
+    lam_out, _ = run_capture([bigint_exe])
+    py_out, _ = run_capture(py_ref)
+    if lam_out != py_out:
+        raise RuntimeError("F(1,000,000) output differs from Python reference")
+    ref_digits = len(lam_out.strip())
+    run_capture([bigint_exe])  # warm-up
+    run_capture(py_ref)
+    lam_samples = [run_capture([bigint_exe])[1] for _ in range(3)]
+    py_samples = [run_capture(py_ref)[1] for _ in range(3)]
+    lam_t = statistics.median(lam_samples)
+    py_t = statistics.median(py_samples)
+    bigint_row = {
+        "n": 1_000_000,
+        "digits": ref_digits,
+        "lambda_s": lam_t,
+        "python_s": py_t,
+        "lambda_samples_s": lam_samples,
+        "python_samples_s": py_samples,
+    }
+    bigint_table = "\n".join([
+        "| bigint | Lambda | Python (C bigint) | Lambda / Python |",
+        "|---|---:|---:|---:|",
+        f"| F(1,000,000), {ref_digits} digits | {lam_t * 1000:.1f} ms | "
+        f"{py_t * 1000:.1f} ms | {lam_t / py_t:.2f}x |",
+    ])
+    print(bigint_table)
+
     with open(os.path.join(BENCH, "results.json"), "w", encoding="utf-8") as f:
         json.dump({"metadata": metadata, "results": results,
-                   "newton": newton_row, "array": array_row}, f, indent=2)
+                   "newton": newton_row, "array": array_row,
+                   "bigint": bigint_row}, f, indent=2)
     with open(os.path.join(BENCH, "results.md"), "w", encoding="utf-8") as f:
         f.write("# Lambda benchmark results\n\n")
         f.write(f"CPU: {metadata['cpu']} ({metadata['logical_processors']} logical)\n\n")
-        f.write(table + "\n\n" + newton_table + "\n\n" + array_table + "\n")
+        f.write(table + "\n\n" + newton_table + "\n\n" + array_table + "\n\n"
+                + bigint_table + "\n")
     print("\nWrote bench/results.json and bench/results.md")
     return 0
 

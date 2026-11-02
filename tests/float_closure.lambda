@@ -1,3 +1,3 @@
-make → (λc: Float. (λx. (⊗ x c)))
+make → (λc: Float. (λx. (* x c)))
 f → (make 2.0)
 (map f [1.0, 2.0, 3.0])

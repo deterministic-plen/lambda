@@ -1,0 +1,3 @@
+f → (λc. (* c 10))
+a → (arrayi-pmap-chunk f 10 3)
+[(arrayi-get a 0), (arrayi-get a 1), (arrayi-get a 2), (arrayi-get a 3)]

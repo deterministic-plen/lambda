@@ -1,4 +1,4 @@
-f → (λx. (⊗ x (⊕ x 1)))
+f → (λx. (* x (+ x 1)))
 a → (arrayi-pmap f 5)
 
 [

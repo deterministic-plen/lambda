@@ -1,1 +1,1 @@
-(√ (int->float 16))
+(sqrt (int->float 16))

@@ -22,7 +22,7 @@ semantics now.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from ast import App, Block, Def, If, Lam, Lit, Loc, Node, Var
 from errors import SyntaxErr
@@ -42,7 +42,7 @@ PRIMITIVES = {
     "arrayi-get", "arrayi-set", "arrayi-length", "arrayi-clone",
     "arrayb-get", "arrayb-set", "arrayb-length", "arrayb-clone",
     "arrayf-get-ro", "arrayi-get-ro", "arrayb-get-ro",
-    "arrayi-pmap",
+    "arrayi-pmap", "arrayi-pmap-chunk",
     # strings
     "str->int", "int->str", "str->list", "str-len", "str-append",
     "read-file",
@@ -89,6 +89,7 @@ OP_CANON = {
     "arrayb-length": "arrayb_length", "arrayb-clone": "arrayb_clone",
     "arrayf-get-ro": "arrayf_get_ro", "arrayi-get-ro": "arrayi_get_ro",
     "arrayb-get-ro": "arrayb_get_ro", "arrayi-pmap": "arrayi_pmap",
+    "arrayi-pmap-chunk": "arrayi_pmap_chunk",
     "str->int": "str_to_int", "int->str": "int_to_str",
     "str->list": "str_to_list", "str-len": "str_len",
     "str-append": "str_append", "read-file": "read_file",
@@ -126,6 +127,7 @@ class Parser:
         self.tokens = tokens
         self.pos = 0
         self.legacy_used = False
+        self.contexts: List[Tuple[str, Loc]] = []
 
     # -- token helpers ----------------------------------------------------
     def peek(self, offset: int = 0) -> Token:
@@ -147,10 +149,26 @@ class Parser:
     def expect(self, kind: str, value: str | None = None, what: str = "") -> Token:
         tok = self.peek()
         if tok.kind != kind or (value is not None and tok.value != value):
-            got = "end of input" if tok.kind == "eof" else f"'{tok.value}'"
             want = what or (value if value is not None else kind)
-            raise SyntaxErr(f"expected {want}, got {got}", tok.loc)
+            if tok.kind == "eof":
+                raise SyntaxErr(
+                    f"expected {want}, but the file ended before it"
+                    + self.context_suffix(), tok.loc)
+            raise SyntaxErr(f"expected {want}, got '{tok.value}'", tok.loc)
         return self.pop()
+
+    def push_context(self, label: str, loc: Loc) -> None:
+        self.contexts.append((label, loc))
+
+    def pop_context(self) -> None:
+        self.contexts.pop()
+
+    def context_suffix(self) -> str:
+        if not self.contexts:
+            return ""
+        label, loc = self.contexts[-1]
+        return (f" (while parsing {label} starting at "
+                f"line {loc.line}, column {loc.col})")
 
     def at_definition_start(self) -> bool:
         tok = self.peek()
@@ -201,6 +219,15 @@ class Parser:
                     "included files must contain definitions only "
                     f"(found '{tok.value}')", tok.loc)
             return Block(defs, None, start)
+        if self.peek().kind == "eof":
+            if defs:
+                raise SyntaxErr(
+                    "the program ends after its definitions; add a final "
+                    "expression (definitions-only files are only valid as "
+                    "includes)", self.peek().loc)
+            raise SyntaxErr(
+                "the program is empty or ends after its includes; add a final "
+                "expression", self.peek().loc)
         body = self.parse_expr()
         if self.peek().kind != "eof":
             tok = self.peek()
@@ -219,6 +246,15 @@ class Parser:
             self.expect("arrow", what="'→'")
             value = self.parse_definition_value()
             defs.append(Def(name_tok.value, value, name_tok.loc))
+        if self.peek().kind == "eof":
+            where = self.context_suffix()
+            if defs:
+                raise SyntaxErr(
+                    "this block ends after its definitions; add a final "
+                    "expression" + where, self.peek().loc)
+            raise SyntaxErr(
+                "expected an expression, but the file ended" + where,
+                self.peek().loc)
         body = self.parse_expr()
         return Block(defs, body, start)
 
@@ -246,10 +282,16 @@ class Parser:
     # -- individual forms -------------------------------------------------
     def parse_lambda(self, parallel: bool = False) -> Lam:
         start = self.pop().loc  # λ, λp or \
+        self.push_context("lambda expression", start)
         params: List[str] = []
         annotations: List[Optional[str]] = []
         while not self.check("punct", "."):
             tok = self.peek()
+            if tok.kind == "eof":
+                raise SyntaxErr(
+                    "the lambda parameter list ended at the file end; "
+                    "expected '.' followed by the body" + self.context_suffix(),
+                    tok.loc)
             if tok.kind != "ident":
                 raise SyntaxErr(
                     f"expected a parameter name or '.', got '{tok.value}'", tok.loc)
@@ -263,6 +305,7 @@ class Parser:
             raise SyntaxErr("lambda needs at least one parameter", start)
         self.expect("punct", ".")
         body = self.parse_expr()
+        self.pop_context()
         lam = Lam(params, body, start)
         lam.param_annotations = annotations
         lam.is_parallel = parallel
@@ -284,15 +327,18 @@ class Parser:
 
     def parse_if(self) -> If:
         start = self.pop().loc  # if
+        self.push_context("if expression", start)
         cond = self.parse_expr()
         self.expect("keyword", "then", "'then'")
         then = self.parse_expr()
         self.expect("keyword", "else", "'else'")
         else_ = self.parse_expr()
+        self.pop_context()
         return If(cond, then, else_, start)
 
     def parse_let(self, keyword: str) -> Block:
         start = self.pop().loc
+        self.push_context("let expression", start)
         if keyword != "let":
             self.legacy_used = True
         name_tok = self.expect("ident", what="a definition name")
@@ -301,6 +347,7 @@ class Parser:
         value = self.parse_expr()
         self.expect("keyword", "in", "'in'")
         body = self.parse_expr()
+        self.pop_context()
         return Block([Def(name_tok.value, value, name_tok.loc)], body, start)
 
     def parse_application(self) -> Node:
@@ -323,8 +370,10 @@ class Parser:
 
     def parse_list(self) -> Node:
         start = self.expect("punct", "[").loc
+        self.push_context("list or comprehension", start)
         if self.check("punct", "]"):
             self.pop()
+            self.pop_context()
             return Var("nil", start)
 
         first = self.parse_expr()
@@ -340,6 +389,7 @@ class Parser:
                     f"expected ']' after comprehension source, got '{tok.value}'",
                     tok.loc)
             self.pop()
+            self.pop_context()
             fn = "pmap" if marker.kind == "ppipe" else "map"
             body_lam = Lam([name_tok.value], first, first.loc)
             return App(Var(fn, marker.loc), [body_lam, source], start)
@@ -348,6 +398,7 @@ class Parser:
             self.pop()
             hi = self.parse_expr()
             self.expect("punct", "]", "']'")
+            self.pop_context()
             return App(Var("range", start), [first, hi], start)
 
         elements = [first]
@@ -355,6 +406,7 @@ class Parser:
             self.pop()
             elements.append(self.parse_expr())
         self.expect("punct", "]", "']'")
+        self.pop_context()
         expr: Node = Var("nil", start)
         for el in reversed(elements):
             expr = App(Var("cons", start), [el, expr], start)
@@ -364,9 +416,11 @@ class Parser:
         tok = self.peek()
 
         if tok.kind == "punct" and tok.value == "(":
-            self.pop()
+            start = self.pop().loc
+            self.push_context("parenthesized expression", start)
             expr = self.parse_expr()
             self.expect("punct", ")", "')'")
+            self.pop_context()
             return expr
         if tok.kind == "punct" and tok.value == "[":
             return self.parse_list()
@@ -400,7 +454,9 @@ class Parser:
             return Var(tok.value, tok.loc)
 
         if tok.kind == "eof":
-            raise SyntaxErr("unexpected end of input", tok.loc)
+            raise SyntaxErr(
+                "expected an expression, but the file ended"
+                + self.context_suffix(), tok.loc)
         raise SyntaxErr(f"expected an expression, got '{tok.value}'", tok.loc)
 
 

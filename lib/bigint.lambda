@@ -1,0 +1,193 @@
+; Pure-Lambda arbitrary-precision unsigned integers.
+;
+; Representation: one arrayi per number.
+;   a[0] = number of limbs
+;   a[1 .. n] = little-endian base-1e9 limbs
+; Unused capacity is zero.  Operations return fresh arrays; inputs are read-only.
+; All limb products fit in i64 because (1e9-1)^2 plus a carry is < 1e18.
+
+base → 1000000000
+karatsuba-cutoff → 24
+
+bi-zero → (λcap. (arrayi (+ cap 1) 0))
+bi-len → (λa. (arrayi-get a 0))
+bi-get → (λa i. (arrayi-get a (+ i 1)))
+bi-set → (λa i v. (arrayi-set a (+ i 1) v))
+bi-set-len → (λa n. (arrayi-set a 0 n))
+
+bi-trim → (λa n.
+  if (== n 0)
+  then (bi-set-len a 0)
+  else if (== 0 (bi-get a (- n 1)))
+  then (bi-trim a (- n 1))
+  else (bi-set-len a n))
+
+bi-from-int → (λcap x.
+  if (== x 0)
+  then (bi-zero cap)
+  else
+    r → (bi-zero cap)
+    (bi-set-len (bi-set r 0 x) 1))
+
+bi-add → (λa b cap.
+  al → (bi-len a)
+  bl → (bi-len b)
+  n → (if (> al bl) then al else bl)
+  go → (λi carry r.
+    if (>= i n)
+    then
+      if (== carry 0)
+      then (bi-set-len r n)
+      else (bi-set-len (bi-set r n carry) (+ n 1))
+    else
+      av → (if (< i al) then (bi-get a i) else 0)
+      bv → (if (< i bl) then (bi-get b i) else 0)
+      s → (+ av (+ bv carry))
+      (go (+ i 1) (/ s base) (bi-set r i (% s base))))
+  (go 0 0 (bi-zero cap)))
+
+bi-sub → (λa b cap.
+  al → (bi-len a)
+  bl → (bi-len b)
+  go → (λi borrow r.
+    if (>= i al)
+    then (bi-trim r al)
+    else
+      av → (bi-get a i)
+      bv → (if (< i bl) then (bi-get b i) else 0)
+      d → (- (- av bv) borrow)
+      if (< d 0)
+      then (go (+ i 1) 1 (bi-set r i (+ d base)))
+      else (go (+ i 1) 0 (bi-set r i d)))
+  (go 0 0 (bi-zero cap)))
+
+bi-slice → (λa start count cap.
+  go → (λi r.
+    if (>= i count)
+    then (bi-trim r count)
+    else (go (+ i 1) (bi-set r i (bi-get a (+ start i)))))
+  (go 0 (bi-zero cap)))
+
+bi-carry-add → (λr k carry.
+  if (== carry 0)
+  then r
+  else
+    cur → (+ (bi-get r k) carry)
+    (bi-carry-add (bi-set r k (% cur base)) (+ k 1) (/ cur base)))
+
+bi-add-range → (λa aoff alen b boff blen cap.
+  n → (if (> alen blen) then alen else blen)
+  go → (λi carry r.
+    if (>= i n)
+    then
+      if (== carry 0)
+      then (bi-set-len r n)
+      else (bi-set-len (bi-set r n carry) (+ n 1))
+    else
+      av → (if (< i alen) then (bi-get a (+ aoff i)) else 0)
+      bv → (if (< i blen) then (bi-get b (+ boff i)) else 0)
+      s → (+ av (+ bv carry))
+      (go (+ i 1) (/ s base) (bi-set r i (% s base))))
+  (go 0 0 (bi-zero cap)))
+
+bi-mul-school-range → (λa aoff alen b boff blen cap.
+  outer → (λi r.
+    if (>= i alen)
+    then (bi-trim r (+ alen blen))
+    else
+      inner → (λj carry r.
+        if (>= j blen)
+        then (bi-carry-add r (+ i blen) carry)
+        else
+          k → (+ i j)
+          cur → (+ (bi-get r k)
+                   (+ (* (bi-get a (+ aoff i)) (bi-get b (+ boff j))) carry))
+          (inner (+ j 1) (/ cur base) (bi-set r k (% cur base))))
+      (outer (+ i 1) (inner 0 0 r)))
+  (outer 0 (bi-zero cap)))
+
+bi-add-shift → (λdst src shift.
+  sl → (bi-len src)
+  prop → (λr k carry.
+    if (== carry 0)
+    then r
+    else
+      cur → (+ (bi-get r k) carry)
+      (prop (bi-set r k (% cur base)) (+ k 1) (/ cur base)))
+  go → (λi carry r.
+    if (>= i sl)
+    then (prop r (+ shift sl) carry)
+    else
+      k → (+ shift i)
+      cur → (+ (bi-get r k) (+ (bi-get src i) carry))
+      (go (+ i 1) (/ cur base) (bi-set r k (% cur base))))
+  (go 0 0 dst))
+
+bi-mul-range → (λa aoff alen b boff blen cap.
+  mn → (if (< alen blen) then alen else blen)
+  if (< mn karatsuba-cutoff)
+  then (bi-mul-school-range a aoff alen b boff blen cap)
+  else
+    m → (/ mn 2)
+    ah → (- alen m)
+    bh → (- blen m)
+    z0 → (bi-mul-range a aoff m b boff m (+ (+ m m) 2))
+    z2 → (bi-mul-range a (+ aoff m) ah b (+ boff m) bh (+ (+ ah bh) 2))
+    sm → (if (> m ah) then m else ah)
+    sn → (if (> m bh) then m else bh)
+    sa → (bi-add-range a aoff m a (+ aoff m) ah (+ sm 2))
+    sb → (bi-add-range b boff m b (+ boff m) bh (+ sn 2))
+    z1 → (bi-mul-range sa 0 (bi-len sa) sb 0 (bi-len sb)
+                      (+ (+ (bi-len sa) (bi-len sb)) 2))
+    z1a → (bi-sub z1 z0 (bi-len z1))
+    z1b → (bi-sub z1a z2 (bi-len z1a))
+    r → (bi-zero cap)
+    r1 → (bi-add-shift r z0 0)
+    r2 → (bi-add-shift r1 z1b m)
+    r3 → (bi-add-shift r2 z2 (+ m m))
+    (bi-trim r3 cap))
+
+bi-mul → (λa b cap.
+  (bi-mul-range a 0 (bi-len a) b 0 (bi-len b) cap))
+
+bi-fib → (λn cap.
+  if (== n 0)
+  then (bi-from-int cap 0)
+  else
+    a → (bi-from-int cap 0)
+    b → (bi-from-int cap 1)
+    high → (λp. if (<= (* p 2) n) then (high (* p 2)) else p)
+    p0 → (high 1)
+    go → (λ p a b.
+      if (== p 0)
+      then a
+      else
+        bit → (% (/ n p) 2)
+        t → (bi-sub (bi-add b b cap) a cap)
+        c → (bi-mul a t cap)
+        d → (bi-add (bi-mul a a cap) (bi-mul b b cap) cap)
+        if (== bit 0)
+        then (go (/ p 2) c d)
+        else (go (/ p 2) d (bi-add c d cap)))
+    (go p0 a b))
+
+bi-pad9 → (λs.
+  go → (λs k.
+    if (>= k 9)
+    then s
+    else (go (str-append "0" s) (+ k 1)))
+  (go s (str-len s)))
+
+bi-print → (λa.
+  n → (bi-len a)
+  if (== n 0)
+  then (print "0")
+  else
+    first → (print (int->str (bi-get a (- n 1))))
+    go → (λi.
+      if (< i 0)
+      then ""
+      else
+        s → (print (bi-pad9 (int->str (bi-get a i))))
+        (go (- i 1)))
+    (go (- n 2)))

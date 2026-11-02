@@ -1,2 +1,2 @@
-square → (λx. (⊗ x x))
+square → (λx. (* x x))
 (square 3.0)

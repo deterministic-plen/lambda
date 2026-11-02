@@ -1,2 +1,2 @@
-sumf → (λxs: [Float]. (∑ xs))
+sumf → (λxs: [Float]. (sum xs))
 (sumf [1.0, 2.0, 3.0])

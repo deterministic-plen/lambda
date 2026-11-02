@@ -1519,6 +1519,64 @@ Value *lambda_op_arrayi_pmap(Value *f, Value *nv) {
     return lambda_arrayi_pmap(f, n);
 }
 
+Value *lambda_arrayi_pmap_chunk(Value *f, int64_t n, int64_t chunk) {
+    if (n < 0) fail("array size must be non-negative");
+    if (chunk <= 0) fail("arrayi-pmap-chunk chunk size must be positive");
+    int64_t chunks = (n + chunk - 1) / chunk;
+    Value *out = lambda_arrayi_new(chunks, 0);
+    int64_t threads = pmap_requested_threads();
+    if (threads > LAMBDA_MAX_THREADS) threads = LAMBDA_MAX_THREADS;
+    if (threads > chunks) threads = chunks;
+    if (threads <= 1 || chunks <= 1) {
+        int64_t *data = (int64_t *)out->p;
+        for (int64_t i = 0; i < chunks; i++) {
+            Value *r = apply_owned(f, lambda_box_int(i));
+            data[i] = lambda_get_int(r);
+            lambda_release(r);
+        }
+        lambda_release(f);
+        return out;
+    }
+
+    ArrayPMapJob job;
+    job.f = f;
+    job.out = out;
+    job.n = chunks;
+    job.next = 0;
+
+#ifdef _WIN32
+    HANDLE handles[LAMBDA_MAX_THREADS];
+    int created = 0;
+    for (int64_t i = 1; i < threads; i++) {
+        HANDLE h = CreateThread(NULL, 0, array_pmap_thread_main, &job, 0, NULL);
+        if (h) handles[created++] = h;
+    }
+    array_pmap_run(&job);
+    if (created > 0) WaitForMultipleObjects((DWORD)created, handles, TRUE, INFINITE);
+    for (int i = 0; i < created; i++) CloseHandle(handles[i]);
+#else
+    pthread_t th[LAMBDA_MAX_THREADS];
+    int created = 0;
+    for (int64_t i = 1; i < threads; i++) {
+        if (pthread_create(&th[created], NULL, array_pmap_thread_main, &job) == 0) {
+            created++;
+        }
+    }
+    array_pmap_run(&job);
+    for (int i = 0; i < created; i++) pthread_join(th[i], NULL);
+#endif
+    lambda_release(f);
+    return out;
+}
+
+Value *lambda_op_arrayi_pmap_chunk(Value *f, Value *nv, Value *cv) {
+    int64_t n = as_int(nv);
+    int64_t chunk = as_int(cv);
+    lambda_release(nv);
+    lambda_release(cv);
+    return lambda_arrayi_pmap_chunk(f, n, chunk);
+}
+
 /* ------------------------------------------------------------------ */
 /* curried primitive closures                                          */
 /* ------------------------------------------------------------------ */
@@ -1855,6 +1913,8 @@ declare i64 @lambda_arrayb_length(%Value*)
 declare %Value* @lambda_arrayb_clone(%Value*)
 declare %Value* @lambda_arrayi_pmap(%Value*, i64)
 declare %Value* @lambda_op_arrayi_pmap(%Value*, %Value*)
+declare %Value* @lambda_arrayi_pmap_chunk(%Value*, i64, i64)
+declare %Value* @lambda_op_arrayi_pmap_chunk(%Value*, %Value*, %Value*)
 
 declare %Value* @lambda_op_arrayf_new(%Value*, %Value*)
 declare %Value* @lambda_op_arrayf_get(%Value*, %Value*)

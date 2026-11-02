@@ -1,2 +1,2 @@
-square → (λx: Float. (⊗ x x))
+square → (λx: Float. (* x x))
 (square 3.0)

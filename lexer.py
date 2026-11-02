@@ -195,11 +195,13 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
             i = j
             continue
 
-        # Parallel lambda marker ``λp`` (requires whitespace after the p, so
-        # ``λp. p`` is still an ordinary lambda whose parameter is named p).
-        if source.startswith("λp", i) and (i + 2 >= n or source[i + 2].isspace()):
-            tokens.append(Token("lambda_par", "λp", loc()))
-            advance("λp")
+        # Parallel lambda marker ``\p``/``λp`` (requires whitespace after the p,
+        # so ``\p. p`` is still an ordinary lambda whose parameter is named p).
+        if ((source.startswith("\\p", i) or source.startswith("λp", i))
+                and (i + 2 >= n or source[i + 2].isspace())):
+            marker = source[i:i + 2]
+            tokens.append(Token("lambda_par", marker, loc()))
+            advance(marker)
             i += 2
             continue
 
@@ -224,16 +226,18 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
             i += 2
             continue
 
-        if ch == LARROW:
-            tokens.append(Token("larrow", ch, loc()))
-            advance(ch)
-            i += 1
+        if ch == LARROW or (ch == "<" and i + 1 < n and source[i + 1] == "-"):
+            text = "<-" if ch == "<" else ch
+            tokens.append(Token("larrow", text, loc()))
+            advance(text)
+            i += len(text)
             continue
 
-        if ch == "∥":
-            tokens.append(Token("ppipe", ch, loc()))
-            advance(ch)
-            i += 1
+        if ch == "∥" or (ch == "|" and i + 1 < n and source[i + 1] == "|"):
+            text = "||" if ch == "|" else ch
+            tokens.append(Token("ppipe", text, loc()))
+            advance(text)
+            i += len(text)
             continue
 
         if ch == "|":

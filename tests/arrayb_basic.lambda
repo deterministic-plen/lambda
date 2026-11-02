@@ -1,12 +1,12 @@
 fill → (λa i.
-  if (≽ i 256)
+  if (>= i 256)
   then a
-  else (fill (arrayb-set a i i) (⊕ i 1)))
+  else (fill (arrayb-set a i i) (+ i 1)))
 
 sum → (λa i acc.
-  if (≽ i 256)
+  if (>= i 256)
   then acc
-  else (sum a (⊕ i 1) (⊕ acc (arrayb-get a i))))
+  else (sum a (+ i 1) (+ acc (arrayb-get a i))))
 
 a → (fill (arrayb 256 0) 0)
 (sum a 0 0)

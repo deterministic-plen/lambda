@@ -1,18 +1,18 @@
 ; Fixed-iteration Newton for sqrt(2), repeated 1,000,000 times.
 ; Each solve does exactly 100 Newton steps, so this measures f64 code and
 ; recursive-loop overhead rather than convergence behaviour.
-step → (λx. (⊖ x (⊘ (⊖ (⊗ x x) 2.0) (⊗ 2.0 x))))
+step → (λx. (- x (/ (- (* x x) 2.0) (* 2.0 x))))
 
 iterate → (λn x.
-  if (≡ n 0)
+  if (== n 0)
   then x
-  else (iterate (⊖ n 1) (step x)))
+  else (iterate (- n 1) (step x)))
 
 solve → (λx. (iterate 100 x))
 
 run → (λk acc.
-  if (≡ k 0)
+  if (== k 0)
   then acc
-  else (run (⊖ k 1) (⊕ acc (solve 2.0))))
+  else (run (- k 1) (+ acc (solve 2.0))))
 
 (run 1000000 0.0)

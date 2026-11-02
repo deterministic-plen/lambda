@@ -1,5 +1,5 @@
 make → (λbase.
-  addfirst → (λx. (⊕ x (head base)))
+  addfirst → (λx. (+ x (head base)))
   (pmap addfirst [1, 2, 3]))
 
 (make [10, 20])

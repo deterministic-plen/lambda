@@ -125,15 +125,25 @@ static uint64_t block_mask(int64_t b, const int64_t *base, int64_t nbase) {
     return mask;
 }
 
+#define SIEVE_CHUNK 32
+
 typedef struct {
-    int64_t *counts;
+    int64_t *chunk_counts;
     const int64_t *base;
     int64_t nbase;
+    int64_t blocks;
 } SieveCtx;
 
-static void sieve_work(void *ctx, int64_t b) {
+static void sieve_work(void *ctx, int64_t chunk) {
     SieveCtx *c = (SieveCtx *)ctx;
-    c->counts[b] = __builtin_popcountll(block_mask(b, c->base, c->nbase));
+    int64_t start = chunk * SIEVE_CHUNK;
+    int64_t stop = start + SIEVE_CHUNK;
+    if (stop > c->blocks) stop = c->blocks;
+    int64_t total = 0;
+    for (int64_t b = start; b < stop; ++b) {
+        total += __builtin_popcountll(block_mask(b, c->base, c->nbase));
+    }
+    c->chunk_counts[chunk] = total;
 }
 
 __attribute__((noinline)) static int64_t nth_prime_sieve(int64_t target) {
@@ -145,30 +155,41 @@ __attribute__((noinline)) static int64_t nth_prime_sieve(int64_t target) {
         if (is_prime_i64(i)) base[nbase++] = i;
     }
     int64_t blocks = (limit + SIEVE_BLOCK - 1) / SIEVE_BLOCK;
-    int64_t *counts = (int64_t *)calloc((size_t)blocks, sizeof(int64_t));
-    SieveCtx ctx = {counts, base, nbase};
-    bench_parallel(blocks, bench_threads(), sieve_work, &ctx);
+    int64_t chunks = (blocks + SIEVE_CHUNK - 1) / SIEVE_CHUNK;
+    int64_t *chunk_counts = (int64_t *)calloc((size_t)chunks, sizeof(int64_t));
+    SieveCtx ctx = {chunk_counts, base, nbase, blocks};
+    bench_parallel(chunks, bench_threads(), sieve_work, &ctx);
 
-    int64_t acc = 0, block = 0;
-    for (; block < blocks; ++block) {
-        int64_t c = counts[block];
+    int64_t acc = 0, chunk = 0;
+    for (; chunk < chunks; ++chunk) {
+        int64_t c = chunk_counts[chunk];
         if (target <= acc + c) break;
         acc += c;
     }
-    int64_t k = target - acc;
+    int64_t need = target - acc;
+    int64_t start = chunk * SIEVE_CHUNK;
+    int64_t stop = start + SIEVE_CHUNK;
+    if (stop > blocks) stop = blocks;
+    int64_t block = start;
+    for (; block < stop; ++block) {
+        int64_t c = __builtin_popcountll(block_mask(block, base, nbase));
+        if (need <= c) break;
+        need -= c;
+    }
+    int64_t k = need;
     uint64_t m = block_mask(block, base, nbase);
     for (int i = 0; i < 64; ++i) {
         if (m & (1ULL << i)) {
             if (--k == 0) {
                 int64_t result = block * SIEVE_BLOCK + i;
                 free(base);
-                free(counts);
+                free(chunk_counts);
                 return result;
             }
         }
     }
     free(base);
-    free(counts);
+    free(chunk_counts);
     return 0;
 }
 

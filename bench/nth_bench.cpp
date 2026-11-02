@@ -149,30 +149,46 @@ __attribute__((noinline)) int64_t nth_prime_sieve(int64_t target) {
         if (is_prime(i)) base.push_back(i);
     }
     int64_t blocks = (limit + SIEVE_BLOCK - 1) / SIEVE_BLOCK;
-    std::vector<int64_t> counts(static_cast<size_t>(blocks));
+    constexpr int64_t CHUNK = 32;
+    int64_t chunks = (blocks + CHUNK - 1) / CHUNK;
+    std::vector<int64_t> chunk_counts(static_cast<size_t>(chunks));
     std::atomic<int64_t> next{0};
     auto worker = [&]() {
         for (;;) {
-            int64_t i = next.fetch_add(1, std::memory_order_relaxed);
-            if (i >= blocks) break;
-            counts[static_cast<size_t>(i)] =
-                __builtin_popcountll(block_mask(i, base));
+            int64_t c = next.fetch_add(1, std::memory_order_relaxed);
+            if (c >= chunks) break;
+            int64_t start = c * CHUNK;
+            int64_t stop = std::min(start + CHUNK, blocks);
+            int64_t total = 0;
+            for (int64_t b = start; b < stop; ++b) {
+                total += __builtin_popcountll(block_mask(b, base));
+            }
+            chunk_counts[static_cast<size_t>(c)] = total;
         }
     };
     int threads = bench_threads();
-    if (threads > blocks) threads = static_cast<int>(blocks);
+    if (threads > chunks) threads = static_cast<int>(chunks);
     std::vector<std::thread> pool;
     for (int i = 1; i < threads; ++i) pool.emplace_back(worker);
     worker();
     for (auto &t : pool) t.join();
 
-    int64_t acc = 0, block = 0;
-    for (; block < blocks; ++block) {
-        int64_t c = counts[static_cast<size_t>(block)];
+    int64_t acc = 0, chunk = 0;
+    for (; chunk < chunks; ++chunk) {
+        int64_t c = chunk_counts[static_cast<size_t>(chunk)];
         if (target <= acc + c) break;
         acc += c;
     }
-    int64_t k = target - acc;
+    int64_t need = target - acc;
+    int64_t start = chunk * CHUNK;
+    int64_t stop = std::min(start + CHUNK, blocks);
+    int64_t block = start;
+    for (; block < stop; ++block) {
+        int64_t c = __builtin_popcountll(block_mask(block, base));
+        if (need <= c) break;
+        need -= c;
+    }
+    int64_t k = need;
     uint64_t m = block_mask(block, base);
     for (int i = 0; i < 64; ++i) {
         if (m & (1ULL << i)) {

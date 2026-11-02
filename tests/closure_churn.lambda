@@ -1,5 +1,5 @@
 apply-n → (λn acc.
-  if (≡ n 0)
+  if (== n 0)
   then (acc 0)
-  else (apply-n (⊖ n 1) (λx. (⊕ x n))))
+  else (apply-n (- n 1) (λx. (+ x n))))
 (apply-n 100000 (λx. x))

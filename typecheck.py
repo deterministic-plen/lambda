@@ -444,6 +444,8 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TARRAYB, TINT], TINT))
     if name == "arrayi-pmap":
         return mono(tfun([tfun([TINT], TINT), TINT], TARRAYI))
+    if name == "arrayi-pmap-chunk":
+        return mono(tfun([tfun([TINT], TINT), TINT, TINT], TARRAYI))
     if name == "arrayf-set":
         return mono(tfun([TARRAYF, TINT, TFLOAT], TARRAYF))
     if name == "arrayf-length":

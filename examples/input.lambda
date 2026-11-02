@@ -1,3 +1,3 @@
 ; Compile with --input, then:  echo 41 | ./input
 n → (read-int "n: ")
-(⊕ n 1)
+(+ n 1)

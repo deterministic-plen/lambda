@@ -3,6 +3,6 @@ include "lib/list.lambda"
 [
   (length [1, 2, 3]),
   (head (reverse [1, 2, 3])),
-  (length (filter (λx. (≻ x 2)) [1, 2, 3, 4])),
-  (foldl (λa b. (⊕ a b)) 0 [1, 2, 3])
+  (length (filter (λx. (> x 2)) [1, 2, 3, 4])),
+  (foldl (λa b. (+ a b)) 0 [1, 2, 3])
 ]

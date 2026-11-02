@@ -132,6 +132,7 @@ OP_FN = {
     "arrayf_get_ro": "@lambda_op_arrayf_get", "arrayi_get_ro": "@lambda_op_arrayi_get",
     "arrayb_get_ro": "@lambda_op_arrayb_get",
     "arrayi_pmap": "@lambda_op_arrayi_pmap",
+    "arrayi_pmap_chunk": "@lambda_op_arrayi_pmap_chunk",
     "read_line": "@lambda_op_read_line",
     "read_int": "@lambda_op_read_int",
     "read_float": "@lambda_op_read_float",
@@ -237,12 +238,14 @@ class FunctionInfo:
 
 
 class FnContext:
-    __slots__ = ("ret_rep", "ret_type", "nparams")
+    __slots__ = ("ret_rep", "ret_type", "nparams", "param_reps")
 
-    def __init__(self, ret_rep: str, ret_type, nparams: int = 0) -> None:
+    def __init__(self, ret_rep: str, ret_type, nparams: int = 0,
+                 param_reps: Optional[List[str]] = None) -> None:
         self.ret_rep = ret_rep
         self.ret_type = ret_type
         self.nparams = nparams
+        self.param_reps = list(param_reps or [])
 
 
 def is_bool_type(t) -> bool:
@@ -636,7 +639,8 @@ class Compiler:
         info.generating = True
         self.builder = IRBuilder()
         self.ctx = FnContext(info.ret_rep, info.ret_type,
-                             len(info.captures) + info.arity)
+                             len(info.captures) + info.arity,
+                             info.capture_reps + info.param_reps)
         self.scope_stack = []
         self.cleanup_stack = []
         self.terminated = False
@@ -1273,7 +1277,10 @@ class Compiler:
             # enough for LLVM to emit a jump; use the stronger marker when the
             # signatures line up so self-recursion is guaranteed.
             nparams = len(info.captures) + info.arity
-            marker = "musttail" if nparams == self.ctx.nparams else "tail"
+            callee_reps = info.capture_reps + info.param_reps
+            same_sig = (nparams == self.ctx.nparams
+                        and callee_reps == self.ctx.param_reps)
+            marker = "musttail" if same_sig else "tail"
             res = self.new_reg("mt")
             self.emit_inst(f"{res} = {marker} call {ret_ty} {info.direct_name}({joined})")
             self.emit_inst(f"ret {ret_ty} {res}")
@@ -1348,6 +1355,13 @@ class Compiler:
                 raise CompileError(
                     "arrayi-pmap must be applied to a provably pure Int -> Int "
                     "function and a length", node.loc)
+            self.uses_parallel = True
+            self.check_pmap_function(args[0], node.loc)
+        if op == "arrayi_pmap_chunk":
+            if len(args) < 3:
+                raise CompileError(
+                    "arrayi-pmap-chunk must be applied to a provably pure "
+                    "Int -> Int function, a length and a chunk size", node.loc)
             self.uses_parallel = True
             self.check_pmap_function(args[0], node.loc)
         if self.dynamic:
@@ -1756,6 +1770,15 @@ class Compiler:
             res = self.new_reg()
             self.emit_inst(
                 f"{res} = call %Value* @lambda_arrayi_pmap(%Value* {f.name}, i64 {n.name})")
+            return Val(BOX, res, owned=True)
+        if op == "arrayi_pmap_chunk":
+            f = self._prim_arg(args[0], BOX, args[0].type)
+            n = self._prim_arg(args[1], I64, args[1].type)
+            chunk = self._prim_arg(args[2], I64, args[2].type)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_arrayi_pmap_chunk("
+                f"%Value* {f.name}, i64 {n.name}, i64 {chunk.name})")
             return Val(BOX, res, owned=True)
         if op in ("arrayf", "arrayi", "arrayb"):
             n = self._prim_arg(args[0], I64, args[0].type)

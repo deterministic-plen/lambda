@@ -1,5 +1,5 @@
 outer → (λn.
-  g → (λx. (⊕ x n))
+  g → (λx. (+ x n))
   h → (λy. (g y))
   (h 1))
 (outer 10)

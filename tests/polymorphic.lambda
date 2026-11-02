@@ -1,2 +1,2 @@
 id → (λx. x)
-(⊕ (id 5) (str-len (id "abc")))
+(+ (id 5) (str-len (id "abc")))

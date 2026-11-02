@@ -1,1 +1,1 @@
-(∑ (range 1 5))
+(sum (range 1 5))
