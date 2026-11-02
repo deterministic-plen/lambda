@@ -1,0 +1,2 @@
+roundtrip → (λxs. (cons (head xs) (tail xs)))
+(roundtrip [7, 8])

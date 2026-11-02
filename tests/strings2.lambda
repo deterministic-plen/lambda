@@ -1,0 +1,3 @@
+; comments and escapes
+msg → "a\nb\t\"c\""
+(str-len msg)

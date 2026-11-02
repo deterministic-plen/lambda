@@ -1,0 +1,3 @@
+include "helpers.lambda"
+
+quad → (λx. (twice (twice x)))

@@ -1,0 +1,5 @@
+make → (λn.
+  addn → (λx. (⊕ x n))
+  (pmap addn [1, 2, 3]))
+
+(make 10)

@@ -1,0 +1,57 @@
+# Fair runtime comparison
+
+This directory compares Lambda against C, C++ and Rust on the same algorithms,
+constants, iteration counts and thread counts.
+
+## Protocol
+
+* `n = 670000`, expected result `10086767`.
+* Each process performs the algorithm several times so process startup is
+  amortized.
+* One warm-up run is discarded; the median of three measured wall-clock runs is
+  reported. Process startup is included in every number.
+* No I/O inside the timed region; only the final sum is printed.
+* Parallel runs use 16 threads for all languages, or 1 thread for all
+  languages. Every implementation spawns threads per call, matching Lambda's
+  `pmap` (no persistent pool).
+* Compilers: Lambda uses clang `-O3` (driver default); C `clang -O3
+  -DNDEBUG`; C++ `clang++ -O3 -std=c++20 -DNDEBUG`; Rust
+  `rustc -C opt-level=3`.
+* The sequential C/C++ implementations mirror Lambda's recursive
+  `find`/`check` structure. Rust uses the equivalent loop because Rust does not
+  guarantee tail-call elimination.
+* The sieve uses the same 64-number, one-`uint64_t`-mask block layout and the
+  same base-prime set. The parallel versions use the same dynamic work index.
+* Newton uses `x -= (x*x - 2.0)/(2.0*x)` for exactly 100 steps, repeated
+  1,000,000 times. The output is checked at `1e-9` relative tolerance because
+  compilers may contract the expression into an FMA.
+
+## Run
+
+```powershell
+cd C:\Users\mumuj\Documents\deepseek-harness\default-workspace\lambda-rewrite
+clang -O3 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS bench/nth_bench.c -o bench/build/nth_c.exe
+clang++ -O3 -std=c++20 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS bench/nth_bench.cpp -o bench/build/nth_cpp.exe
+# rustc needs to spawn its linker; use lld-link if MSVC link.exe is unavailable:
+#   rustc -C opt-level=3 --edition 2021 bench/nth_bench.rs -o bench/build/nth_rs.exe
+#       -C linker="C:\Program Files\LLVM\bin\lld-link.exe"
+python bench/run_bench.py
+```
+
+`run_bench.py` builds the Lambda variants, runs all configurations, verifies
+every result, prints the tables and writes `results.json` / `results.md`.
+
+## Results
+
+See [results.md](results.md) for the latest table. Headline:
+
+* sequential nth-prime: Lambda ~1.01x C; C++/Rust within noise.
+* parallel trial division: Lambda ~1.00–1.02x C at 1 and 16 threads.
+* Newton f64: Lambda ~1.00x C.
+* segmented sieve: Lambda ~5.1x C single-thread, ~8.8x C at 16 threads.
+
+The sieve gap is dominated by boxed-list traversal, ~1 million allocations per
+call, and per-task pmap overhead for 176k tiny blocks. It is not an arithmetic
+gap: the same f64 operations in Newton run at parity. A matrix benchmark is
+omitted because Lambda has no mutable array representation; list-of-lists would
+measure representation overhead rather than elimination arithmetic.

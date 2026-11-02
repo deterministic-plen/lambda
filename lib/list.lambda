@@ -1,0 +1,32 @@
+; Generic list helpers.  `map` itself is a primitive.
+
+length → (λxs.
+  go → (λacc rest.
+    if (empty? rest)
+    then acc
+    else (go (⊕ acc 1) (tail rest)))
+  (go 0 xs))
+
+reverse → (λxs.
+  go → (λacc rest.
+    if (empty? rest)
+    then acc
+    else (go (cons (head rest) acc) (tail rest)))
+  (go nil xs))
+
+filter → (λ p xs.
+  if (empty? xs)
+  then nil
+  else if (p (head xs))
+  then (cons (head xs) (filter p (tail xs)))
+  else (filter p (tail xs)))
+
+foldl → (λf acc xs.
+  if (empty? xs)
+  then acc
+  else (foldl f (f acc (head xs)) (tail xs)))
+
+append → (λxs ys.
+  if (empty? xs)
+  then ys
+  else (cons (head xs) (append (tail xs) ys)))

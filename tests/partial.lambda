@@ -1,0 +1,3 @@
+add → (λx y. (⊕ x y))
+inc → (add 1)
+(inc 41)

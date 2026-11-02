@@ -1,0 +1,2 @@
+﻿loop -> (λn acc. if (≡ n 0) then acc else (loop (⊖ n 1) (⊕ acc 1)))
+(loop 5000000 0)

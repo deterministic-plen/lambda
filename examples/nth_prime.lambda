@@ -1,0 +1,21 @@
+; 670,000th prime, written with uniform arrow definitions.
+; The compiler infers that every value here is an Int and generates an
+; allocation-free unboxed loop with tail calls.
+nth-prime → (λtarget.
+  if (≡ target 1)
+  then 2
+  else
+    find → (λnum count t.
+      check → (λd.
+        if (≺ num (⊗ d d))
+        then
+          if (≡ (⊕ count 1) t)
+          then num
+          else (find (⊕ num 2) (⊕ count 1) t)
+        else if (≡ 0 (⊙ num d))
+        then (find (⊕ num 2) count t)
+        else (check (⊕ d 2)))
+      (check 3))
+    (find 3 1 target))
+
+(nth-prime 670000)

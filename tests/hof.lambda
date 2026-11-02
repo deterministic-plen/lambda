@@ -1,0 +1,3 @@
+twice → (λf x. (f (f x)))
+inc → (λx. (⊕ x 1))
+(twice inc 40)

@@ -1,0 +1,3 @@
+addf → (λx: Float. λy: Float. (⊕ x y))
+inc → (addf 1.0)
+(inc 2.5)

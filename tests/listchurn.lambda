@@ -1,0 +1,5 @@
+build → (λn acc.
+  if (≡ n 0)
+  then (empty? acc)
+  else (build (⊖ n 1) (cons n acc)))
+(build 100000 nil)

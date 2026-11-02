@@ -1,0 +1,4 @@
+f → λ x. (- (* x x) 2.0)
+f' → λ x. (* 2.0 x)
+newton_fixed → (λ self n. if (< (abs (/ (f n) (f' n))) 1e-12) then n else  (self (- n (/ (f n) (f' n)))))
+((Y newton_fixed) 2.0)

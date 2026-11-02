@@ -1,0 +1,4 @@
+; Parallel map over a range; squares are independent.
+square → (λp x. (⊗ x x))
+
+[ (square x) ∥ x ← [0..10] ]

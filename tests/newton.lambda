@@ -1,0 +1,8 @@
+sqrt-newton → (λx: Float.
+  go → (λguess i.
+    if (≡ i 0)
+    then guess
+    else (go (⊗ 0.5 (⊕ guess (⊘ x guess))) (⊖ i 1)))
+  (go x 20))
+
+(≺ (abs (⊖ (sqrt-newton 2.0) (√ 2.0))) 1e-12)

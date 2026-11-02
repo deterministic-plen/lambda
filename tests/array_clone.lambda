@@ -1,0 +1,5 @@
+a → (arrayf 3 1.0)
+b → (arrayf-clone a)
+c → (arrayf-set a 0 9.0)
+
+[(arrayf-get c 0), (arrayf-get b 0)]

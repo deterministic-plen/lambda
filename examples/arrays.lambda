@@ -1,0 +1,15 @@
+; Flat arrays: one contiguous allocation, no per-element boxes.
+; This fills 1,000,000 int64 entries and sums them.
+fill → (λa i n.
+  if (≽ i n)
+  then a
+  else (fill (arrayi-set a i i) (⊕ i 1) n))
+
+sum → (λa i n acc.
+  if (≽ i n)
+  then acc
+  else (sum a (⊕ i 1) n (⊕ acc (arrayi-get a i))))
+
+n → 1000000
+a → (fill (arrayi n 0) 0 n)
+(sum a 0 n 0)

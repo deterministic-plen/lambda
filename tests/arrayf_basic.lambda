@@ -1,0 +1,5 @@
+a → (arrayf 5 0.0)
+a2 → (arrayf-set a 2 3.5)
+a3 → (arrayf-set a2 4 1.25)
+
+[(int->float (arrayf-length a3)), (arrayf-get a3 2), (arrayf-get a3 4)]

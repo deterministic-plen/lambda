@@ -1,0 +1,2 @@
+f → (λp x. (println x))
+(f 1)

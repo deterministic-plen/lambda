@@ -1,0 +1,7 @@
+; Naive Fibonacci with a local recursive helper.
+fib → (λn.
+  go → (λa b i.
+    if (≡ i n) then a else (go b (⊕ a b) (⊕ i 1)))
+  (go 0 1 0))
+
+(fib 25)

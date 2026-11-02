@@ -1,0 +1,15 @@
+; Newton's method for square roots, checked against the hardware sqrt.
+sqrt-newton → (λx: Float.
+  go → (λguess i.
+    if (≡ i 0)
+    then guess
+    else (go (⊗ 0.5 (⊕ guess (⊘ x guess))) (⊖ i 1)))
+  (go x 20))
+
+[
+  (≺ (abs (⊖ (sqrt-newton 2.0) (√ 2.0))) 1e-12),
+  (≺ (abs (sin π)) 1e-12),
+  (≡ (cos 0.0) 1.0),
+  (≺ (abs (⊖ (exp 1.0) e)) 1e-12),
+  (≺ (abs (⊖ (ln e) 1.0)) 1e-12)
+]

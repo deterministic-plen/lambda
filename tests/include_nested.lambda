@@ -1,0 +1,2 @@
+include "lib/nested.lambda"
+(quad 10)

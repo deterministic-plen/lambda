@@ -1,0 +1,5 @@
+apply-twice → (λf x. (f (f x)))
+make-adder → (λn.
+  add-n → (λx. (⊕ x n))
+  (apply-twice add-n 5))
+(make-adder 10)

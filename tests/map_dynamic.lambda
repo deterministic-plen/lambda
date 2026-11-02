@@ -1,0 +1,3 @@
+map → (λf xs. if (empty? xs) then nil else (cons (f (head xs)) (map f (tail xs))))
+inc → (λx. (⊕ x 1))
+(map inc [1, 2, 3, 4])

@@ -1,0 +1,4 @@
+compose → (λf g. λx. (f (g x)))
+inc → (λx. (⊕ x 1))
+double → (λx. (⊗ x 2))
+((compose inc double) 20)

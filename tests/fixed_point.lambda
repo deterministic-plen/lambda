@@ -1,0 +1,9 @@
+fixed-cos → (λx: Float.
+  go → (λg i.
+    if (≡ i 0)
+    then g
+    else (go (cos g) (⊖ i 1)))
+  g → (go x 100)
+  (≺ (abs (⊖ g (cos g))) 1e-12))
+
+(fixed-cos 1.0)

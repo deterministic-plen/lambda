@@ -1,0 +1,3 @@
+strs → (λs.
+  [ (str->int s), (str-len s), (head (str->list s)) ])
+(strs "456")
