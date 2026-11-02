@@ -78,6 +78,7 @@ CASES = [
     ("arrayi_loop", "332833500\n", [], None, None),
     ("arrayb_basic", "32640\n", [], None, None),
     ("array_clone", "[9.0, 1.0]\n", [], None, None),
+    ("arrayi_pmap", "[0, 2, 6, 12, 20]\n", [], None, None),
     # includes
     ("include_basic", "42\n", [], None, None),
     ("include_nested", "40\n", [], None, None),
@@ -113,6 +114,7 @@ CASES = [
     ("include_body", None, [], "definitions only", None),
     ("pmap_impure", None, [], "pmap requires a provably pure function", None),
     ("array_pmap_impure", None, [], "pmap requires a provably pure function", None),
+    ("array_consume_reuse", None, [], "consumed by a destructive array update", None),
     ("lambda_p_impure", None, [], "λp function body must be pure", None),
     ("input_disabled", None, [], "terminal input is disabled", None),
 ]

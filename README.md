@@ -39,7 +39,7 @@ python lambda.py examples/nth_prime_sieve.lambda -o sieve
 python lambda.py tests/input_int.lambda -o ask --input
 echo 41 | ./ask
 
-python run_tests.py          # 87 regression tests
+python run_tests.py          # 89 regression tests
 ```
 
 Requirements: Python 3.10+, LLVM `clang` on `PATH`.
@@ -145,16 +145,25 @@ squarei → (λx. (⊗ x x))           ; Int -> Int
 | conversions | `int->float`, `float->int`, `str->float`, `float->str` |
 | reductions | `∑`/`sum`, `∏`/`product` (same type as the list) |
 | lists | `cons`, `head`, `tail`, `empty?`, `nil`, `map`, `pmap`, `range`, `immortalize`/`freeze` |
-| flat arrays | `arrayf`, `arrayi`, `arrayb`, `*-get`, `*-set`, `*-length`, `*-clone` |
+| flat arrays | `arrayf`, `arrayi`, `arrayb`, `*-get`, `*-get-ro`, `*-set`, `*-length`, `*-clone`, `arrayi-pmap` |
 | bit-level | `&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
 | strings | `str->int`, `int->str`, `str->list`, `str-len`, `str-append`, `read-file` |
 | IO | `print`, `println` (return their argument), `not` |
 | input (`--input`) | `read-line`, `read-int`, `read-float` |
 | fixed point | `fix`, `Y` (call-by-value, unary functions) |
 
-`print`/`println` and terminal input are the only effectful primitives.
-Division/modulo are inlined `sdiv`/`srem` for Int and `fdiv`/`frem` for Float;
-integer division by zero traps.
+`print`/`println`, terminal input, and destructive array updates are the
+effectful primitives.  Division/modulo are inlined `sdiv`/`srem` for Int and
+`fdiv`/`frem` for Float; integer division by zero traps.
+
+### Operator spellings
+
+The ASCII and Unicode arithmetic spellings are currently exact aliases — `+`
+and `⊕`, `-` and `⊖`, `*` and `⊗`, `/` and `⊘`, `%` and `⊙`, `<` and `≺`, etc.
+They do not select different implementations.  The Unicode forms are reserved
+for future distinct operations (for example matrix-aware kernels); if that
+happens they will get their own names or explicit type-directed semantics
+rather than silently changing the meaning of existing programs.
 
 ## Numbers and machine code
 
@@ -202,6 +211,10 @@ a → (arrayi 1000 0)
 (sum-squares a 0 1000 0)        ; 332833500
 ```
 
+The one-million-element version fills and sums in roughly 8 ms warm on the
+16-thread machine with only three heap `Value`s; the array parameter is moved
+through the update loop rather than retained and released per element.
+
 `*-set` is **consume-on-write**, not a general assignment statement: it mutates
 the buffer and returns it, and the previous reference must not be reused.  The
 functional model stays `f(last_state) = next_state`:
@@ -216,6 +229,13 @@ no `set!`, `var`, or general mutation syntax.  Array operations are effects:
 they are excluded from CSE, and `λp`/`pmap` bodies cannot use them.  Equality is
 identity, and arrays print as `[arrayf N]` / `[arrayi N]` / `[arrayb N]`.
 Bounds are checked; byte values are checked to be in `0..255`.
+
+`(arrayi-pmap f n)` is the controlled parallel array builder: it spawns workers,
+applies a provably pure `Int -> Int` function to `0..n-1`, and writes a flat
+`arrayi` result.  It never builds a per-item list.  The `*-get-ro` accessors are
+a read-only promise: they have no effects and may be used inside the mapped
+function (for example, to read a shared base-prime array).  Ordinary
+`λp`/`pmap` bodies still cannot mutate arrays.
 
 **Current restriction:** array primitives must be fully applied.  First-class
 arrays, arrays of arrays, and a typed `Array a` are not implemented yet; the
@@ -337,7 +357,7 @@ cycle.
 Windows x64, clang `-O3`, 16 logical CPUs:
 
 * `nth-prime 670000`: sequential ~1.00 s; parallel trial division ~0.17 s;
-  segmented sieve ~0.19 s (0.85 s on one thread).
+  segmented sieve ~0.24 s (0.037 s at 16 threads).
 * 100,000-iteration string churn: 100,004 values / 100,002 envs, `live=0`.
 * 100,000-element list construction/teardown: 200,002 values, `live=0`.
 * 100,000 closures created/dropped: 100,004 values / 100,002 envs, `live=0`.
@@ -356,26 +376,28 @@ there is no I/O inside a timed region. CPU: AMD Ryzen 7 9700X, 8 cores /
 
 | kernel | threads | Lambda | C | C++ | Rust | Lambda / C |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| sequential nth-prime | 1 | 1026.9 ms | 1013.4 ms | 1020.6 ms | 1028.9 ms | 1.01x |
-| parallel trial division | 1 | 1198.7 ms | 1196.2 ms | 1242.9 ms | 1202.2 ms | 1.00x |
-| parallel trial division | 16 | 172.1 ms | 169.2 ms | 174.3 ms | 170.2 ms | 1.02x |
-| segmented sieve | 1 | 845.5 ms | 165.0 ms | 166.9 ms | 174.8 ms | 5.12x |
-| segmented sieve | 16 | 175.3 ms | 20.0 ms | 20.7 ms | 20.3 ms | 8.76x |
-| Newton, 100 steps | 1 | 0.365 µs | 0.364 µs | 0.363 µs | 0.365 µs | 1.00x |
+| sequential nth-prime | 1 | 1026.0 ms | 1014.9 ms | 1014.3 ms | 1036.5 ms | 1.01x |
+| parallel trial division | 1 | 1209.6 ms | 1199.6 ms | 1241.4 ms | 1206.5 ms | 1.01x |
+| parallel trial division | 16 | 171.8 ms | 171.8 ms | 179.3 ms | 174.3 ms | 1.00x |
+| segmented sieve | 1 | 241.3 ms | 175.7 ms | 167.3 ms | 171.4 ms | 1.37x |
+| segmented sieve | 16 | 36.6 ms | 21.2 ms | 20.7 ms | 20.7 ms | 1.73x |
+| Newton, 100 steps | 1 | 0.367 µs | 0.363 µs | 0.367 µs | 0.365 µs | 1.01x |
+| 10M i64 fill+sum | 1 | 17.7 ms | 14.2 ms | 13.9 ms | 14.1 ms | 1.25x |
 
 The sequential and parallel trial-division paths and the f64 Newton kernel are
-at parity. The sieve is the outlier: it creates ~1 million boxed values per call
-and walks the shared base-prime list ~78 million times through `head`/`tail` and
-recursive `mark` calls, while the native versions use contiguous arrays. Its
-16-thread result also exposes `pmap`'s per-task list/closure overhead: the
-C/Rust/C++ sieve scales almost 8x, Lambda ~4.8x. This is representation and
-parallel-runtime overhead, not arithmetic — the Newton result shows the f64
-paths are equivalent. Full protocol and raw medians: [bench/results.md](bench/results.md).
+at parity. The sieve now uses a flat `arrayi` of base primes, `arrayi-pmap`
+counts into a flat result array, and materialises only the selected block’s
+mask. That reduced the gap from 5.1x/8.8x to **1.37x/1.73x**. The remaining
+sieve overhead is the Lambda-level 64-bit mask loop (list-free but still
+recursive calls) plus the per-task closure application; it is no longer
+dominated by list garbage. The 10M-element array test is **1.25x C**, with one
+contiguous allocation per pass and no per-element wrappers. Full protocol and
+raw medians: [bench/results.md](bench/results.md).
 
 Known numerical-methods caveat: `matrix.rs` is not used as a benchmark because
-Lambda has no mutable array type; a list-of-lists matrix would measure boxing
-and list rebuilding rather than Gaussian-elimination arithmetic. (The Rust file
-also allocates `Vec<Vec<f64>>` and clones rows per elimination, and its
+Lambda has no 2D array/matrix primitive; a list-of-lists matrix would measure
+boxing and list rebuilding rather than Gaussian-elimination arithmetic. (The
+Rust file also allocates `Vec<Vec<f64>>` and clones rows per elimination, and its
 `back_sub` indexing looks off by one.)
 
 ## Files
@@ -394,7 +416,7 @@ also allocates `Vec<Vec<f64>>` and clones rows per elimination, and its
 | `lambda.py` | CLI driver, include loading, clang invocation, runtime variants |
 | `lib/prime.lambda` | shared primality/bounds/block helpers |
 | `lib/list.lambda` | `length`, `reverse`, `filter`, `foldl`, `append` |
-| `run_tests.py` | 87 compile/run/leak regression cases |
+| `run_tests.py` | 89 compile/run/leak regression cases |
 | `tests/`, `examples/` | test corpus and runnable examples |
 | `bench/` | fair Lambda/C/C++/Rust comparison and results |
 
@@ -424,8 +446,9 @@ also allocates `Vec<Vec<f64>>` and clones rows per elimination, and its
 * Arrays are effects: they are not usable in `pmap`/`λp`, and first-class
   arrays (`map arrayf-get ...`), arrays of arrays, and generic `Array a` are not
   implemented.
-* Typed array get/set are emitted inline with bounds checks, but the compiler
-  still retains/releases the array reference around each access; a move/borrow
-  optimization is needed before element loops match raw C speed.
+* Typed array get/set are emitted inline with bounds checks.  A consumed array
+  parameter is moved into `set` with no retain/release, and reads borrow the
+  buffer; globals and captured/shared arrays still take the retaining path.
+  Bounds checks remain unless a future unchecked mode is added.
 * Tuples, named enums, big integers and FFT are not implemented yet.  The flat
   arrays are the storage prerequisite for the bigint/fast-doubling work.

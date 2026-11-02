@@ -1,7 +1,7 @@
 // Fair Rust implementations of the same three nth-prime algorithms used by
 // Lambda.  Threads are spawned per call, like Lambda's pmap.
 use std::hint::black_box;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::thread;
 
 const BLOCK: i64 = 65536;
@@ -175,15 +175,15 @@ fn nth_prime_sieve(target: i64) -> i64 {
     let root = (limit as f64).sqrt() as i64;
     let base: Vec<i64> = (2..=root).filter(|&i| is_prime(i)).collect();
     let blocks = (limit + SIEVE_BLOCK - 1) / SIEVE_BLOCK;
-    let masks: Vec<AtomicU64> = (0..blocks).map(|_| AtomicU64::new(0)).collect();
-    let m = &masks;
+    let counts: Vec<AtomicI64> = (0..blocks).map(|_| AtomicI64::new(0)).collect();
+    let c = &counts;
     parallel_for(blocks, bench_threads(), |b| {
-        m[b as usize].store(block_mask(b, &base), Ordering::Relaxed);
+        c[b as usize].store(block_mask(b, &base).count_ones() as i64, Ordering::Relaxed);
     });
     let mut acc = 0i64;
     let mut block = 0i64;
     while block < blocks {
-        let count = masks[block as usize].load(Ordering::Relaxed).count_ones() as i64;
+        let count = counts[block as usize].load(Ordering::Relaxed);
         if target <= acc + count {
             break;
         }
@@ -191,7 +191,7 @@ fn nth_prime_sieve(target: i64) -> i64 {
         block += 1;
     }
     let mut k = target - acc;
-    let mask = masks[block as usize].load(Ordering::Relaxed);
+    let mask = block_mask(block, &base);
     for i in 0..64 {
         if mask & (1u64 << i) != 0 {
             k -= 1;
@@ -207,6 +207,24 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(String::as_str).unwrap_or("seq");
     let reps: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
+    if mode == "array" {
+        let n = black_box(10_000_000i64);
+        let mut total = 0i64;
+        for _ in 0..reps {
+            let mut a = vec![0i64; n as usize];
+            for i in 0..n {
+                a[i as usize] = i;
+            }
+            let mut s = 0i64;
+            for &v in &a {
+                s += v;
+            }
+            total += s;
+            total = black_box(total);
+        }
+        println!("{}", total);
+        return;
+    }
     if mode == "newton" {
         let mut sum = 0.0f64;
         for _ in 0..reps {

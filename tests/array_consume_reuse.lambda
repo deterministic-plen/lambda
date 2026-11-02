@@ -1,0 +1,5 @@
+f → (λa.
+  b → (arrayi-set a 0 1)
+  (arrayi-get a 0))
+
+(f (arrayi 2 0))

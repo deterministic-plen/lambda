@@ -1431,6 +1431,94 @@ Value *lambda_op_pmap(Value *f, Value *list) {
     return head ? head : lambda_nil();
 }
 
+/* Parallel Int -> Int map into a flat Int array.  The result buffer is
+   disjoint per index, so workers never communicate. */
+typedef struct ArrayPMapJob {
+    Value *f;
+    Value *out;
+    int64_t n;
+    int64_t next;
+} ArrayPMapJob;
+
+static void array_pmap_run(ArrayPMapJob *job) {
+    int64_t *data = (int64_t *)job->out->p;
+    for (;;) {
+        int64_t i = __atomic_fetch_add(&job->next, 1, __ATOMIC_RELAXED);
+        if (i >= job->n) break;
+        Value *arg = lambda_box_int(i);
+        Value *r = apply_owned(job->f, arg);
+        int64_t value = lambda_get_int(r);
+        lambda_release(r);
+        data[i] = value;
+    }
+}
+
+#ifdef _WIN32
+static DWORD WINAPI array_pmap_thread_main(LPVOID p) {
+    array_pmap_run((ArrayPMapJob *)p);
+    return 0;
+}
+#else
+static void *array_pmap_thread_main(void *p) {
+    array_pmap_run((ArrayPMapJob *)p);
+    return NULL;
+}
+#endif
+
+Value *lambda_arrayi_pmap(Value *f, int64_t n) {
+    if (n < 0) fail("array size must be non-negative");
+    Value *out = lambda_arrayi_new(n, 0);
+    int64_t threads = pmap_requested_threads();
+    if (threads > LAMBDA_MAX_THREADS) threads = LAMBDA_MAX_THREADS;
+    if (threads > n) threads = n;
+    if (threads <= 1 || n <= 1) {
+        int64_t *data = (int64_t *)out->p;
+        for (int64_t i = 0; i < n; i++) {
+            Value *r = apply_owned(f, lambda_box_int(i));
+            data[i] = lambda_get_int(r);
+            lambda_release(r);
+        }
+        lambda_release(f);
+        return out;
+    }
+
+    ArrayPMapJob job;
+    job.f = f;
+    job.out = out;
+    job.n = n;
+    job.next = 0;
+
+#ifdef _WIN32
+    HANDLE handles[LAMBDA_MAX_THREADS];
+    int created = 0;
+    for (int64_t i = 1; i < threads; i++) {
+        HANDLE h = CreateThread(NULL, 0, array_pmap_thread_main, &job, 0, NULL);
+        if (h) handles[created++] = h;
+    }
+    array_pmap_run(&job);
+    if (created > 0) WaitForMultipleObjects((DWORD)created, handles, TRUE, INFINITE);
+    for (int i = 0; i < created; i++) CloseHandle(handles[i]);
+#else
+    pthread_t th[LAMBDA_MAX_THREADS];
+    int created = 0;
+    for (int64_t i = 1; i < threads; i++) {
+        if (pthread_create(&th[created], NULL, array_pmap_thread_main, &job) == 0) {
+            created++;
+        }
+    }
+    array_pmap_run(&job);
+    for (int i = 0; i < created; i++) pthread_join(th[i], NULL);
+#endif
+    lambda_release(f);
+    return out;
+}
+
+Value *lambda_op_arrayi_pmap(Value *f, Value *nv) {
+    int64_t n = as_int(nv);
+    lambda_release(nv);
+    return lambda_arrayi_pmap(f, n);
+}
+
 /* ------------------------------------------------------------------ */
 /* curried primitive closures                                          */
 /* ------------------------------------------------------------------ */
@@ -1765,6 +1853,8 @@ declare i64 @lambda_arrayb_get(%Value*, i64)
 declare void @lambda_arrayb_set(%Value*, i64, i64)
 declare i64 @lambda_arrayb_length(%Value*)
 declare %Value* @lambda_arrayb_clone(%Value*)
+declare %Value* @lambda_arrayi_pmap(%Value*, i64)
+declare %Value* @lambda_op_arrayi_pmap(%Value*, %Value*)
 
 declare %Value* @lambda_op_arrayf_new(%Value*, %Value*)
 declare %Value* @lambda_op_arrayf_get(%Value*, %Value*)

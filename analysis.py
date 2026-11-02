@@ -30,6 +30,7 @@ IMPURE_PRIMITIVES = {
     "arrayf_get", "arrayf_set", "arrayf_length", "arrayf_clone",
     "arrayi_get", "arrayi_set", "arrayi_length", "arrayi_clone",
     "arrayb_get", "arrayb_set", "arrayb_length", "arrayb_clone",
+    "arrayi_pmap",
 }
 
 PRIM_ARITY = {
@@ -51,6 +52,8 @@ PRIM_ARITY = {
     "arrayf_get": 2, "arrayf_set": 3, "arrayf_length": 1, "arrayf_clone": 1,
     "arrayi_get": 2, "arrayi_set": 3, "arrayi_length": 1, "arrayi_clone": 1,
     "arrayb_get": 2, "arrayb_set": 3, "arrayb_length": 1, "arrayb_clone": 1,
+    "arrayf_get_ro": 2, "arrayi_get_ro": 2, "arrayb_get_ro": 2,
+    "arrayi_pmap": 2,
     "read_line": 1, "read_int": 1, "read_float": 1,
 }
 

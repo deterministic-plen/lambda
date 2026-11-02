@@ -1,31 +1,59 @@
-; Benchmark-only wrapper: segmented 64-bit-mask sieve, repeated 3x.
+; Chunked segmented sieve of Eratosthenes.
+; Base primes live in a flat int array; each 64-number block is counted into a
+; flat result array by arrayi-pmap.  Only the selected block is materialised as
+; a mask again, so no per-block mask list is built.
 include "lib/prime.lambda"
+
+; primes up to `limit`, stored in a zero-sentinel int array
+build-base → (λa i j limit.
+  if (≻ i limit)
+  then a
+  else if (is-prime i)
+  then (build-base (arrayi-set a j i) (⊕ i 1) (⊕ j 1) limit)
+  else (build-base a (⊕ i 1) j limit))
 
 nth-prime-sieve → (λn.
   limit → (upper-bound n)
   root → (float->int (√ (int->float limit)))
-  ps → (immortalize (base-primes root))
+  ps → (immortalize (build-base (arrayi (⊕ root 1) 0) 2 0 root))
   blocks → (float->int (⊘ (⊕ (int->float limit) 63.0) 64.0))
 
-  mark-all → (λprimes lo mask.
-    if (empty? primes)
-    then mask
-    else
-      p → (head primes)
-      p2 → (⊗ p p)
-      rem → (⊙ lo p)
-      first0 → (if (≡ rem 0) then lo else (⊕ lo (⊖ p rem)))
-      first → (if (≺ first0 p2) then p2 else first0)
-      mark → (λoff mask.
-        if (≽ off 64)
-        then mask
-        else (mark (⊕ off p) (& mask (! (shl 1 off)))))
-      (mark-all (tail primes) lo (mark (⊖ first lo) mask)))
+  mark-prime → (λ p lo mask.
+    p2 → (⊗ p p)
+    rem → (⊙ lo p)
+    first0 → (if (≡ rem 0) then lo else (⊕ lo (⊖ p rem)))
+    first → (if (≺ first0 p2) then p2 else first0)
+    mark → (λoff mask.
+      if (≽ off 64)
+      then mask
+      else (mark (⊕ off p) (& mask (! (shl 1 off)))))
+    (mark (⊖ first lo) mask))
 
-  block → (λp b.
+  block-mask → (λb.
     lo → (⊗ b 64)
     start → (if (≡ lo 0) then (& -1 (! 3)) else -1)
-    (mark-all ps lo start))
+    go → (λpi mask.
+      p → (arrayi-get-ro ps pi)
+      if (≡ p 0)
+      then mask
+      else (go (⊕ pi 1) (mark-prime p lo mask)))
+    (go 0 start))
+
+  count-block → (λp b. (popcount (block-mask b)))
+  counts → (arrayi-pmap count-block blocks)
+
+  find → (λi acc.
+    if (≽ i blocks)
+    then [i, 0]
+    else
+      c → (arrayi-get counts i)
+      if (≼ n (⊕ acc c))
+      then [i, (⊖ n acc)]
+      else (find (⊕ i 1) (⊕ acc c)))
+
+  loc → (find 0 0)
+  b → (head loc)
+  k → (head (tail loc))
 
   nth-bit → (λmask k.
     go → (λi k.
@@ -37,15 +65,7 @@ nth-prime-sieve → (λn.
         else (go (⊕ i 1) k))
     (go 0 k))
 
-  get → (λi xs.
-    if (≡ i 0) then (head xs) else (get (⊖ i 1) (tail xs)))
-
-  masks → (pmap block (range 0 blocks))
-  counts → (map popcount masks)
-  loc → (find-block counts n)
-  b → (head loc)
-  k → (head (tail loc))
-  (⊕ (⊗ b 64) (nth-bit (get b masks) k)))
+  (⊕ (⊗ b 64) (nth-bit (block-mask b) k)))
 
 run → (λk.
   if (≡ k 0)

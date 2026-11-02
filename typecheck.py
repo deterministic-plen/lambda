@@ -436,6 +436,14 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TINT, TFLOAT], TARRAYF))
     if name == "arrayf-get":
         return mono(tfun([TARRAYF, TINT], TFLOAT))
+    if name in ("arrayi-get", "arrayi-get-ro"):
+        return mono(tfun([TARRAYI, TINT], TINT))
+    if name in ("arrayf-get-ro",):
+        return mono(tfun([TARRAYF, TINT], TFLOAT))
+    if name in ("arrayb-get-ro",):
+        return mono(tfun([TARRAYB, TINT], TINT))
+    if name == "arrayi-pmap":
+        return mono(tfun([tfun([TINT], TINT), TINT], TARRAYI))
     if name == "arrayf-set":
         return mono(tfun([TARRAYF, TINT, TFLOAT], TARRAYF))
     if name == "arrayf-length":

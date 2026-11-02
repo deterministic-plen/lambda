@@ -149,13 +149,14 @@ __attribute__((noinline)) int64_t nth_prime_sieve(int64_t target) {
         if (is_prime(i)) base.push_back(i);
     }
     int64_t blocks = (limit + SIEVE_BLOCK - 1) / SIEVE_BLOCK;
-    std::vector<uint64_t> masks(static_cast<size_t>(blocks));
+    std::vector<int64_t> counts(static_cast<size_t>(blocks));
     std::atomic<int64_t> next{0};
     auto worker = [&]() {
         for (;;) {
             int64_t i = next.fetch_add(1, std::memory_order_relaxed);
             if (i >= blocks) break;
-            masks[static_cast<size_t>(i)] = block_mask(i, base);
+            counts[static_cast<size_t>(i)] =
+                __builtin_popcountll(block_mask(i, base));
         }
     };
     int threads = bench_threads();
@@ -167,12 +168,12 @@ __attribute__((noinline)) int64_t nth_prime_sieve(int64_t target) {
 
     int64_t acc = 0, block = 0;
     for (; block < blocks; ++block) {
-        int64_t c = __builtin_popcountll(masks[static_cast<size_t>(block)]);
+        int64_t c = counts[static_cast<size_t>(block)];
         if (target <= acc + c) break;
         acc += c;
     }
     int64_t k = target - acc;
-    uint64_t m = masks[static_cast<size_t>(block)];
+    uint64_t m = block_mask(block, base);
     for (int i = 0; i < 64; ++i) {
         if (m & (1ULL << i)) {
             if (--k == 0) return block * SIEVE_BLOCK + i;
@@ -186,6 +187,20 @@ __attribute__((noinline)) int64_t nth_prime_sieve(int64_t target) {
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "seq";
     int reps = argc > 2 ? std::atoi(argv[2]) : 3;
+    if (std::strcmp(mode, "array") == 0) {
+        volatile int64_t n = 10000000;
+        int64_t total = 0;
+        for (int r = 0; r < reps; ++r) {
+            std::vector<int64_t> a(static_cast<size_t>(n));
+            for (int64_t i = 0; i < n; ++i) a[static_cast<size_t>(i)] = i;
+            int64_t s = 0;
+            for (int64_t i = 0; i < n; ++i) s += a[static_cast<size_t>(i)];
+            total += s;
+            asm volatile("" ::: "memory");
+        }
+        std::printf("%lld\n", static_cast<long long>(total));
+        return 0;
+    }
     if (std::strcmp(mode, "newton") == 0) {
         volatile double start = 2.0;
         double sum = 0.0;

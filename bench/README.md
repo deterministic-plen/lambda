@@ -29,7 +29,7 @@ constants, iteration counts and thread counts.
 ## Run
 
 ```powershell
-cd C:\Users\mumuj\Documents\deepseek-harness\default-workspace\lambda-rewrite
+cd C:\Users\mumuj\Documents\lambda
 clang -O3 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS bench/nth_bench.c -o bench/build/nth_c.exe
 clang++ -O3 -std=c++20 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS bench/nth_bench.cpp -o bench/build/nth_cpp.exe
 # rustc needs to spawn its linker; use lld-link if MSVC link.exe is unavailable:
@@ -47,11 +47,15 @@ See [results.md](results.md) for the latest table. Headline:
 
 * sequential nth-prime: Lambda ~1.01x C; C++/Rust within noise.
 * parallel trial division: Lambda ~1.00–1.02x C at 1 and 16 threads.
-* Newton f64: Lambda ~1.00x C.
-* segmented sieve: Lambda ~5.1x C single-thread, ~8.8x C at 16 threads.
+* Newton f64: Lambda ~1.01x C.
+* segmented sieve: Lambda ~1.37x C single-thread, ~1.73x C at 16 threads.
+* 10M-element i64 fill+sum: Lambda ~1.25x C.
 
-The sieve gap is dominated by boxed-list traversal, ~1 million allocations per
-call, and per-task pmap overhead for 176k tiny blocks. It is not an arithmetic
-gap: the same f64 operations in Newton run at parity. A matrix benchmark is
-omitted because Lambda has no mutable array representation; list-of-lists would
-measure representation overhead rather than elimination arithmetic.
+The sieve gap is now mostly the Lambda-level 64-bit mask loop and per-task
+closure application. The implementation uses a flat `arrayi` of base primes,
+immortalises it so per-task captures do not contend on the refcount, counts
+blocks with `arrayi-pmap` into a flat result array, and materialises only the
+selected block. The earlier 5–9x gap came from list masks/counts and per-task
+RC traffic, not arithmetic. A matrix benchmark is still omitted because Lambda
+has no 2D array/matrix primitive; list-of-lists would measure representation
+overhead rather than elimination arithmetic.

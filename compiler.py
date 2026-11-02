@@ -29,7 +29,9 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Set, Tuple
 
-from ast import App, Binding, Block, Def, If, Lam, Lit, Node, PRIM, TOP_DEF, Var
+from ast import (
+    App, Binding, Block, Def, If, Lam, Lit, Node, PARAM, PRIM, TOP_DEF, Var, walk,
+)
 from analysis import IMPURE_PRIMITIVES, PRIM_ARITY, top_level_order
 from errors import CompileError
 from parser import OP_CANON
@@ -127,6 +129,9 @@ OP_FN = {
     "arrayi_length": "@lambda_op_arrayi_length", "arrayi_clone": "@lambda_op_arrayi_clone",
     "arrayb_get": "@lambda_op_arrayb_get", "arrayb_set": "@lambda_op_arrayb_set",
     "arrayb_length": "@lambda_op_arrayb_length", "arrayb_clone": "@lambda_op_arrayb_clone",
+    "arrayf_get_ro": "@lambda_op_arrayf_get", "arrayi_get_ro": "@lambda_op_arrayi_get",
+    "arrayb_get_ro": "@lambda_op_arrayb_get",
+    "arrayi_pmap": "@lambda_op_arrayi_pmap",
     "read_line": "@lambda_op_read_line",
     "read_int": "@lambda_op_read_int",
     "read_float": "@lambda_op_read_float",
@@ -307,6 +312,9 @@ class Compiler:
         self.scope_stack: List[Dict[int, Storage]] = []
         self.cleanup_stack: List[List[Tuple[str, bool]]] = []
         self.terminated = False
+        self.moved_names: Set[str] = set()
+        self.captured_uids: Set[int] = set()
+        self.moves_allowed: bool = True
 
         self.string_counter = 0
 
@@ -317,6 +325,12 @@ class Compiler:
         if not isinstance(program, Block):
             program = Block([], program, program.loc)
         self.top_defs = list(program.defs)
+        self.captured_uids = {
+            b.uid
+            for n in walk(program)
+            if isinstance(n, Lam)
+            for b in getattr(n, "captures", [])
+        }
         self._setup_top_level(program)
         self._gen_main(program)
         self._drain_functions()
@@ -626,6 +640,8 @@ class Compiler:
         self.scope_stack = []
         self.cleanup_stack = []
         self.terminated = False
+        self.moved_names = set()
+        self.moves_allowed = True
 
         ret_ty = self.rep_type(info.ret_rep)
         sig: List[str] = []
@@ -919,6 +935,11 @@ class Compiler:
         if st is None:
             raise CompileError(
                 f"definition '{b.name}' is used before it is initialised", node.loc)
+        if st.rep == BOX and not st.is_global and st.name in self.moved_names:
+            raise CompileError(
+                f"'{b.name}' was consumed by a destructive array update and "
+                f"cannot be used again; use *-clone for a persistent copy",
+                node.loc)
         if st.rep == I64:
             if st.is_global:
                 res = self.new_reg()
@@ -1049,18 +1070,33 @@ class Compiler:
         else_bb = self.new_label("else")
         self.emit_inst(f"br i1 {cbool}, label %{then_bb}, label %{else_bb}")
 
+        saved_moved = set(self.moved_names)
+        saved_cleanup = [list(c) for c in self.cleanup_stack]
+        saved_allowed = self.moves_allowed
+
+        def restore_branch_state() -> None:
+            self.moved_names = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            # Moves in a branch are only safe when that branch returns.
+            self.moves_allowed = saved_allowed and is_tail
+
         if is_tail:
             self.builder.label(then_bb)
             self.terminated = False
+            restore_branch_state()
             tv = self.compile(node.then, is_tail=True)
             if not self.terminated:
                 self.emit_return(tv, node.then.type)
             self.builder.label(else_bb)
             self.terminated = False
+            restore_branch_state()
             ev = self.compile(node.else_, is_tail=True)
             if not self.terminated:
                 self.emit_return(ev, node.else_.type)
             self.terminated = True
+            self.moved_names = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed
             return None
 
         common = self.node_rep(node)
@@ -1070,6 +1106,7 @@ class Compiler:
 
         self.builder.label(then_bb)
         self.terminated = False
+        restore_branch_state()
         tv = self.compile(node.then, is_tail=False)
         if tv is None:
             raise CompileError("if branch produced no value", node.then.loc)
@@ -1084,6 +1121,7 @@ class Compiler:
 
         self.builder.label(else_bb)
         self.terminated = False
+        restore_branch_state()
         ev = self.compile(node.else_, is_tail=False)
         if ev is None:
             raise CompileError("if branch produced no value", node.else_.loc)
@@ -1151,6 +1189,44 @@ class Compiler:
         res = self.coerce(res, BOX, info.ret_type)
         return self.apply_closure_chain(res, rest, node.type, is_tail)
 
+    def _move_tail_arg(self, node: Node, args: List[Node],
+                       info: FunctionInfo, index: int) -> Optional[Val]:
+        """Move a boxed parameter into a tail call.
+
+        After a tail call there is no later use in this frame, so the callee
+        can take over the reference.  Skip captured parameters and duplicated
+        arguments; this keeps the move local and linear.
+        """
+
+        if not self.moves_allowed:
+            return None
+        if not isinstance(node, Var) or node.binding is None:
+            return None
+        b = node.binding
+        if b.kind != PARAM or b.uid in self.captured_uids:
+            return None
+        if any(c.uid == b.uid for c in info.captures):
+            return None
+        # A later argument could still read the parameter.  Earlier arguments
+        # have already been evaluated, so moving after them is safe.
+        for other in args[index + 1:]:
+            if any(isinstance(n, Var) and n.binding is b for n in walk(other)):
+                return None
+        st = self.find_storage(b.uid)
+        if st is None or st.rep != BOX or st.is_global:
+            return None
+        if not st.name.startswith("%par"):
+            return None
+        if st.name in self.moved_names:
+            raise CompileError(
+                f"'{b.name}' was already consumed and cannot be moved again",
+                node.loc)
+        self.moved_names.add(st.name)
+        for cleanup in self.cleanup_stack:
+            cleanup[:] = [(name, immortal) for name, immortal in cleanup
+                          if name != st.name]
+        return Val(BOX, st.name, owned=True)
+
     def emit_direct_call(self, info: FunctionInfo, args: List[Node],
                          result_type, is_tail: bool) -> Optional[Val]:
         call_args: List[str] = []
@@ -1167,11 +1243,16 @@ class Compiler:
                 val = self.ensure_owned(val)
                 call_args.append(f"%Value* {val.name}")
 
-        for arg, rep, ptype in zip(args, info.param_reps, info.param_types):
-            val = self.compile(arg, is_tail=False)
+        for pos, (arg, rep, ptype) in enumerate(zip(args, info.param_reps,
+                                                    info.param_types)):
+            val = None
+            if rep == BOX and is_tail:
+                val = self._move_tail_arg(arg, args, info, pos)
             if val is None:
-                return None
-            val = self.coerce(val, rep, arg.type)
+                val = self.compile(arg, is_tail=False)
+                if val is None:
+                    return None
+                val = self.coerce(val, rep, arg.type)
             if rep == I64:
                 call_args.append(f"i64 {val.name}")
             elif rep == F64:
@@ -1262,6 +1343,13 @@ class Compiler:
                     node.loc)
             self.uses_parallel = True
             self.check_pmap_function(args[0], node.loc)
+        if op == "arrayi_pmap":
+            if len(args) < 2:
+                raise CompileError(
+                    "arrayi-pmap must be applied to a provably pure Int -> Int "
+                    "function and a length", node.loc)
+            self.uses_parallel = True
+            self.check_pmap_function(args[0], node.loc)
         if self.dynamic:
             if len(args) == arity and arity > 0:
                 val = self.emit_boxed_primitive(op, args, node)
@@ -1306,6 +1394,65 @@ class Compiler:
             raise CompileError("primitive argument did not produce a value", node.loc)
         val = self.coerce(val, rep, hint if hint is not None else node.type)
         return self.ensure_owned(val) if rep == BOX else val
+
+    def _array_borrow(self, node: Node) -> Val:
+        """Read an array argument without a retain when it is a simple value.
+
+        The primitive returns immediately, so a local/global pointer remains
+        valid for the duration of the call.  Non-variable expressions still
+        produce an owned value and are released by the caller.
+        """
+
+        if isinstance(node, Var) and node.binding is not None:
+            b = node.binding
+            if not b.is_function and b.kind != PRIM:
+                st = self.find_storage(b.uid)
+                if st is not None and st.rep == BOX:
+                    if not st.is_global and st.name in self.moved_names:
+                        raise CompileError(
+                            f"'{b.name}' was consumed by a destructive array "
+                            f"update and cannot be used again", node.loc)
+                    if st.is_global:
+                        res = self.new_reg()
+                        self.emit_inst(
+                            f"{res} = load %Value*, %Value** {st.name}")
+                        return Val(BOX, res, owned=False)
+                    return Val(BOX, st.name, owned=False)
+        val = self.compile(node, is_tail=False)
+        if val is None:
+            raise CompileError("array argument did not produce a value", node.loc)
+        val = self.coerce(val, BOX, node.type)
+        return self.ensure_owned(val)
+
+    def _move_array_param(self, node: Node) -> Optional[Val]:
+        """Move a non-captured array parameter into a consuming update.
+
+        This removes the retain/release pair around the update and suppresses
+        the parameter's cleanup.  Any later use is rejected by compile_var, so
+        the linear convention is enforced within the function.
+        """
+
+        if not self.moves_allowed:
+            return None
+        if not isinstance(node, Var) or node.binding is None:
+            return None
+        b = node.binding
+        if b.kind != PARAM or b.uid in self.captured_uids:
+            return None
+        st = self.find_storage(b.uid)
+        if st is None or st.rep != BOX or st.is_global:
+            return None
+        if not st.name.startswith("%par"):
+            return None
+        if st.name in self.moved_names:
+            raise CompileError(
+                f"'{b.name}' was already consumed by a destructive array update",
+                node.loc)
+        self.moved_names.add(st.name)
+        for cleanup in self.cleanup_stack:
+            cleanup[:] = [(name, immortal) for name, immortal in cleanup
+                          if name != st.name]
+        return Val(BOX, st.name, owned=True)
 
     def _array_bounds(self, arr: Val, idx: Val) -> None:
         """Emit a checked bounds branch; types already guarantee the tag."""
@@ -1603,6 +1750,13 @@ class Compiler:
             res = self.new_reg()
             self.emit_inst(f"{res} = call %Value* @lambda_op_immortalize(%Value* {a.name})")
             return self.coerce(Val(BOX, res, owned=True), self.node_rep(node), node.type)
+        if op == "arrayi_pmap":
+            f = self._prim_arg(args[0], BOX, args[0].type)
+            n = self._prim_arg(args[1], I64, args[1].type)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_arrayi_pmap(%Value* {f.name}, i64 {n.name})")
+            return Val(BOX, res, owned=True)
         if op in ("arrayf", "arrayi", "arrayb"):
             n = self._prim_arg(args[0], I64, args[0].type)
             if op == "arrayf":
@@ -1616,10 +1770,16 @@ class Compiler:
             res = self.new_reg()
             self.emit_inst(f"{res} = call %Value* {fn}({sig})")
             return Val(BOX, res, owned=True)
-        if op in ("arrayf_get", "arrayi_get", "arrayb_get"):
-            a = self._prim_arg(args[0], BOX, args[0].type)
+        if op in ("arrayf_get", "arrayi_get", "arrayb_get",
+                  "arrayf_get_ro", "arrayi_get_ro", "arrayb_get_ro"):
+            a = self._array_borrow(args[0])
             idx = self._prim_arg(args[1], I64, args[1].type)
-            llty = "double" if op == "arrayf_get" else "i64" if op == "arrayi_get" else "i8"
+            if op.startswith("arrayf"):
+                llty = "double"
+            elif op.startswith("arrayi"):
+                llty = "i64"
+            else:
+                llty = "i8"
             self._array_bounds(a, idx)
             ptr = self._array_element_ptr(a, idx, llty)
             raw = self.new_reg()
@@ -1632,7 +1792,9 @@ class Compiler:
             self.release(a)
             return Val(F64 if llty == "double" else I64, raw)
         if op in ("arrayf_set", "arrayi_set", "arrayb_set"):
-            a = self._prim_arg(args[0], BOX, args[0].type)
+            a = self._move_array_param(args[0])
+            if a is None:
+                a = self._prim_arg(args[0], BOX, args[0].type)
             idx = self._prim_arg(args[1], I64, args[1].type)
             base = op.replace("_set", "")
             vrep = F64 if base == "arrayf" else I64
@@ -1649,7 +1811,7 @@ class Compiler:
                 self.emit_inst(f"store {llty} {v.name}, {llty}* {ptr}")
             return Val(BOX, a.name, owned=True)
         if op in ("arrayf_length", "arrayi_length", "arrayb_length"):
-            a = self._prim_arg(args[0], BOX, args[0].type)
+            a = self._array_borrow(args[0])
             base = op.replace("_length", "")
             lenp = self.new_reg()
             self.emit_inst(
@@ -1659,7 +1821,7 @@ class Compiler:
             self.release(a)
             return Val(I64, res)
         if op in ("arrayf_clone", "arrayi_clone", "arrayb_clone"):
-            a = self._prim_arg(args[0], BOX, args[0].type)
+            a = self._array_borrow(args[0])
             base = op.replace("_clone", "")
             res = self.new_reg()
             self.emit_inst(f"{res} = call %Value* @lambda_{base}_clone(%Value* {a.name})")
@@ -1704,6 +1866,8 @@ class Compiler:
         self.scope_stack = []
         self.cleanup_stack = []
         self.terminated = False
+        self.moved_names = set()
+        self.moves_allowed = True
         self.builder.raw("define i32 @main(i32 %argc, i8** %argv) {")
         self.builder.label("entry")
         self.emit_inst("call void @lambda_runtime_init()")

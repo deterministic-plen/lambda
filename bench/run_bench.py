@@ -25,6 +25,9 @@ NTH = 670000
 PRIME = 10086767
 NEWTON_REPS = 1_000_000
 NEWTON_STEPS = 100
+ARRAY_N = 10_000_000
+ARRAY_SUM = 49_999_995_000_000
+ARRAY_REPS = 3
 
 # mode, threads, repetitions per process
 CONFIGS = [
@@ -77,6 +80,10 @@ def build_lambda(mode: str, reps: int) -> str:
     if mode == "newton":
         source = source.replace("(run 1000000 0.0)", f"(run {reps} 0.0)")
         if f"(run {reps} 0.0)" not in source:
+            raise RuntimeError(f"could not set repetitions in {template}")
+    elif mode == "array":
+        source = source.replace("(bench 3 0)", f"(bench {reps} 0)")
+        if f"(bench {reps} 0)" not in source:
             raise RuntimeError(f"could not set repetitions in {template}")
     else:
         source = source.replace("(run 3)", f"(run {reps})")
@@ -133,6 +140,10 @@ def run_once(exe: str, mode: str, reps: int, threads: int, lambda_impl: bool) ->
         if abs(value - expected) > max(1e-3, abs(expected) * 1e-9):
             raise RuntimeError(
                 f"{exe} gave {value!r}, expected about {expected!r}")
+    elif mode == "array":
+        if text != str(reps * ARRAY_SUM):
+            raise RuntimeError(
+                f"{exe} gave {text!r}, expected {reps * ARRAY_SUM}")
     else:
         if text != str(reps * PRIME):
             raise RuntimeError(f"{exe} gave {text!r}, expected {reps * PRIME}")
@@ -239,13 +250,37 @@ def main() -> int:
     ])
     print(newton_table)
 
+    # Large flat array: allocate, fill, and sum 10M i64 values.
+    print()
+    array_row = {"mode": "array", "threads": 1, "reps": ARRAY_REPS,
+                 "n": ARRAY_N, "times_ms": {}}
+    array_exe = build_lambda("array", ARRAY_REPS)
+    for impl in IMPLEMENTATIONS:
+        exe = array_exe if impl == "lambda" else natives[impl]
+        info = median_time(exe, "array", ARRAY_REPS, 1, impl == "lambda")
+        array_row["times_ms"][impl] = info["median_ms_per_call"]
+        array_row.setdefault("details", {})[impl] = info
+        print(f"  array n={ARRAY_N} {LABELS[impl]}: "
+              f"{info['median_ms_per_call']:.3f} ms/pass")
+    at = array_row["times_ms"]
+    al = at["lambda"]
+    array_table = "\n".join([
+        "| large array (10M i64 fill+sum) | Lambda ms | C ms | C++ ms | Rust ms | "
+        "Lambda/C | Lambda/C++ | Lambda/Rust |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        f"| per pass | {al:.3f} | {at['c']:.3f} | {at['cpp']:.3f} | "
+        f"{at['rust']:.3f} | {al / at['c']:.2f}x | {al / at['cpp']:.2f}x | "
+        f"{al / at['rust']:.2f}x |",
+    ])
+    print(array_table)
+
     with open(os.path.join(BENCH, "results.json"), "w", encoding="utf-8") as f:
         json.dump({"metadata": metadata, "results": results,
-                   "newton": newton_row}, f, indent=2)
+                   "newton": newton_row, "array": array_row}, f, indent=2)
     with open(os.path.join(BENCH, "results.md"), "w", encoding="utf-8") as f:
         f.write("# Lambda benchmark results\n\n")
         f.write(f"CPU: {metadata['cpu']} ({metadata['logical_processors']} logical)\n\n")
-        f.write(table + "\n\n" + newton_table + "\n")
+        f.write(table + "\n\n" + newton_table + "\n\n" + array_table + "\n")
     print("\nWrote bench/results.json and bench/results.md")
     return 0
 

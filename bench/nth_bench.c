@@ -126,14 +126,14 @@ static uint64_t block_mask(int64_t b, const int64_t *base, int64_t nbase) {
 }
 
 typedef struct {
-    uint64_t *masks;
+    int64_t *counts;
     const int64_t *base;
     int64_t nbase;
-} MaskCtx;
+} SieveCtx;
 
-static void mask_work(void *ctx, int64_t b) {
-    MaskCtx *c = (MaskCtx *)ctx;
-    c->masks[b] = block_mask(b, c->base, c->nbase);
+static void sieve_work(void *ctx, int64_t b) {
+    SieveCtx *c = (SieveCtx *)ctx;
+    c->counts[b] = __builtin_popcountll(block_mask(b, c->base, c->nbase));
 }
 
 __attribute__((noinline)) static int64_t nth_prime_sieve(int64_t target) {
@@ -145,36 +145,51 @@ __attribute__((noinline)) static int64_t nth_prime_sieve(int64_t target) {
         if (is_prime_i64(i)) base[nbase++] = i;
     }
     int64_t blocks = (limit + SIEVE_BLOCK - 1) / SIEVE_BLOCK;
-    uint64_t *masks = (uint64_t *)calloc((size_t)blocks, sizeof(uint64_t));
-    MaskCtx ctx = {masks, base, nbase};
-    bench_parallel(blocks, bench_threads(), mask_work, &ctx);
+    int64_t *counts = (int64_t *)calloc((size_t)blocks, sizeof(int64_t));
+    SieveCtx ctx = {counts, base, nbase};
+    bench_parallel(blocks, bench_threads(), sieve_work, &ctx);
 
     int64_t acc = 0, block = 0;
     for (; block < blocks; ++block) {
-        int64_t c = __builtin_popcountll(masks[block]);
+        int64_t c = counts[block];
         if (target <= acc + c) break;
         acc += c;
     }
     int64_t k = target - acc;
-    uint64_t m = masks[block];
+    uint64_t m = block_mask(block, base, nbase);
     for (int i = 0; i < 64; ++i) {
         if (m & (1ULL << i)) {
             if (--k == 0) {
                 int64_t result = block * SIEVE_BLOCK + i;
                 free(base);
-                free(masks);
+                free(counts);
                 return result;
             }
         }
     }
     free(base);
-    free(masks);
+    free(counts);
     return 0;
 }
 
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "seq";
     int reps = argc > 2 ? atoi(argv[2]) : 3;
+    if (strcmp(mode, "array") == 0) {
+        volatile int64_t n = 10000000;
+        int64_t total = 0;
+        for (int r = 0; r < reps; ++r) {
+            int64_t *a = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+            for (int64_t i = 0; i < n; ++i) a[i] = i;
+            int64_t s = 0;
+            for (int64_t i = 0; i < n; ++i) s += a[i];
+            free(a);
+            total += s;
+            __asm__ __volatile__("" ::: "memory");
+        }
+        printf("%lld\n", (long long)total);
+        return 0;
+    }
     if (strcmp(mode, "newton") == 0) {
         volatile double start = 2.0;
         double sum = 0.0;

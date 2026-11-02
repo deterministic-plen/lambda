@@ -1,0 +1,22 @@
+; Benchmark-only: allocate, fill, and sum a 10,000,000-element int array 3x.
+n → 10000000
+
+fill → (λa i.
+  if (≽ i n)
+  then a
+  else (fill (arrayi-set a i i) (⊕ i 1)))
+
+sum → (λi acc a.
+  if (≽ i n)
+  then acc
+  else (sum (⊕ i 1) (⊕ acc (arrayi-get a i)) a))
+
+bench → (λk acc.
+  if (≡ k 0)
+  then acc
+  else
+    a → (fill (arrayi n 0) 0)
+    s → (sum 0 0 a)
+    (bench (⊖ k 1) (⊕ acc s)))
+
+(bench 3 0)

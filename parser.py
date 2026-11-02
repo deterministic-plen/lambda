@@ -41,6 +41,8 @@ PRIMITIVES = {
     "arrayf-get", "arrayf-set", "arrayf-length", "arrayf-clone",
     "arrayi-get", "arrayi-set", "arrayi-length", "arrayi-clone",
     "arrayb-get", "arrayb-set", "arrayb-length", "arrayb-clone",
+    "arrayf-get-ro", "arrayi-get-ro", "arrayb-get-ro",
+    "arrayi-pmap",
     # strings
     "str->int", "int->str", "str->list", "str-len", "str-append",
     "read-file",
@@ -85,6 +87,8 @@ OP_CANON = {
     "arrayi-length": "arrayi_length", "arrayi-clone": "arrayi_clone",
     "arrayb-get": "arrayb_get", "arrayb-set": "arrayb_set",
     "arrayb-length": "arrayb_length", "arrayb-clone": "arrayb_clone",
+    "arrayf-get-ro": "arrayf_get_ro", "arrayi-get-ro": "arrayi_get_ro",
+    "arrayb-get-ro": "arrayb_get_ro", "arrayi-pmap": "arrayi_pmap",
     "str->int": "str_to_int", "int->str": "int_to_str",
     "str->list": "str_to_list", "str-len": "str_len",
     "str-append": "str_append", "read-file": "read_file",
