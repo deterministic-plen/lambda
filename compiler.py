@@ -283,13 +283,14 @@ class Compiler:
     def __init__(self, dynamic: bool = False, use_musttail: bool = True,
                  debug: bool = False,
                  lambda_purity: Optional[Dict[int, bool]] = None,
-                 allow_input: bool = False) -> None:
+                 allow_input: bool = False, allow_data: bool = False) -> None:
         self.dynamic = dynamic
         self.use_musttail = use_musttail
         self.debug = debug
         self.lambda_purity = lambda_purity or {}
         self.uses_parallel = False
         self.allow_input = allow_input
+        self.allow_data = allow_data
 
         self.type_defs: List[str] = []
         self.globals: List[str] = []
@@ -315,7 +316,7 @@ class Compiler:
         self.scope_stack: List[Dict[int, Storage]] = []
         self.cleanup_stack: List[List[Tuple[str, bool]]] = []
         self.terminated = False
-        self.moved_names: Set[str] = set()
+        self.moved_uids: Set[int] = set()
         self.captured_uids: Set[int] = set()
         self.moves_allowed: bool = True
 
@@ -644,7 +645,7 @@ class Compiler:
         self.scope_stack = []
         self.cleanup_stack = []
         self.terminated = False
-        self.moved_names = set()
+        self.moved_uids = set()
         self.moves_allowed = True
 
         ret_ty = self.rep_type(info.ret_rep)
@@ -864,6 +865,13 @@ class Compiler:
         if op in ("read_line", "read_int", "read_float") and not self.allow_input:
             raise CompileError(
                 "terminal input is disabled; recompile with --input", b.loc)
+        if op in ("write_bytes", "write_f64s", "write_i64s"):
+            if not self.allow_data:
+                raise CompileError(
+                    "binary output is disabled; recompile with --data", b.loc)
+            raise CompileError(
+                "stream write primitives must be fully applied; first-class "
+                "writers are not supported", b.loc)
         if op.startswith("array"):
             raise CompileError(
                 "array primitives must be fully applied; first-class arrays "
@@ -939,7 +947,7 @@ class Compiler:
         if st is None:
             raise CompileError(
                 f"definition '{b.name}' is used before it is initialised", node.loc)
-        if st.rep == BOX and not st.is_global and st.name in self.moved_names:
+        if st.rep == BOX and not st.is_global and b.uid in self.moved_uids:
             raise CompileError(
                 f"'{b.name}' was consumed by a destructive array update and "
                 f"cannot be used again; use *-clone for a persistent copy",
@@ -1074,12 +1082,12 @@ class Compiler:
         else_bb = self.new_label("else")
         self.emit_inst(f"br i1 {cbool}, label %{then_bb}, label %{else_bb}")
 
-        saved_moved = set(self.moved_names)
+        saved_moved = set(self.moved_uids)
         saved_cleanup = [list(c) for c in self.cleanup_stack]
         saved_allowed = self.moves_allowed
 
         def restore_branch_state() -> None:
-            self.moved_names = set(saved_moved)
+            self.moved_uids = set(saved_moved)
             self.cleanup_stack = [list(c) for c in saved_cleanup]
             # Moves in a branch are only safe when that branch returns.
             self.moves_allowed = saved_allowed and is_tail
@@ -1098,7 +1106,7 @@ class Compiler:
             if not self.terminated:
                 self.emit_return(ev, node.else_.type)
             self.terminated = True
-            self.moved_names = set(saved_moved)
+            self.moved_uids = set(saved_moved)
             self.cleanup_stack = [list(c) for c in saved_cleanup]
             self.moves_allowed = saved_allowed
             return None
@@ -1221,11 +1229,11 @@ class Compiler:
             return None
         if not st.name.startswith("%par"):
             return None
-        if st.name in self.moved_names:
+        if b.uid in self.moved_uids:
             raise CompileError(
                 f"'{b.name}' was already consumed and cannot be moved again",
                 node.loc)
-        self.moved_names.add(st.name)
+        self.moved_uids.add(b.uid)
         for cleanup in self.cleanup_stack:
             cleanup[:] = [(name, immortal) for name, immortal in cleanup
                           if name != st.name]
@@ -1308,6 +1316,7 @@ class Compiler:
                 return None
             argval = self.coerce(argval, BOX, arg.type)
             argval = self.ensure_owned(argval)
+            self.emit_inst(f"call void @lambda_check_function(%Value* {cur.name})")
             code_p = self.new_reg()
             self.emit_inst(f"{code_p} = getelementptr %Value, %Value* {cur.name}, i32 0, i32 3")
             code = self.new_reg()
@@ -1343,6 +1352,22 @@ class Compiler:
         if op in ("read_line", "read_int", "read_float") and not self.allow_input:
             raise CompileError(
                 "terminal input is disabled; recompile with --input", node.loc)
+        if op in ("write_bytes", "write_f64s", "write_i64s"):
+            if not self.allow_data:
+                raise CompileError(
+                    "binary output is disabled; recompile with --data", node.loc)
+            if len(args) != 1:
+                raise CompileError(
+                    f"'{op}' takes exactly one array argument", node.loc)
+            a = self._array_borrow(args[0])
+            fn = {
+                "write_bytes": "@lambda_op_write_bytes",
+                "write_f64s": "@lambda_op_write_f64s",
+                "write_i64s": "@lambda_op_write_i64s",
+            }[op]
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call i64 {fn}(%Value* {a.name})")
+            return Val(I64, res)
         if op == "pmap":
             if len(args) < 2:
                 raise CompileError(
@@ -1422,7 +1447,7 @@ class Compiler:
             if not b.is_function and b.kind != PRIM:
                 st = self.find_storage(b.uid)
                 if st is not None and st.rep == BOX:
-                    if not st.is_global and st.name in self.moved_names:
+                    if not st.is_global and b.uid in self.moved_uids:
                         raise CompileError(
                             f"'{b.name}' was consumed by a destructive array "
                             f"update and cannot be used again", node.loc)
@@ -1458,11 +1483,11 @@ class Compiler:
             return None
         if not st.name.startswith("%par"):
             return None
-        if st.name in self.moved_names:
+        if b.uid in self.moved_uids:
             raise CompileError(
                 f"'{b.name}' was already consumed by a destructive array update",
                 node.loc)
-        self.moved_names.add(st.name)
+        self.moved_uids.add(b.uid)
         for cleanup in self.cleanup_stack:
             cleanup[:] = [(name, immortal) for name, immortal in cleanup
                           if name != st.name]
@@ -1889,11 +1914,13 @@ class Compiler:
         self.scope_stack = []
         self.cleanup_stack = []
         self.terminated = False
-        self.moved_names = set()
+        self.moved_uids = set()
         self.moves_allowed = True
         self.builder.raw("define i32 @main(i32 %argc, i8** %argv) {")
         self.builder.label("entry")
         self.emit_inst("call void @lambda_runtime_init()")
+        if self.allow_data:
+            self.emit_inst("call void @lambda_enable_binary_stdout()")
 
         # Top-level function closures first, so functions can be used as values
         # from anywhere (including top-level value initialisers).
@@ -1931,7 +1958,10 @@ class Compiler:
             raise CompileError("program produced no value", program.body.loc)
         rep = self.node_rep(program.body)
         result = self.coerce(result, rep, program.body.type)
-        if rep == I64:
+        if self.allow_data:
+            if rep == BOX:
+                self.release(result)
+        elif rep == I64:
             if not self.dynamic and is_bool_type(program.body.type):
                 self.emit_inst(f"call void @lambda_print_bool(i64 {result.name})")
             else:

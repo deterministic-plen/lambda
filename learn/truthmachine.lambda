@@ -1,0 +1,11 @@
+; As part of any good esolang we will write a truth machine.
+truth → (read-int "> ")
+f → (λx. 
+    if == x 1
+    then 
+    a → (println 1)
+    (f x)
+    else 
+    0
+)
+(f truth)

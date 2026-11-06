@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,15 @@ from typing import Optional
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TESTS = os.path.join(ROOT, "tests")
 
-# name, expected stdout, compiler flags, expected compile-failure substring, stdin
+
+def stream_frame(tag: int, stream_id: int, payload: bytes) -> bytes:
+    return (b"LMB1" + struct.pack("<BBHII", tag, 0, 0, stream_id, len(payload))
+            + payload)
+
+
+STREAM_F64 = stream_frame(1, 1, struct.pack("<2d", 1.0, -2.0))
+
+# name, expected stdout (str or bytes), compiler flags, expected compile-failure substring, stdin
 CASES = [
     # core / syntax / closures
     ("hello", "3\n", [], None, None),
@@ -78,6 +87,8 @@ CASES = [
     ("arrayi_loop", "332833500\n", [], None, None),
     ("arrayb_basic", "32640\n", [], None, None),
     ("array_clone", "[9.0, 1.0]\n", [], None, None),
+    ("array_rebind", "7\n", [], None, None),
+    ("stream_f64", STREAM_F64, ["--data"], None, None),
     ("arrayi_pmap", "[0, 2, 6, 12, 20]\n", [], None, None),
     ("arrayi_pmap_chunk", "[0, 10, 20, 30]\n", [], None, None),
     ("bigint_fib_100", "354224848179261915075\n", [], None, None),
@@ -117,6 +128,7 @@ CASES = [
     ("syntax_unclosed", None, [], "while parsing parenthesized expression", None),
     ("syntax_list_unclosed", None, [], "while parsing list or comprehension", None),
     ("syntax_lambda_eof", None, [], "while parsing lambda expression", None),
+    ("infix_warn", None, ["--strict"], "Lambda has no infix operators", None),
     ("include_cycle_a", None, [], "include cycle", None),
     ("include_body", None, [], "definitions only", None),
     ("pmap_impure", None, [], "pmap requires a provably pure function", None),
@@ -124,10 +136,11 @@ CASES = [
     ("array_consume_reuse", None, [], "consumed by a destructive array update", None),
     ("lambda_p_impure", None, [], "λp function body must be pure", None),
     ("input_disabled", None, [], "terminal input is disabled", None),
+    ("stream_no_data", None, [], "binary output is disabled", None),
 ]
 
 
-def run_case(name: str, expected: Optional[str], flags, fail_substr,
+def run_case(name: str, expected, flags, fail_substr,
              stdin_data: Optional[str], workdir: str):
     src = os.path.join(TESTS, name + ".lambda")
     exe = os.path.join(workdir, name)
@@ -156,12 +169,19 @@ def run_case(name: str, expected: Optional[str], flags, fail_substr,
     env = dict(os.environ)
     env["LAMBDA_STATS"] = "1"
     run_start = time.time()
-    run = subprocess.run([exe], input=stdin_data, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, text=True, env=env, timeout=300,
-                         encoding="utf-8", errors="replace")
+    binary = isinstance(expected, (bytes, bytearray))
+    if binary:
+        run = subprocess.run([exe], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=env, timeout=300)
+        stdout = run.stdout
+        stderr = run.stderr.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    else:
+        run = subprocess.run([exe], input=stdin_data, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, env=env, timeout=300,
+                             encoding="utf-8", errors="replace")
+        stdout = run.stdout.replace("\r\n", "\n")
+        stderr = run.stderr.replace("\r\n", "\n")
     run_time = time.time() - run_start
-    stdout = run.stdout.replace("\r\n", "\n")
-    stderr = run.stderr.replace("\r\n", "\n")
 
     if run.returncode != 0:
         return False, f"runtime exited {run.returncode}:\n{stderr}"

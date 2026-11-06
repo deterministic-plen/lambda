@@ -58,11 +58,12 @@ def _runtime_mtime() -> float:
 def build(input_file: str, output: str, *, strict: bool = False,
           dynamic: bool = False, keep_ir: bool = False,
           use_musttail: bool = True, debug: bool = False,
-          dump_ir: bool = False, allow_input: bool = False) -> str:
+          dump_ir: bool = False, allow_input: bool = False,
+          warn_infix: bool = True, allow_data: bool = False) -> str:
     if not os.path.exists(input_file):
         raise CompileError(f"file '{input_file}' not found")
 
-    program = load_program(input_file)
+    program = load_program(input_file, warn_infix=warn_infix)
     program = Resolver().resolve_program(program)
 
     # Sharing needs resolved bindings (for purity/arity), but not types.
@@ -93,7 +94,8 @@ def build(input_file: str, output: str, *, strict: bool = False,
     validate_parallel_lambdas(program, lambda_purity)
 
     compiler = Compiler(dynamic=is_dynamic, use_musttail=use_musttail, debug=debug,
-                        lambda_purity=lambda_purity, allow_input=allow_input)
+                        lambda_purity=lambda_purity, allow_input=allow_input,
+                        allow_data=allow_data)
     ir = compiler.compile_program(program)
 
     exe = output
@@ -141,8 +143,13 @@ def main(argv=None) -> int:
                     help="Print the generated LLVM IR to stdout")
     ap.add_argument("--no-musttail", action="store_true",
                     help="Disable musttail emission (debugging)")
+    ap.add_argument("--data", action="store_true",
+                    help="Enable binary data output (write-bytes/write-f64s/write-i64s); suppress the final print")
     ap.add_argument("--input", action="store_true",
                     help="Enable terminal input primitives (read-line/read-int/read-float)")
+    ap.add_argument("--no-warn-infix", action="store_false",
+                    dest="warn_infix", default=True,
+                    help="Suppress the likely-infix warning for z == 1-style applications")
     ap.add_argument("--debug", action="store_true",
                     help="Print the inferred program type")
     args = ap.parse_args(argv)
@@ -158,6 +165,8 @@ def main(argv=None) -> int:
             debug=args.debug,
             dump_ir=args.dump_ir,
             allow_input=args.input,
+            warn_infix=args.warn_infix,
+            allow_data=args.data,
         )
     except LambdaError as exc:
         if exc.loc and exc.loc.line:

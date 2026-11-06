@@ -1,0 +1,44 @@
+;simple 2D maxwell boltzmann simulation
+var → (λdata.
+  N → (arrayf-length data)
+  if (<= N 1)
+  then 0.0
+  else
+    go → (λi mean m2.
+      if (>= i N)
+      then (/ m2 (int->float N))       ; population
+      else
+        x → (arrayf-get data i)
+        delta → (- x mean)
+        mean2 → (+ mean (/ delta (int->float (+ i 1))))
+        delta2 → (- x mean2)
+        (go (+ i 1) mean2 (+ m2 (* delta delta2))))
+    (go 0 0.0 0.0)
+)
+;Handle position updates
+update-pos → (λi dT x y vx vy.
+    if (>= i N)
+    then (cons x (cons y nil))
+    else
+    Xpos → (arrayf-get x i)
+    VX → (arrayf-get vx i)
+    Ypos → (arrayf-get y i)
+    VY → (arrayf-get vy i)
+    x1 →(arrayf-set x i (+ Xpos (* VX dT)))
+    y1 → (arrayf-set y i (+ Ypos (* VY dT)))
+    update-pos (+ i 1) dT x1 y1 vx vy
+)
+TMAX → 10000
+f → (λtime x y vx vy.
+    if (>= time TMAX)
+    then "" ;terminate the simulation after a set point.
+    else
+
+
+
+    xnew → (head (updatepos 0 dT x y vx vy))
+    ynew → (head (tail (updatepos 0 dT x y vx vy)))
+    a → (println (var vx))
+    f (+ time 1) xnew ynew vxnew vynew
+)
+

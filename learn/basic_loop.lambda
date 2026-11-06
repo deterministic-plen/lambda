@@ -1,0 +1,16 @@
+; Looping in lambda always takes the form of repeated functional application.
+; We define loops recursively
+gauss → (λ i x.
+if == i 0
+then x 
+else
+gauss (- i 1) (+ x i)
+)
+(gauss 100 0)
+; gauss aurafarming his teacher
+
+; Let's consider the same program but for n = 3
+; Our rule states that gauss(0,x) = x and gauss(a,x) = gauss(a-1,x+a)
+; gauss(3,0) = gauss(3-1,3) = gauss(2-1,3+2) = gauss(0,3 + 2 + 1)
+; = 6
+; In Lambda, our function arugments are our state variables.

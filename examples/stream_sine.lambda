@@ -1,0 +1,14 @@
+include "lib/stream.lambda"
+
+n → 1000
+
+build → (λi data.
+  if (>= i n)
+  then data
+  else
+    x → (* (int->float i) 0.01)
+    v → (* (sin x) 100.0)
+    (build (+ i 1) (arrayf-set data i v)))
+
+ys → (build 0 (arrayf n 0.0))
+(emit-f64s 1 ys)

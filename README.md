@@ -39,7 +39,7 @@ python lambda.py examples/nth_prime_sieve.lambda -o sieve
 python lambda.py tests/input_int.lambda -o ask --input
 echo 41 | ./ask
 
-python run_tests.py          # 96 regression tests
+python run_tests.py          # 100 regression tests
 ```
 
 Requirements: Python 3.10+, LLVM `clang` on `PATH`.
@@ -51,9 +51,11 @@ Useful flags:
 | `--strict` | reject programs that cannot be type-inferred |
 | `--dynamic` | force the fully boxed backend |
 | `--input` | enable `read-line`/`read-int`/`read-float` (off by default) |
+| `--data` | enable binary `write-*` primitives; binary stdout; skip final print |
 | `--keep-ir` | keep the generated `.ll` next to the executable |
 | `--dump-ir` | print LLVM IR to stdout |
 | `--no-musttail` | disable `musttail`/`tail` emission (debugging) |
+| `--no-warn-infix` | suppress the likely-infix warning for `z == 1`-style applications |
 | `--debug` | print the inferred program type |
 
 Environment:
@@ -149,6 +151,7 @@ squarei → (λx. (* x x))           ; Int -> Int
 | bit-level | `&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
 | strings | `str->int`, `int->str`, `str->list`, `str-len`, `str-append`, `read-file` |
 | IO | `print`, `println` (return their argument), `not` |
+| binary data (`--data`) | `write-bytes : ArrayB -> Int`, `write-f64s : ArrayF -> Int`, `write-i64s : ArrayI -> Int` |
 | input (`--input`) | `read-line`, `read-int`, `read-float` |
 | fixed point | `fix`, `Y` (call-by-value, unary functions) |
 
@@ -358,6 +361,61 @@ n → (read-int "n: ")
   invalid input.
 * Prompt strings may be empty (`""`) for scripted use.
 
+## Binary data stream
+
+`--data` turns stdout into a binary channel and removes the automatic print of
+the program result.  This is for piping numeric results to a plotter or another
+process without formatting them as text:
+
+```lambda
+include "lib/stream.lambda"
+
+xs → (arrayf 1000 0.0)
+ys → (arrayf 1000 0.0)
+; ... fill xs and ys ...
+a → (emit-f64s 1 xs)
+(emit-f64s 2 ys)
+```
+
+```powershell
+python lambda.py examples/stream_xy.lambda -o stream_xy --data
+cmd /c "stream_xy.exe > data.bin"       # PowerShell's > is not byte-safe
+python tools/stream_plot.py data.bin --x 1 --plot
+```
+
+The low-level primitives are raw writers:
+
+| primitive | writes |
+| --- | --- |
+| `write-bytes : ArrayB -> Int` | the array bytes |
+| `write-f64s : ArrayF -> Int` | `8*n` raw little-endian doubles |
+| `write-i64s : ArrayI -> Int` | `8*n` raw little-endian int64s |
+
+They return the number of bytes written.  `lib/stream.lambda` adds the framing:
+
+```
+0..3   "LMB1"
+4      tag: 1 = f64 array, 2 = i64 array, 3 = bytes
+5      flags (0)
+6..7   reserved (0)
+8..11  stream id (u32, little-endian)
+12..15 payload byte length (u32, little-endian)
+16..   payload
+```
+
+Each frame is self-identifying, so a reader can resynchronise on `LMB1`.  The
+format is little-endian and assumes the host stores IEEE doubles in little-endian
+order (x86-64).  `tools/stream_plot.py` reads the frames and can list them,
+write CSV, or plot with matplotlib.
+
+Two practical constraints:
+
+* In `--data` mode `print`/`println` are redirected to stderr, so diagnostics
+  do not corrupt the binary stdout stream.  Keep the stream to `write-*` frames.
+* PowerShell may decode/re-encode a native pipeline.  Prefer redirecting to a
+  file, running through `cmd /c`, or using Python's `subprocess` with
+  `stdout=PIPE`; those preserve the bytes.
+
 ## Fixed points
 
 Call-by-value cannot use the textbook `Y = λf. (λx. f (x x)) (λx. f (x x))`:
@@ -452,7 +510,9 @@ Rust file also allocates `Vec<Vec<f64>>` and clones rows per elimination, and it
 | `lib/prime.lambda` | shared primality/bounds/block helpers |
 | `lib/list.lambda` | `length`, `reverse`, `filter`, `foldl`, `append` |
 | `lib/bigint.lambda` | pure-Lambda base-1e9 bigint, Karatsuba, fast doubling |
-| `run_tests.py` | 96 compile/run/leak regression cases |
+| `lib/stream.lambda` | LMB1 binary frame headers, f64/i64/byte emitters |
+| `tools/stream_plot.py` | binary frame reader, CSV export, optional matplotlib |
+| `run_tests.py` | 100 compile/run/leak regression cases |
 | `tests/`, `examples/` | test corpus and runnable examples |
 | `bench/` | fair Lambda/C/C++/Rust comparison and results |
 

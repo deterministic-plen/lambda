@@ -32,6 +32,7 @@ IMPURE_PRIMITIVES = {
     "arrayb_get", "arrayb_set", "arrayb_length", "arrayb_clone",
     "arrayi_pmap",
     "arrayi_pmap_chunk",
+    "write_bytes", "write_f64s", "write_i64s",
 }
 
 PRIM_ARITY = {
@@ -55,6 +56,7 @@ PRIM_ARITY = {
     "arrayb_get": 2, "arrayb_set": 3, "arrayb_length": 1, "arrayb_clone": 1,
     "arrayf_get_ro": 2, "arrayi_get_ro": 2, "arrayb_get_ro": 2,
     "arrayi_pmap": 2, "arrayi_pmap_chunk": 3,
+    "write_bytes": 1, "write_f64s": 1, "write_i64s": 1,
     "read_line": 1, "read_int": 1, "read_float": 1,
 }
 

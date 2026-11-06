@@ -1,0 +1,6 @@
+include "lib/stream.lambda"
+
+a0 → (arrayf 2 0.0)
+a1 → (arrayf-set a0 0 1.0)
+a2 → (arrayf-set a1 1 -2.0)
+(emit-f64s 1 a2)

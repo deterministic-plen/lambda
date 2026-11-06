@@ -1,0 +1,12 @@
+foobar → (λx. 
+if == (% x 3) 0
+then "foo"
+else if == (% x 5) 0
+then "bar"
+else if == (% x 15) 0
+then "foobar"
+else "")
+; Lambda supports the primitive ternary conditional.
+; The syntax is always if (condition) then (statement) else (statement)
+
+(foobar 5) ;try changing this to different values

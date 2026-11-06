@@ -1,0 +1,15 @@
+; Lambda is a simple (semi-)functional based-programming language.
+; In lambda, we only have functions
+; Let's look at how we can define a function
+id → (λ x. x)
+; This is the identity function.
+; We assign a name to it with →
+; All functions take the form λ (parameters). function body
+succ → (λ x. (+ x 1))
+; Lambda uses RPN for ease of compilation.
+
+; What about multiple arguments?
+add → (λ x y. (+ x y))
+; 
+;At the end of a program we must invoke a function.
+(add 2 3) ;prints 5

@@ -22,6 +22,7 @@ semantics now.
 
 from __future__ import annotations
 
+import sys
 from typing import List, Optional, Tuple
 
 from ast import App, Block, Def, If, Lam, Lit, Loc, Node, Var
@@ -43,6 +44,8 @@ PRIMITIVES = {
     "arrayb-get", "arrayb-set", "arrayb-length", "arrayb-clone",
     "arrayf-get-ro", "arrayi-get-ro", "arrayb-get-ro",
     "arrayi-pmap", "arrayi-pmap-chunk",
+    # binary data stream (requires --data)
+    "write-bytes", "write-f64s", "write-i64s",
     # strings
     "str->int", "int->str", "str->list", "str-len", "str-append",
     "read-file",
@@ -90,6 +93,8 @@ OP_CANON = {
     "arrayf-get-ro": "arrayf_get_ro", "arrayi-get-ro": "arrayi_get_ro",
     "arrayb-get-ro": "arrayb_get_ro", "arrayi-pmap": "arrayi_pmap",
     "arrayi-pmap-chunk": "arrayi_pmap_chunk",
+    "write-bytes": "write_bytes", "write-f64s": "write_f64s",
+    "write-i64s": "write_i64s",
     "str->int": "str_to_int", "int->str": "int_to_str",
     "str->list": "str_to_list", "str-len": "str_len",
     "str-append": "str_append", "read-file": "read_file",
@@ -119,15 +124,21 @@ OP_CANON = {
 ARITH_OPS = {"add", "sub", "mul", "div", "mod"}
 COMPARE_OPS = {"eq", "lt", "le", "gt", "ge"}
 
+INFIX_NAMES = {
+    "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
+    "⊕", "⊖", "⊗", "⊘", "⊙", "≡", "≺", "≼", "≻", "≽",
+}
+
 STOP_KEYWORDS = {"then", "else", "in"}
 
 
 class Parser:
-    def __init__(self, tokens: List[Token]) -> None:
+    def __init__(self, tokens: List[Token], warn_infix: bool = True) -> None:
         self.tokens = tokens
         self.pos = 0
         self.legacy_used = False
         self.contexts: List[Tuple[str, Loc]] = []
+        self.warn_infix = warn_infix
 
     # -- token helpers ----------------------------------------------------
     def peek(self, offset: int = 0) -> Token:
@@ -366,7 +377,32 @@ class Parser:
             args.append(self.parse_atom())
         if not args:
             return first
+        self.warn_infix_use(first, args)
         return App(first, args, first.loc)
+
+    def warn_infix_use(self, first: Node, args: List[Node]) -> None:
+        """Warn about the ``z == 1`` shape, which is an application.
+
+        Operators are first-class, so this cannot be an error; but when an
+        operator appears between two expressions it is almost always a mistake.
+        Higher-order primitive heads such as ``map + xs`` are left alone.
+        """
+        if not self.warn_infix:
+            return
+        if isinstance(first, Var) and first.name in PRIMITIVES:
+            return
+        for i, arg in enumerate(args[:-1]):
+            if isinstance(arg, Var) and arg.name in INFIX_NAMES:
+                head = first.name if isinstance(first, Var) else "function"
+                loc = arg.loc
+                print(
+                    f"{loc.source}:{loc.line}:{loc.col}: warning: "
+                    f"'{arg.name}' was passed as an argument. Lambda has no "
+                    f"infix operators, so this parses as an application. If "
+                    f"you meant infix, write ({arg.name} {head} ...)",
+                    file=sys.stderr,
+                )
+                return
 
     def parse_list(self) -> Node:
         start = self.expect("punct", "[").loc

@@ -24,6 +24,8 @@ RUNTIME_C = r"""
 
 #ifdef _WIN32
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #else
 #include <pthread.h>
 #include <unistd.h>
@@ -292,6 +294,10 @@ static void fail_type(const char *expected, Value *got) {
     fail(buf);
 }
 
+void lambda_check_function(Value *v) {
+    if (!v || v->tag != TAG_CLOSURE) fail_type("Function", v);
+}
+
 int64_t lambda_get_int(Value *v) {
     if (!v || v->tag != TAG_INT) fail_type("Int", v);
     return v->i;
@@ -339,10 +345,11 @@ int64_t lambda_mod_i64(int64_t a, int64_t b) {
 /* ------------------------------------------------------------------ */
 static char out_buf[65536];
 static size_t out_len = 0;
+static int data_mode = 0;
 
 static void out_flush(void) {
     if (out_len) {
-        fwrite(out_buf, 1, out_len, stdout);
+        fwrite(out_buf, 1, out_len, data_mode ? stderr : stdout);
         out_len = 0;
     }
 }
@@ -361,6 +368,40 @@ static void out_write(const char *s, size_t n) {
 
 static void out_puts(const char *s) { out_write(s, strlen(s)); }
 static void out_ch(char c) { out_write(&c, 1); }
+
+/* Binary data mode: stdout carries length-framed bytes, not terminal text.
+   On Windows the CRT must be switched out of text mode or \n is translated. */
+void lambda_enable_binary_stdout(void) {
+    out_flush();
+    data_mode = 1;
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+}
+
+static int64_t write_raw(const void *data, size_t n) {
+    out_flush();
+    if (n && fwrite(data, 1, n, stdout) != n) {
+        fail("write failed");
+    }
+    fflush(stdout);
+    return (int64_t)n;
+}
+
+int64_t lambda_op_write_bytes(Value *v) {
+    if (!v || v->tag != TAG_ARRAYB) fail_type("ArrayB", v);
+    return write_raw(v->p, (size_t)v->i);
+}
+
+int64_t lambda_op_write_f64s(Value *v) {
+    if (!v || v->tag != TAG_ARRAYF) fail_type("ArrayF", v);
+    return write_raw(v->p, (size_t)v->i * sizeof(double));
+}
+
+int64_t lambda_op_write_i64s(Value *v) {
+    if (!v || v->tag != TAG_ARRAYI) fail_type("ArrayI", v);
+    return write_raw(v->p, (size_t)v->i * sizeof(int64_t));
+}
 
 static void print_string(Value *v, int quoted) {
     const char *s = (const char *)v->p;
@@ -1848,6 +1889,10 @@ declare i8* @getenv(i8*)
 declare i32 @printf(i8*, ...)
 
 declare void @lambda_runtime_init()
+declare void @lambda_enable_binary_stdout()
+declare i64 @lambda_op_write_bytes(%Value*)
+declare i64 @lambda_op_write_f64s(%Value*)
+declare i64 @lambda_op_write_i64s(%Value*)
 declare void @lambda_stats()
 declare void @lambda_flush()
 declare i8* @lambda_alloc_env(i64)
@@ -1862,6 +1907,7 @@ declare %Value* @lambda_make_closure(i8*, i8*)
 
 declare void @lambda_retain(%Value*)
 declare void @lambda_release(%Value*)
+declare void @lambda_check_function(%Value*)
 declare i64 @lambda_get_int(%Value*)
 declare i64 @lambda_get_bool(%Value*)
 declare double @lambda_get_float(%Value*)

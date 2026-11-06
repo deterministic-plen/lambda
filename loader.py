@@ -20,7 +20,9 @@ from parser import Parser
 
 
 class ProgramLoader:
-    def __init__(self, search_paths: Optional[List[str]] = None) -> None:
+    def __init__(self, search_paths: Optional[List[str]] = None,
+                 warn_infix: bool = True) -> None:
+        self.warn_infix = warn_infix
         root = os.path.dirname(os.path.abspath(__file__))
         default_lib = os.path.join(root, "lib")
         paths = list(search_paths or [])
@@ -56,7 +58,7 @@ class ProgramLoader:
         try:
             with open(path, "r", encoding="utf-8-sig") as f:
                 source = f.read()
-            parser = Parser(tokenize(source, path))
+            parser = Parser(tokenize(source, path), warn_infix=self.warn_infix)
             block = parser.parse_unit(self, require_body=is_main)
         finally:
             self.active.pop()
@@ -98,5 +100,6 @@ class ProgramLoader:
         return os.path.normcase(os.path.realpath(path))
 
 
-def load_program(path: str, search_paths: Optional[List[str]] = None) -> Node:
-    return ProgramLoader(search_paths).load_main(path)
+def load_program(path: str, search_paths: Optional[List[str]] = None,
+                 warn_infix: bool = True) -> Node:
+    return ProgramLoader(search_paths, warn_infix=warn_infix).load_main(path)

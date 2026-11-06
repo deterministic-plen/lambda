@@ -1,0 +1,57 @@
+; Binary stream framing for --data programs.
+;
+; Every frame is 16-byte header + payload, little-endian:
+;
+;   0..3   "LMB1"
+;   4      tag: 1 = f64 array, 2 = i64 array, 3 = bytes
+;   5      flags (0)
+;   6..7   reserved (0)
+;   8..11  stream id (u32)
+;   12..15 payload byte length (u32)
+;
+; f64/i64 payloads are raw little-endian host values.  The intended use is:
+;
+;   include "lib/stream.lambda"
+;   (emit-f64s 1 xs)
+;   (emit-f64s 2 ys)
+;
+; and a reader such as tools/stream_plot.py.
+
+put-u32 → (λb off v.
+  b1 → (arrayb-set b off (& v 255))
+  b2 → (arrayb-set b1 (+ off 1) (& (shr v 8) 255))
+  b3 → (arrayb-set b2 (+ off 2) (& (shr v 16) 255))
+  (arrayb-set b3 (+ off 3) (& (shr v 24) 255)))
+
+stream-header → (λtag id nbytes.
+  b0 → (arrayb 16 0)
+  b1 → (arrayb-set b0 0 76)
+  b2 → (arrayb-set b1 1 77)
+  b3 → (arrayb-set b2 2 66)
+  b4 → (arrayb-set b3 3 49)
+  b5 → (arrayb-set b4 4 tag)
+  b6 → (arrayb-set b5 5 0)
+  b7 → (arrayb-set b6 6 0)
+  b8 → (arrayb-set b7 7 0)
+  b9 → (put-u32 b8 8 id)
+  (put-u32 b9 12 nbytes))
+
+emit-f64s → (λid xs.
+  n → (arrayf-length xs)
+  bytes → (* n 8)
+  h → (stream-header 1 id bytes)
+  w → (write-bytes h)
+  (write-f64s xs))
+
+emit-i64s → (λid xs.
+  n → (arrayi-length xs)
+  bytes → (* n 8)
+  h → (stream-header 2 id bytes)
+  w → (write-bytes h)
+  (write-i64s xs))
+
+emit-bytes → (λid bs.
+  n → (arrayb-length bs)
+  h → (stream-header 3 id n)
+  w → (write-bytes h)
+  (write-bytes bs))

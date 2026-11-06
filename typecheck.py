@@ -19,6 +19,11 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 from ast import App, Binding, Block, Def, If, Lam, Lit, Node, PRIM, Var, walk
 from errors import TypeError_
 
+INFIX_NAMES = {
+    "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
+    "⊕", "⊖", "⊗", "⊘", "⊙", "≡", "≺", "≼", "≻", "≽",
+}
+
 I64 = "i64"
 F64 = "f64"
 BOX = "box"
@@ -472,6 +477,12 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TARRAYB], TINT))
     if name == "arrayb-clone":
         return mono(tfun([TARRAYB], TARRAYB))
+    if name == "write-bytes":
+        return mono(tfun([TARRAYB], TINT))
+    if name == "write-f64s":
+        return mono(tfun([TARRAYF], TINT))
+    if name == "write-i64s":
+        return mono(tfun([TARRAYI], TINT))
     raise TypeError_(f"unknown primitive '{name}'")
 
 
@@ -550,7 +561,17 @@ class Inferencer:
                 try:
                     unify(func_t, TFun(arg_t, res_t))
                 except UnifyError as exc:
-                    raise TypeError_(exc.message, arg.loc) from None
+                    hint = ""
+                    for candidate in node.args:
+                        if isinstance(candidate, Var) and candidate.name in INFIX_NAMES:
+                            head = node.func.name if isinstance(node.func, Var) else "function"
+                            hint = (
+                                f"; note: '{candidate.name}' was passed as an "
+                                f"argument. Lambda has no infix operators; if you "
+                                f"meant infix, write ({candidate.name} {head} ...)"
+                            )
+                            break
+                    raise TypeError_(exc.message + hint, arg.loc) from None
                 func_t = res_t
             return func_t
 
