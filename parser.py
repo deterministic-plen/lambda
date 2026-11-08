@@ -54,7 +54,7 @@ PRIMITIVES = {
     "str->int", "int->str", "str->list", "str-len", "str-append",
     "read-file",
     # io / misc
-    "print", "println", "not",
+    "print", "println", "not", "and", "or",
     # fixed-point combinator (call-by-value)
     "fix", "Y",
     # float conversions and mathematics
@@ -64,7 +64,7 @@ PRIMITIVES = {
     "pow", "**", "^", "abs", "π", "pi", "e",
     "∑", "sum", "∏", "product",
     # bit-level integer operations
-    "&", "|", "!", "bit-and", "bit-or", "bit-xor", "bit-not",
+    "&", "|", "&&", "!", "bit-and", "bit-or", "bit-xor", "bit-not",
     "shl", "shr", "popcount",
     # lists and parallelism
     "map", "pmap", "range", "immortalize", "freeze",
@@ -104,6 +104,7 @@ OP_CANON = {
     "str->list": "str_to_list", "str-len": "str_len",
     "str-append": "str_append", "read-file": "read_file",
     "print": "print", "println": "println", "not": "not",
+    "and": "and", "or": "or",
     "fix": "fix", "Y": "fix",
     "int->float": "int_to_float", "float->int": "float_to_int",
     "str->float": "str_to_float", "float->str": "float_to_str",
@@ -115,7 +116,7 @@ OP_CANON = {
     "pow": "pow", "**": "pow", "^": "pow",
     "abs": "abs", "π": "pi", "pi": "pi", "e": "e",
     "∑": "sum", "sum": "sum", "∏": "product", "product": "product",
-    "&": "bit_and", "bit-and": "bit_and",
+    "&": "bit_and", "&&": "bit_and", "bit-and": "bit_and",
     "|": "bit_or", "bit-or": "bit_or",
     "bit-xor": "bit_xor",
     "!": "bit_not", "bit-not": "bit_not",
@@ -461,43 +462,7 @@ class Parser:
                     "include directives must appear at the top of a file", tok.loc)
         if self.at_definition_start():
             return self.parse_block()
-        return self.parse_logic()
-
-    def parse_logic_expr(self) -> Node:
-        """Expression context that accepts direct ``&&``/``||`` chains."""
-        tok = self.peek()
-        if tok.kind in ("lambda", "lambda_par"):
-            return self.parse_lambda(tok.kind == "lambda_par")
-        if tok.kind == "keyword" and tok.value == "if":
-            return self.parse_if()
-        if tok.kind == "keyword" and tok.value in ("let", "letrec", "letloop"):
-            return self.parse_let(tok.value)
-        if tok.kind == "keyword" and tok.value == "match":
-            return self.parse_match()
-        if self.at_definition_start():
-            return self.parse_block()
-        return self.parse_logic()
-
-    def parse_paren(self) -> Node:
-        """A parenthesized expression allows logical ``&&``/``||`` chains."""
-        start = self.pop().loc
-        self.push_context("parenthesized expression", start)
-        tok = self.peek()
-        if tok.kind in ("lambda", "lambda_par"):
-            expr = self.parse_lambda(tok.kind == "lambda_par")
-        elif tok.kind == "keyword" and tok.value == "if":
-            expr = self.parse_if()
-        elif tok.kind == "keyword" and tok.value in ("let", "letrec", "letloop"):
-            expr = self.parse_let(tok.value)
-        elif tok.kind == "keyword" and tok.value == "match":
-            expr = self.parse_match()
-        elif self.at_definition_start():
-            expr = self.parse_block()
-        else:
-            expr = self.parse_logic()
-        self.expect("punct", ")", "')'")
-        self.pop_context()
-        return expr
+        return self.parse_application()
 
     # -- individual forms -------------------------------------------------
     def parse_lambda(self, parallel: bool = False) -> Lam:
@@ -585,7 +550,7 @@ class Parser:
                 self.pop()
             else:
                 self.expect("punct", ":", "':' or '→'")
-            arm = self.parse_logic_expr()
+            arm = self.parse_expr()
             arms.append((pat.value, arm))
             binders.append(arm_binders)
             if self.check("punct", ",") or self.check("pipe"):
@@ -620,8 +585,6 @@ class Parser:
                 break
             if tok.kind in ("keyword", "pipe", "ppipe", "range", "larrow"):
                 break
-            if tok.kind in ("logic_and", "logic_or"):
-                break
             if tok.kind == "punct" and tok.value in ")],.:":
                 break
             if self.at_definition_start():
@@ -631,18 +594,6 @@ class Parser:
             return first
         self.warn_infix_use(first, args)
         return App(first, args, first.loc)
-
-    def parse_logic(self) -> Node:
-        """Logical ``&&``/``||`` (short-circuit) with the usual precedence."""
-        node = self.parse_application()
-        while self.peek().kind in ("logic_and", "logic_or"):
-            op = self.pop()
-            rhs = self.parse_application()
-            if op.kind == "logic_and":
-                node = If(node, rhs, Lit(False, op.loc), op.loc)
-            else:
-                node = If(node, Lit(True, op.loc), rhs, op.loc)
-        return node
 
     def warn_infix_use(self, first: Node, args: List[Node]) -> None:
         """Warn about the ``z == 1`` shape, which is an application.
@@ -704,7 +655,7 @@ class Parser:
         elements = [first]
         while self.check("punct", ","):
             self.pop()
-            elements.append(self.parse_logic_expr())
+            elements.append(self.parse_expr())
         self.expect("punct", "]", "']'")
         self.pop_context()
         expr: Node = Var("nil", start)
@@ -716,7 +667,12 @@ class Parser:
         tok = self.peek()
 
         if tok.kind == "punct" and tok.value == "(":
-            return self.parse_paren()
+            start = self.pop().loc
+            self.push_context("parenthesized expression", start)
+            expr = self.parse_expr()
+            self.expect("punct", ")", "')'")
+            self.pop_context()
+            return expr
         if tok.kind == "punct" and tok.value == "[":
             return self.parse_list()
 

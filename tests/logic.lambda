@@ -1,4 +1,3 @@
-﻿type Result (ok: Bool, code: Int)
-t → true
+﻿t → true
 f → false
-[(t && t), (t && f), (f && t), (t || f), (f || t), (f || f), (not t), (not f)]
+[(and t t), (and t f), (and f t), (or t f), (or f t), (or f f), (not t), (not f)]

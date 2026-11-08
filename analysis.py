@@ -48,7 +48,7 @@ PRIM_ARITY = {
     "atan2": 2, "exp": 1, "ln": 1, "log10": 1, "log2": 1,
     "floor": 1, "ceil": 1, "round": 1, "trunc": 1, "pow": 2, "abs": 1,
     "pi": 0, "e": 0, "sum": 1, "product": 1,
-    "bit_and": 2, "bit_or": 2, "bit_xor": 2, "bit_not": 1,
+    "bit_and": 2, "bit_or": 2, "bit_xor": 2, "bit_not": 1, "and": 2, "or": 2,
     "shl": 2, "shr": 2, "popcount": 1,
     "range": 2, "map": 2, "pmap": 2, "immortalize": 1,
     "arrayf": 2, "arrayi": 2, "arrayb": 2,

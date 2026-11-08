@@ -54,7 +54,7 @@ PRIM_GLOBALS = {
     "head": "@lambda_prim_head",
     "tail": "@lambda_prim_tail",
     "empty": "@lambda_prim_empty",
-    "not": "@lambda_prim_not",
+    "not": "@lambda_prim_not", "and": "@lambda_prim_and", "or": "@lambda_prim_or",
     "str_to_int": "@lambda_prim_str_to_int",
     "int_to_str": "@lambda_prim_int_to_str",
     "str_to_list": "@lambda_prim_str_to_list",
@@ -95,7 +95,7 @@ OP_FN = {
     "div": "@lambda_op_div", "mod": "@lambda_op_mod", "eq": "@lambda_op_eq",
     "lt": "@lambda_op_lt", "le": "@lambda_op_le", "gt": "@lambda_op_gt",
     "ge": "@lambda_op_ge", "cons": "@lambda_op_cons", "head": "@lambda_op_head",
-    "tail": "@lambda_op_tail", "empty": "@lambda_op_empty", "not": "@lambda_op_not",
+    "tail": "@lambda_op_tail", "empty": "@lambda_op_empty", "not": "@lambda_op_not", "and": "@lambda_op_and", "or": "@lambda_op_or",
     "str_to_int": "@lambda_op_str_to_int", "int_to_str": "@lambda_op_int_to_str",
     "str_to_list": "@lambda_op_str_to_list", "str_len": "@lambda_op_str_len",
     "str_append": "@lambda_op_str_append", "read_file": "@lambda_op_read_file",
@@ -2328,6 +2328,16 @@ class Compiler:
             a = self._prim_arg(args[0], I64, args[0].type)
             res = self.new_reg()
             self.emit_inst(f"{res} = xor i64 {a.name}, 1")
+            return Val(I64, res)
+        if op in ("and", "or"):
+            # Evaluate both operands; with short-circuit operands that already
+            # contain `if`, the 0/1 of the first is exactly the identity for
+            # the second, so this equals the short-circuit result.
+            a = self._prim_arg(args[0], I64, args[0].type)
+            b = self._prim_arg(args[1], I64, args[1].type)
+            res = self.new_reg()
+            inst = "and" if op == "and" else "or"
+            self.emit_inst(f"{res} = {inst} i64 {a.name}, {b.name}")
             return Val(I64, res)
         if op == "cons":
             head = self._prim_arg(args[0], self.node_rep(args[0]), args[0].type)

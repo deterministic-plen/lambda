@@ -427,8 +427,9 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return _forall(lambda m: tfun([m["a"], m["a"]], TBOOL))
     if name in ("<", "≺", "<=", "≼", ">", "≻", ">=", "≽"):
         return _numeric(lambda n: tfun([n, n], TBOOL))
-    if name == "not":
-        return mono(tfun([TBOOL], TBOOL))
+    if name in ("not", "and", "or"):
+        return mono(tfun([TBOOL, TBOOL], TBOOL) if name != "not"
+                    else tfun([TBOOL], TBOOL))
     if name == "cons":
         return _forall(lambda m: tfun([m["a"], TList(m["a"])], TList(m["a"])))
     if name == "head":
@@ -489,7 +490,7 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
     if name == "abs":
         return _numeric(lambda n: tfun([n], n))
     # Bit-level integer operations (used by the segmented sieve).
-    if name in ("&", "|", "bit-and", "bit-or", "bit-xor", "shl", "shr"):
+    if name in ("&", "&&", "|", "bit-and", "bit-or", "bit-xor", "shl", "shr"):
         return mono(tfun([TINT, TINT], TINT))
     if name in ("!", "bit-not", "popcount"):
         return mono(tfun([TINT], TINT))

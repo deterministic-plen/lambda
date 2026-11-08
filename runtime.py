@@ -407,6 +407,18 @@ int64_t lambda_get_int(Value *v) {
     return v->i;
 }
 
+/* First-class `and`/`or`: short-circuit semantics are preserved for direct
+   applications; as values they take both operands already evaluated. */
+int64_t lambda_truthy(Value *v);
+
+Value *lambda_op_and(Value *a, Value *b) {
+    return lambda_truthy(a) ? b : a;
+}
+
+Value *lambda_op_or(Value *a, Value *b) {
+    return lambda_truthy(a) ? a : b;
+}
+
 int64_t lambda_get_bool(Value *v) {
     if (!v || v->tag != TAG_BOOL) fail_type("Bool", v);
     return v->i ? 1 : 0;
@@ -1789,6 +1801,33 @@ static Value *unary_stage(void *env, Value *a) {
     return fn(a);
 }
 
+typedef Value *(*LogicBinFn)(Value *, Value *);
+
+typedef struct LogicRoot {
+    EnvHeader hdr; /* dtor = NULL */
+    LogicBinFn fn;
+} LogicRoot;
+
+typedef struct LogicHeld {
+    EnvHeader hdr; /* dtor = NULL */
+    LogicBinFn fn;
+    Value *a;
+} LogicHeld;
+
+static Value *logic_stage2(void *env, Value *b) {
+    LogicHeld *held = (LogicHeld *)env;
+    return held->fn(held->a, b);
+}
+
+static Value *logic_stage1(void *env, Value *a) {
+    LogicRoot *root = (LogicRoot *)env;
+    LogicHeld *held = (LogicHeld *)xmalloc(sizeof(LogicHeld));
+    held->hdr.dtor = NULL;
+    held->fn = root->fn;
+    held->a = a;
+    return lambda_make_closure((void *)logic_stage2, held);
+}
+
 /* ------------------------------------------------------------------ */
 /* call-by-value fixed-point combinator (fix / Y)                      */
 /* ------------------------------------------------------------------ */
@@ -1867,6 +1906,8 @@ Value *lambda_prim_head = NULL;
 Value *lambda_prim_tail = NULL;
 Value *lambda_prim_empty = NULL;
 Value *lambda_prim_not = NULL;
+Value *lambda_prim_and = NULL;
+Value *lambda_prim_or = NULL;
 Value *lambda_prim_str_to_int = NULL;
 Value *lambda_prim_int_to_str = NULL;
 Value *lambda_prim_str_to_list = NULL;
@@ -1930,6 +1971,8 @@ static BinRoot root_str_append = { { NULL }, lambda_op_str_append };
 static BinRoot root_pow = { { NULL }, lambda_op_pow };
 static BinRoot root_atan2 = { { NULL }, lambda_op_atan2 };
 static BinRoot root_bit_and = { { NULL }, lambda_op_bit_and };
+static LogicRoot root_and = { { NULL }, lambda_op_and };
+static LogicRoot root_or = { { NULL }, lambda_op_or };
 static BinRoot root_bit_or = { { NULL }, lambda_op_bit_or };
 static BinRoot root_bit_xor = { { NULL }, lambda_op_bit_xor };
 static BinRoot root_shl = { { NULL }, lambda_op_shl };
@@ -1955,6 +1998,8 @@ void lambda_runtime_init(void) {
     lambda_prim_tail = make_immortal_closure((void *)unary_stage, (void *)lambda_op_tail);
     lambda_prim_empty = make_immortal_closure((void *)unary_stage, (void *)lambda_op_empty);
     lambda_prim_not = make_immortal_closure((void *)unary_stage, (void *)lambda_op_not);
+    lambda_prim_and = make_immortal_closure((void *)logic_stage1, (void *)&root_and);
+    lambda_prim_or = make_immortal_closure((void *)logic_stage1, (void *)&root_or);
     lambda_prim_str_to_int = make_immortal_closure((void *)unary_stage, (void *)lambda_op_str_to_int);
     lambda_prim_int_to_str = make_immortal_closure((void *)unary_stage, (void *)lambda_op_int_to_str);
     lambda_prim_str_to_list = make_immortal_closure((void *)unary_stage, (void *)lambda_op_str_to_list);
@@ -2060,6 +2105,8 @@ declare %Value* @lambda_op_head(%Value*)
 declare %Value* @lambda_op_tail(%Value*)
 declare %Value* @lambda_op_empty(%Value*)
 declare %Value* @lambda_op_not(%Value*)
+declare %Value* @lambda_op_and(%Value*, %Value*)
+declare %Value* @lambda_op_or(%Value*, %Value*)
 declare %Value* @lambda_op_int_to_str(%Value*)
 declare %Value* @lambda_op_str_to_int(%Value*)
 declare %Value* @lambda_op_str_to_list(%Value*)

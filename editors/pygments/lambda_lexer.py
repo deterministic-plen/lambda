@@ -26,12 +26,12 @@ KEYWORDS = (
 )
 
 BUILTINS = (
-    "abs acos arrayb arrayb-clone arrayb-get arrayb-get-ro arrayb-length "
+    "abs acos and arrayb arrayb-clone arrayb-get arrayb-get-ro arrayb-length "
     "arrayb-set arrayf arrayf-clone arrayf-get arrayf-get-ro arrayf-length "
     "arrayf-set arrayf-sum arrayi arrayi-clone arrayi-get arrayi-get-ro "
     "arrayi-length arrayi-sum arrayi-pmap arrayi-pmap-chunk arrayi-set "
     "asin atan atan2 bit-and bit-not bit-or bit-xor ceil cons cos e empty? "
-    "exp fix float->int "
+    "exp fix float->int or "
     "float->str floor freeze head immortalize int->float int->str ln log10 "
     "log2 map not pi pmap popcount pow print println product range read-file "
     "read-float read-int read-line round shl shr sin sqrt str->float str->int "

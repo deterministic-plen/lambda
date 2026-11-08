@@ -37,9 +37,7 @@ def is_word(name: str) -> bool:
 
 def main() -> int:
     primitives = sorted(p for p in PRIMITIVES if is_word(p))
-    # Logical ``&&``/``||`` are short-circuit syntax, not primitives.
-    operators = sorted(set([p for p in PRIMITIVES if not is_word(p)]
-                           + ["&&", "||"]))
+    operators = sorted(p for p in PRIMITIVES if not is_word(p))
     data = {
         "version": 1,
         "source": "lexer.KEYWORDS + parser.PRIMITIVES",

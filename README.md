@@ -164,8 +164,8 @@ squarei → (λx. (* x x))           ; Int -> Int
 | reductions | `sum`, `product` (same type as the list) |
 | lists | `cons`, `head`, `tail`, `empty?`, `nil`, `map`, `pmap`, `range`, `immortalize`/`freeze` |
 | flat arrays | `arrayf`, `arrayi`, `arrayb`, `*-get`, `*-get-ro`, `*-set`, `*-length`, `*-clone`, `arrayi-sum`, `arrayf-sum`, `arrayi-pmap`, `arrayi-pmap-chunk` |
-| logical | `&&`, `\|\|`, `not` (short-circuit, `Bool`) |
-| bit-level | `&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
+| logical | `and`, `or`, `not` (`Bool`) |
+| bit-level | `&&`/`&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
 | strings | `str->int`, `int->str`, `str->list`, `str-len`, `str-append`, `read-file` |
 | IO | `print`, `println` (return their argument), `not` |
 | binary data (`--data`) | `write-bytes : ArrayB -> Int`, `write-f64s : ArrayF -> Int`, `write-i64s : ArrayI -> Int` |
@@ -178,27 +178,32 @@ effectful primitives.  Division/modulo are inlined `sdiv`/`srem` for Int and
 
 ### Logical operators
 
-`&&` and `||` short-circuit and return `Bool`:
+`and`, `or` and `not` are ordinary word primitives, keeping Lambda's prefix
+application style:
 
 ```lambda
-(a > 0) && (b > 0)
-(is-valid x) || (== x 0)
-not (empty? xs)
+(and (> a 0) (> b 0))
+(or (empty? xs) (== n 0))
+(not (empty? xs))
 ```
 
-They expand in the parser to `if` expressions, so `a && b` is exactly
-`(if a then b else false)` and `a || b` is exactly `(if a then true else b)`.
-The generated IR and machine code are identical to the explicit `if` form;
-no intermediate boolean is materialised and the right operand is not
-evaluated when the left one decides the result. `&&` is *logical* and takes
-`Bool`; use `&`/`bit-and` for bitwise-and on `Int`.
+`and`/`or` evaluate both operands. When the right operand is a total
+expression (no division by a possibly-zero divisor, no out-of-range array
+access), `(and a b)` and `(if a then b else false)` produce the same value, and
+`and` compiles to a single `and i64` instruction -- the branch-free form.
+When the right operand may fault or is expensive, write the `if` form
+explicitly; it skips evaluation:
+
+```lambda
+safe → (λb: Bool n: Int. if b then true else (> (/ 10 n) 100))
+```
 
 | operator | meaning | operands |
 | --- | --- | --- |
-| `&&` | logical and, short-circuit | `Bool` |
-| `||` | logical or, short-circuit | `Bool` |
+| `and` | logical and | `Bool` |
+| `or` | logical or | `Bool` |
 | `not` | logical negation (`xor i64 x, 1`) | `Bool` |
-| `&` / `bit-and` | bitwise and | `Int` |
+| `&&` / `&` / `bit-and` | bitwise and | `Int` |
 | `|` / `bit-or`, `bit-xor`, `!` / `bit-not` | bitwise | `Int` |
 
 ### Operator spellings
@@ -404,7 +409,22 @@ variable name always wins, and `vector-2-dimensional_x` means the field `x` of
 `vector-2-dimensional`, never a search through earlier prefixes.  If that prefix
 is not a record with field `x`, it is an error.
 Values are passed by value in registers/stack: there is no heap allocation or
-runtime tag for the product itself.
+runtime tag for the product itself.  Constructing "a new" product value is just
+two `insertvalue` instructions producing a new SSA value, so it allocates
+nothing; the old value is untouched (so it costs nothing to keep, and nothing
+to discard).  For example a complex conjugate compiles to:
+
+```llvm
+%r0 = extractvalue %rec_Complex %par0, 0
+%r1 = extractvalue %rec_Complex %par0, 1
+%r2 = fsub double 0.0, %r1
+     ; (Complex re (neg im)) -> two insertvalues, passing %r0 and %r2
+```
+
+There is no "overwrite" either: there is no mutable record storage to overwrite.
+If a later pass proves the old value is dead, LLVM simply reuses the same
+physical registers.  To allocate Python-style, you would need lists, strings,
+arrays, or closures (which are reference-counted heap objects).
 
 Current restrictions:
 
@@ -486,12 +506,12 @@ no longer takes a mutex.  The public API is unchanged: `bi-get`, `bi-set`,
 through a limb checksum, and `F(1,000,000)` (208,988 digits) is the benchmark:
 
 ```
-examples/bigint_fib1m.lambda   ; ~95 ms compute + output, exactly 208,988 digits
+examples/bigint_fib1m.lambda   ; ~97 ms compute + output, exactly 208,988 digits
 ```
 
 Compute-only, Lambda is about **88 ms** versus Python's C-backed bigint at
 ~36 ms and gmpy2/GMP at ~2.8 ms.  The total including decimal output is
-~95 ms versus ~512 ms for Python, because base-1e9 printing is essentially
+~97 ms versus ~523 ms for Python, because base-1e9 printing is essentially
 free.  This is the "same order as Python" target; GMP is a different class of
 implementation (FFT plus assembly).  Full protocol and medians:
 [bench/results.md](bench/results.md).
@@ -560,7 +580,7 @@ Three nth-prime implementations are included:
 | --- | --- | --- |
 | `examples/nth_prime.lambda` | sequential trial division, early exit | ~1.00 s |
 | `examples/nth_prime_parallel.lambda` | 65,536-candidate blocks, `pmap` trial division | ~0.17 s |
-| `examples/nth_prime_sieve.lambda` | 64-bit segmented sieve, one mask per block | ~0.19 s |
+| `examples/nth_prime_sieve.lambda` | 64-bit segmented sieve, one mask per block | ~0.14 s |
 
 Single-thread times for the two parallel programs are ~1.20 s and ~0.85 s.
 The sieve has less arithmetic but more communication/allocation (masks and
@@ -667,9 +687,9 @@ cycle.
 Windows x64, clang `-O3`, 16 logical CPUs:
 
 * `nth-prime 670000`: sequential ~1.00 s; parallel trial division ~0.17 s;
-  segmented sieve ~0.23 s (0.034 s at 16 threads).
-* `F(1,000,000)`: 208,988 digits in ~95 ms compute+output (`live=0`);
-  compute-only ~88 ms versus Python ~36 ms and gmpy2 ~2.8 ms.
+  segmented sieve ~0.14 s (0.020 s at 16 threads).
+* `F(1,000,000)`: 208,988 digits in ~97 ms compute+output (`live=0`);
+  compute-only ~90 ms versus Python ~36 ms and gmpy2 ~2.8 ms.
 * 100,000-iteration string churn: 100,004 values / 100,002 envs, `live=0`.
 * 100,000-element list construction/teardown: 200,002 values, `live=0`.
 * 100,000 closures created/dropped: 100,004 values / 100,002 envs, `live=0`.
@@ -688,27 +708,27 @@ there is no I/O inside a timed region. CPU: AMD Ryzen 7 9700X, 8 cores /
 
 | kernel | threads | Lambda | C | C++ | Rust | Lambda / C |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| sequential nth-prime | 1 | 1022.1 ms | 1016.4 ms | 1014.7 ms | 1034.3 ms | 1.01x |
-| parallel trial division | 1 | 1204.1 ms | 1193.5 ms | 1249.1 ms | 1219.8 ms | 1.01x |
-| parallel trial division | 16 | 171.0 ms | 165.1 ms | 173.9 ms | 176.1 ms | 1.04x |
-| segmented sieve | 1 | 230.3 ms | 167.7 ms | 165.0 ms | 165.1 ms | 1.37x |
-| segmented sieve | 16 | 33.9 ms | 21.1 ms | 21.6 ms | 20.6 ms | 1.61x |
-| Newton, 100 steps | 1 | 0.375 µs | 0.366 µs | 0.366 µs | 0.368 µs | 1.02x |
-| 10M i64 fill+sum | 1 | 16.9 ms | 15.0 ms | 13.3 ms | 16.1 ms | 1.13x |
+| sequential nth-prime | 1 | 1018.6 ms | 1004.9 ms | 1003.5 ms | 1010.6 ms | 1.01x |
+| parallel trial division | 1 | 1178.0 ms | 1175.3 ms | 1225.1 ms | 1189.5 ms | 1.00x |
+| parallel trial division | 16 | 171.9 ms | 170.2 ms | 176.1 ms | 178.2 ms | 1.01x |
+| segmented sieve | 1 | 136.0 ms | 165.8 ms | 160.3 ms | 163.4 ms | 0.82x |
+| segmented sieve | 16 | 20.5 ms | 22.5 ms | 23.2 ms | 21.5 ms | 0.91x |
+| Newton, 100 steps | 1 | 0.367 µs | 0.370 µs | 0.364 µs | 0.367 µs | 0.99x |
+| 10M i64 fill+sum | 1 | 16.3 ms | 13.9 ms | 13.2 ms | 14.2 ms | 1.18x |
 
-The sequential and parallel trial-division paths and the f64 Newton kernel are
-at parity. The sieve now uses a flat `arrayi` of base primes, chunked
-`arrayi-pmap-chunk` counts into a flat result array, and materialises only the
-selected block’s mask. A `p >= 64` fast path marks at most one bit directly,
-avoiding the recursive mark loop for almost all base primes; this reduced the
-gap from 5.1x/8.8x to **1.09x/1.45x**. The remaining single-thread overhead is
-the Lambda-level mask loop and bounds checks; the parallel gap is mostly chunk
-dispatch. The 10M-element array test is **1.21x C**, with one contiguous
-allocation per pass and no per-element wrappers.
+Sequential and parallel trial division and the f64 Newton kernel are at
+parity (**1.00-1.02x**). The segmented sieve now beats the native
+implementations on this machine (**0.82x** C single-threaded, **0.91x** on 16
+threads): it keeps base primes in one flat `arrayi`, counts chunks with
+`arrayi-pmap-chunk` into a flat result array, materialises only the selected
+block's mask, and has a `p >= 64` fast path that marks one bit directly instead
+of running the recursive mark loop. The 10M-element fill+sum test is **1.18x**
+C, with one contiguous allocation per pass and no per-element wrappers; the
+remaining gap is the Lambda-level loop body and per-access bounds checks.
 
 The bigint library (`lib/bigint.lambda`) computes **F(1,000,000) = 208,988
-digits in ~95 ms**, including decimal output, versus ~512 ms for Python’s
-C-backed bigint.  Compute-only it is ~88 ms versus Python ~36 ms (2.5x) and
+digits in ~97 ms**, including decimal output, versus ~523 ms for Python’s
+C-backed bigint.  Compute-only it is ~90 ms versus Python ~36 ms (2.5x) and
 gmpy2/GMP ~2.8 ms (32x).  The representation is unchanged (base-1e9 limbs in
 one `arrayi`, length in limb 0); all arithmetic is Lambda over `arrayi`, with
 Toom-3 above the cutoff, Karatsuba/schoolbook at the leaves, and fast doubling.  The compiler now inlines reference-count
