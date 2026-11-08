@@ -1,0 +1,5 @@
+﻿a → (λx: Bool y: Bool. x && y)
+b → (λx: Bool y: Bool. if x then y else false)
+c → (λx: Bool y: Bool. x || y)
+d → (λx: Bool y: Bool. if x then true else y)
+[(a true false), (b true false), (c false false), (d false false), (a false true), (c true false)]

@@ -20,11 +20,11 @@ CPU: AMD Ryzen 7 9700X 8-Core Processor (16 logical)
 
 | bigint | Lambda | Python (C bigint) | Lambda / Python |
 |---|---:|---:|---:|
-| F(1,000,000), 208,988 digits (compute + output) | 102.9 ms | 512.1 ms | 0.20x |
+| F(1,000,000), 208,988 digits (compute + output) | 92.8 ms | 512.1 ms | 0.18x |
 
 | bigint compute | Lambda | Python int | gmpy2 (GMP) | Lambda / Python | Lambda / gmpy2 |
 |---|---:|---:|---:|---:|---:|
-| F(1,000,000) compute only | 99.3 ms | 35.8 ms | 2.80 ms | 2.77x | 35.5x |
+| F(1,000,000) compute only | 87.8 ms | 35.8 ms | 2.80 ms | 2.47x | 31.6x |
 
 Bigint protocol: both the library and the compiler optimizations are pure
 Lambda/LLVM work — no bigint primitives. `bench/bigint_fib1m_compute.lambda`
@@ -33,7 +33,7 @@ Lambda is timed as a process (median of five after a discarded warm-up), while
 Python/gmpy2 report in-process compute time so interpreter startup and decimal
 conversion do not hide the arithmetic gap.  The 208,988-digit total output is
 verified against Python on every full run.  The Lambda result is at the
-~100 ms target and on the same order as Python's C-backed bigint; GMP remains
+~88 ms target and on the same order as Python's C-backed bigint; GMP remains
 a different class because it uses FFT multiplication and hand-tuned assembly.
 
 | ADT (20M product/sum iterations × 3) | Lambda ms | C ms | C++ ms | Rust ms | Lambda/C | Lambda/C++ | Lambda/Rust |

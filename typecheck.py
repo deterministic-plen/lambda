@@ -489,7 +489,7 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
     if name == "abs":
         return _numeric(lambda n: tfun([n], n))
     # Bit-level integer operations (used by the segmented sieve).
-    if name in ("&", "&&", "|", "bit-and", "bit-or", "bit-xor", "shl", "shr"):
+    if name in ("&", "|", "bit-and", "bit-or", "bit-xor", "shl", "shr"):
         return mono(tfun([TINT, TINT], TINT))
     if name in ("!", "bit-not", "popcount"):
         return mono(tfun([TINT], TINT))

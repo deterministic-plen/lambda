@@ -1,0 +1,3 @@
+﻿safe → (λb: Bool n: Int. b || (> (/ 10 n) 100))
+left → (λx: Int. (> x 0) && (> (/ 1 x) 0))
+[(safe false 0), (safe true 1), (left 0), (left 4)]

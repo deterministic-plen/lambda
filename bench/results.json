@@ -393,12 +393,12 @@
   "bigint": {
     "n": 1000000,
     "digits": 208988,
-    "lambda_s": 0.1029,
+    "lambda_s": 0.0928,
     "python_s": 0.5121,
     "lambda_samples_s": [
-      0.1023,
-      0.1033,
-      0.1029
+      0.0922,
+      0.0928,
+      0.0933
     ],
     "python_samples_s": [
       0.5114,
@@ -408,7 +408,7 @@
   },
   "bigint_compute": {
     "n": 1000000,
-    "lambda_ms": 99.3,
+    "lambda_ms": 87.8,
     "python_ms": 35.8,
     "gmpy2_ms": 2.8,
     "python_samples_ms": [
@@ -432,6 +432,12 @@
       0.1002,
       0.1004
     ],
-    "bits": 694241
+    "bits": 694241,
+    "lambda_samples_ms": [
+      87.1,
+      87.3,
+      88.2,
+      89.3
+    ]
   }
 }

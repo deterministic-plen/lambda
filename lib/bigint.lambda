@@ -216,7 +216,7 @@ bi-square-range → (λa aoff alen cap.
     (bi-trim r3 cap))
 
 bi-square → (λa cap.
-  (bi-square-range a 0 (bi-len a) cap))
+  (bi-toom-square-range a 0 (bi-len a) cap))
 
 bi-mul-range → (λa aoff alen b boff blen cap.
   mn → (if (< alen blen) then alen else blen)
@@ -242,8 +242,116 @@ bi-mul-range → (λa aoff alen b boff blen cap.
     r3 → (bi-add-shift r2 z2 (+ m m))
     (bi-trim r3 cap))
 
+toom-cutoff → 220
+
+bi-slice-pad → (λa start count cap.
+  alen → (bi-len a)
+  go → (λi r.
+    if (>= i count)
+    then (bi-trim r count)
+    else
+      idx → (+ start i)
+      v → (if (< idx alen) then (arrayi-get a (+ idx 1)) else 0)
+      (go (+ i 1) (arrayi-set r (+ i 1) v)))
+  (go 0 (bi-zero cap)))
+
+bi-scale-small → (λa k cap.
+  n → (bi-len a)
+  go → (λi carry r.
+    if (>= i n)
+    then
+      if (== carry 0)
+      then (arrayi-set r 0 n)
+      else (arrayi-set (arrayi-set r (+ n 1) carry) 0 (+ n 1))
+    else
+      cur → (+ (* (arrayi-get a (+ i 1)) k) carry)
+      (go (+ i 1) (/ cur base) (arrayi-set r (+ i 1) (% cur base))))
+  (go 0 0 (bi-zero cap)))
+
+bi-div-small → (λa k cap.
+  n → (bi-len a)
+  go → (λi rem r.
+    if (== i 0)
+    then (bi-trim r n)
+    else
+      cur → (+ (* rem base) (arrayi-get a i))
+      q → (/ cur k)
+      rem2 → (% cur k)
+      (go (- i 1) rem2 (arrayi-set r i q)))
+  (go n 0 (bi-zero cap)))
+
+bi-toom-interp → (λz0 z1 z2 z3 z4 m cap.
+  s1 → (bi-sub (bi-sub z1 z0 cap) z4 cap)
+  s2a → (bi-sub (bi-sub z2 z0 cap) (bi-scale-small z4 16 cap) cap)
+  s2 → (bi-div-small s2a 2 cap)
+  s3a → (bi-sub (bi-sub z3 z0 cap) (bi-scale-small z4 81 cap) cap)
+  s3 → (bi-div-small s3a 3 cap)
+  c3 → (bi-div-small (bi-sub (bi-add s3 s1 cap) (bi-scale-small s2 2 cap) cap) 2 cap)
+  c2 → (bi-sub (bi-sub s2 s1 cap) (bi-scale-small c3 3 cap) cap)
+  c1 → (bi-sub (bi-sub s1 c2 cap) c3 cap)
+  r → (bi-zero cap)
+  r1 → (bi-add-shift r z0 0)
+  r2 → (bi-add-shift r1 c1 m)
+  r3 → (bi-add-shift r2 c2 (* 2 m))
+  r4 → (bi-add-shift r3 c3 (* 3 m))
+  r5 → (bi-add-shift r4 z4 (* 4 m))
+  (bi-trim r5 cap))
+
+bi-toom-mul-range → (λa aoff alen b boff blen cap.
+  mn → (if (< alen blen) then blen else alen)
+  if (< mn toom-cutoff)
+  then (bi-mul-range a aoff alen b boff blen cap)
+  else
+    m → (/ (+ mn 2) 3)
+    pcap → (+ m 4)
+    zcap → (+ (* 2 m) 8)
+    a0 → (bi-slice-pad a aoff m pcap)
+    a1 → (bi-slice-pad a (+ aoff m) m pcap)
+    a2 → (bi-slice-pad a (+ aoff (* 2 m)) m pcap)
+    b0 → (bi-slice-pad b boff m pcap)
+    b1 → (bi-slice-pad b (+ boff m) m pcap)
+    b2 → (bi-slice-pad b (+ boff (* 2 m)) m pcap)
+    p1 → (bi-add (bi-add a0 a1 pcap) a2 pcap)
+    p2 → (bi-add (bi-add a0 (bi-scale-small a1 2 pcap) pcap)
+                 (bi-scale-small a2 4 pcap) pcap)
+    p3 → (bi-add (bi-add a0 (bi-scale-small a1 3 pcap) pcap)
+                 (bi-scale-small a2 9 pcap) pcap)
+    q1 → (bi-add (bi-add b0 b1 pcap) b2 pcap)
+    q2 → (bi-add (bi-add b0 (bi-scale-small b1 2 pcap) pcap)
+                 (bi-scale-small b2 4 pcap) pcap)
+    q3 → (bi-add (bi-add b0 (bi-scale-small b1 3 pcap) pcap)
+                 (bi-scale-small b2 9 pcap) pcap)
+    z0 → (bi-toom-mul-range a0 0 (bi-len a0) b0 0 (bi-len b0) zcap)
+    z1 → (bi-toom-mul-range p1 0 (bi-len p1) q1 0 (bi-len q1) zcap)
+    z2 → (bi-toom-mul-range p2 0 (bi-len p2) q2 0 (bi-len q2) zcap)
+    z3 → (bi-toom-mul-range p3 0 (bi-len p3) q3 0 (bi-len q3) zcap)
+    z4 → (bi-toom-mul-range a2 0 (bi-len a2) b2 0 (bi-len b2) zcap)
+    (bi-toom-interp z0 z1 z2 z3 z4 m cap))
+
+bi-toom-square-range → (λa aoff alen cap.
+  if (< alen toom-cutoff)
+  then (bi-square-range a aoff alen cap)
+  else
+    m → (/ (+ alen 2) 3)
+    pcap → (+ m 4)
+    zcap → (+ (* 2 m) 8)
+    a0 → (bi-slice-pad a aoff m pcap)
+    a1 → (bi-slice-pad a (+ aoff m) m pcap)
+    a2 → (bi-slice-pad a (+ aoff (* 2 m)) m pcap)
+    p1 → (bi-add (bi-add a0 a1 pcap) a2 pcap)
+    p2 → (bi-add (bi-add a0 (bi-scale-small a1 2 pcap) pcap)
+                 (bi-scale-small a2 4 pcap) pcap)
+    p3 → (bi-add (bi-add a0 (bi-scale-small a1 3 pcap) pcap)
+                 (bi-scale-small a2 9 pcap) pcap)
+    z0 → (bi-toom-square-range a0 0 (bi-len a0) zcap)
+    z1 → (bi-toom-square-range p1 0 (bi-len p1) zcap)
+    z2 → (bi-toom-square-range p2 0 (bi-len p2) zcap)
+    z3 → (bi-toom-square-range p3 0 (bi-len p3) zcap)
+    z4 → (bi-toom-square-range a2 0 (bi-len a2) zcap)
+    (bi-toom-interp z0 z1 z2 z3 z4 m cap))
+
 bi-mul → (λa b cap.
-  (bi-mul-range a 0 (bi-len a) b 0 (bi-len b) cap))
+  (bi-toom-mul-range a 0 (bi-len a) b 0 (bi-len b) cap))
 
 bi-fib → (λn cap.
   if (== n 0)

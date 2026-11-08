@@ -164,7 +164,8 @@ squarei → (λx. (* x x))           ; Int -> Int
 | reductions | `sum`, `product` (same type as the list) |
 | lists | `cons`, `head`, `tail`, `empty?`, `nil`, `map`, `pmap`, `range`, `immortalize`/`freeze` |
 | flat arrays | `arrayf`, `arrayi`, `arrayb`, `*-get`, `*-get-ro`, `*-set`, `*-length`, `*-clone`, `arrayi-sum`, `arrayf-sum`, `arrayi-pmap`, `arrayi-pmap-chunk` |
-| bit-level | `&&`/`&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
+| logical | `&&`, `\|\|`, `not` (short-circuit, `Bool`) |
+| bit-level | `&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
 | strings | `str->int`, `int->str`, `str->list`, `str-len`, `str-append`, `read-file` |
 | IO | `print`, `println` (return their argument), `not` |
 | binary data (`--data`) | `write-bytes : ArrayB -> Int`, `write-f64s : ArrayF -> Int`, `write-i64s : ArrayI -> Int` |
@@ -174,6 +175,31 @@ squarei → (λx. (* x x))           ; Int -> Int
 `print`/`println`, terminal input, and destructive array updates are the
 effectful primitives.  Division/modulo are inlined `sdiv`/`srem` for Int and
 `fdiv`/`frem` for Float; integer division by zero traps.
+
+### Logical operators
+
+`&&` and `||` short-circuit and return `Bool`:
+
+```lambda
+(a > 0) && (b > 0)
+(is-valid x) || (== x 0)
+not (empty? xs)
+```
+
+They expand in the parser to `if` expressions, so `a && b` is exactly
+`(if a then b else false)` and `a || b` is exactly `(if a then true else b)`.
+The generated IR and machine code are identical to the explicit `if` form;
+no intermediate boolean is materialised and the right operand is not
+evaluated when the left one decides the result. `&&` is *logical* and takes
+`Bool`; use `&`/`bit-and` for bitwise-and on `Int`.
+
+| operator | meaning | operands |
+| --- | --- | --- |
+| `&&` | logical and, short-circuit | `Bool` |
+| `||` | logical or, short-circuit | `Bool` |
+| `not` | logical negation (`xor i64 x, 1`) | `Bool` |
+| `&` / `bit-and` | bitwise and | `Int` |
+| `|` / `bit-or`, `bit-xor`, `!` / `bit-not` | bitwise | `Int` |
 
 ### Operator spellings
 
@@ -460,12 +486,12 @@ no longer takes a mutex.  The public API is unchanged: `bi-get`, `bi-set`,
 through a limb checksum, and `F(1,000,000)` (208,988 digits) is the benchmark:
 
 ```
-examples/bigint_fib1m.lambda   ; ~103 ms compute + output, exactly 208,988 digits
+examples/bigint_fib1m.lambda   ; ~95 ms compute + output, exactly 208,988 digits
 ```
 
-Compute-only, Lambda is about **100 ms** versus Python's C-backed bigint at
+Compute-only, Lambda is about **88 ms** versus Python's C-backed bigint at
 ~36 ms and gmpy2/GMP at ~2.8 ms.  The total including decimal output is
-~103 ms versus ~512 ms for Python, because base-1e9 printing is essentially
+~95 ms versus ~512 ms for Python, because base-1e9 printing is essentially
 free.  This is the "same order as Python" target; GMP is a different class of
 implementation (FFT plus assembly).  Full protocol and medians:
 [bench/results.md](bench/results.md).
@@ -642,8 +668,8 @@ Windows x64, clang `-O3`, 16 logical CPUs:
 
 * `nth-prime 670000`: sequential ~1.00 s; parallel trial division ~0.17 s;
   segmented sieve ~0.23 s (0.034 s at 16 threads).
-* `F(1,000,000)`: 208,988 digits in ~103 ms compute+output (`live=0`);
-  compute-only ~100 ms versus Python ~36 ms and gmpy2 ~2.8 ms.
+* `F(1,000,000)`: 208,988 digits in ~95 ms compute+output (`live=0`);
+  compute-only ~88 ms versus Python ~36 ms and gmpy2 ~2.8 ms.
 * 100,000-iteration string churn: 100,004 values / 100,002 envs, `live=0`.
 * 100,000-element list construction/teardown: 200,002 values, `live=0`.
 * 100,000 closures created/dropped: 100,004 values / 100,002 envs, `live=0`.
@@ -681,11 +707,11 @@ dispatch. The 10M-element array test is **1.21x C**, with one contiguous
 allocation per pass and no per-element wrappers.
 
 The bigint library (`lib/bigint.lambda`) computes **F(1,000,000) = 208,988
-digits in ~103 ms**, including decimal output, versus ~512 ms for Python’s
-C-backed bigint.  Compute-only it is ~100 ms versus Python ~36 ms (2.8x) and
-gmpy2/GMP ~2.8 ms (36x).  The representation is unchanged (base-1e9 limbs in
+digits in ~95 ms**, including decimal output, versus ~512 ms for Python’s
+C-backed bigint.  Compute-only it is ~88 ms versus Python ~36 ms (2.5x) and
+gmpy2/GMP ~2.8 ms (32x).  The representation is unchanged (base-1e9 limbs in
 one `arrayi`, length in limb 0); all arithmetic is Lambda over `arrayi`, with
-Karatsuba squaring and fast doubling.  The compiler now inlines reference-count
+Toom-3 above the cutoff, Karatsuba/schoolbook at the leaves, and fast doubling.  The compiler now inlines reference-count
 fast paths, borrows plain variables passed to `&` parameters, moves tail-call
 ownership, caches immutable array metadata per frame, folds literal top-level
 scalars into LLVM constants, and skips the array-pool mutex in single-threaded

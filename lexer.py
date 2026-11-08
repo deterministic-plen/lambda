@@ -237,7 +237,19 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
             i += len(text)
             continue
 
-        if ch == "∥" or (ch == "|" and i + 1 < n and source[i + 1] == "|"):
+        if source.startswith("&&", i):
+            tokens.append(Token("logic_and", "&&", loc()))
+            advance("&&")
+            i += 2
+            continue
+
+        if source.startswith("||", i):
+            tokens.append(Token("logic_or", "||", loc()))
+            advance("||")
+            i += 2
+            continue
+
+        if ch == "∥":
             text = "||" if ch == "|" else ch
             tokens.append(Token("ppipe", text, loc()))
             advance(text)

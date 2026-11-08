@@ -80,7 +80,9 @@ CASES = [
     ("transcendentals", "[true, true, true, true, true]\n", [], None, None),
     ("int_sum_range", "10\n", [], None, None),
     ("range", "[0, 1, 2, 3, 4]\n", [], None, None),
-    ("bitwise", "[8, 14, -1, 16, 4, 8]\n", [], None, None),
+    ("logic", "[true, false, false, true, true, false, false, true]\n", [], None, None),
+    ("logic_shortcircuit", "[false, true, false, false]\n", [], None, None),
+    ("logic_equiv", "[false, false, false, false, false, true]\n", [], None, None),
     ("bitwise_and", "[8, 8]\n", [], None, None),
     # namespacing and borrow inspection
     ("namespace", "4.0\n", [], None, None),

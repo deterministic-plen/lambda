@@ -72,7 +72,7 @@ def check_language_data() -> None:
     }
     expected_operators = {
         p for p in PRIMITIVES if not (WORD.match(p) or p in NAMED_SYMBOLS)
-    }
+    } | {"&&", "||"}  # short-circuit logic operators (syntax, not primitives)
     checks = [
         ("primitives", set(data["primitives"]), expected_primitives),
         ("operators", set(data["operators"]), expected_operators),
