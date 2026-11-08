@@ -1,0 +1,2 @@
+﻿ret → (λ&a: ArrayI. a)
+ret (arrayi 1 0)

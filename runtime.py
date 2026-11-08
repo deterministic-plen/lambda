@@ -95,6 +95,88 @@ static void *xmalloc(size_t n) {
     return p;
 }
 
+/* Bounded array-data pool.  Bigint fast doubling creates hundreds of
+   thousands of small limb arrays; recycling their data blocks avoids most
+   malloc/free traffic while keeping the RC Value headers normal. */
+#define POOL_CLASSES 32
+#define POOL_PER_CLASS 16
+#define POOL_MAX_BYTES (1u << 20)
+static void *pool_data[POOL_CLASSES][POOL_PER_CLASS];
+static int pool_count[POOL_CLASSES];
+static int pool_ready = 0;
+#ifdef _WIN32
+static CRITICAL_SECTION pool_lock;
+#else
+static pthread_mutex_t pool_lock;
+#endif
+
+static void pool_init(void) {
+    if (pool_ready) return;
+#ifdef _WIN32
+    InitializeCriticalSection(&pool_lock);
+#else
+    pthread_mutex_init(&pool_lock, NULL);
+#endif
+    pool_ready = 1;
+}
+
+static void pool_enter(void) {
+#ifdef LAMBDA_ATOMIC_RC
+#ifdef _WIN32
+    EnterCriticalSection(&pool_lock);
+#else
+    pthread_mutex_lock(&pool_lock);
+#endif
+#endif
+}
+
+static void pool_leave(void) {
+#ifdef LAMBDA_ATOMIC_RC
+#ifdef _WIN32
+    LeaveCriticalSection(&pool_lock);
+#else
+    pthread_mutex_unlock(&pool_lock);
+#endif
+#endif
+}
+
+static int pool_class(size_t n) {
+    int c = 0;
+    size_t s = 1;
+    while (s < n && c < POOL_CLASSES - 1) { s <<= 1; ++c; }
+    return c;
+}
+
+static void *pool_take(size_t n, size_t *capacity) {
+    int c = pool_class(n);
+    if (n > POOL_MAX_BYTES) {
+        *capacity = n;
+        return xmalloc(n);
+    }
+    pool_enter();
+    void *p = NULL;
+    if (pool_count[c] > 0) {
+        p = pool_data[c][--pool_count[c]];
+    }
+    pool_leave();
+    *capacity = (size_t)1 << c;
+    if (p) return p;
+    return xmalloc(*capacity);
+}
+
+static void pool_put(void *p, size_t n) {
+    if (!p) return;
+    if (n > POOL_MAX_BYTES) { free(p); return; }
+    int c = pool_class(n);
+    pool_enter();
+    if (pool_count[c] < POOL_PER_CLASS) {
+        pool_data[c][pool_count[c]++] = p;
+        p = NULL;
+    }
+    pool_leave();
+    if (p) free(p);
+}
+
 static Value *value_alloc(int32_t tag) {
     Value *v = (Value *)xmalloc(sizeof(Value));
     v->tag = tag;
@@ -155,11 +237,20 @@ static int rc_release_once(Value *v) {
 #endif
 }
 
-void lambda_release(Value *v) {
-    /* Cons tails are walked iteratively: releasing a long list must not
-       consume C stack proportional to its length. */
+void lambda_release(Value *v);
+
+/* Called with v->rc already at zero.  Walks cons tails iteratively so a
+   million-element list does not consume C stack. */
+void lambda_release_zero(Value *v) {
+    int first = 1;
     while (v) {
-        if (!rc_release_once(v)) return;
+        if (!first) {
+            int32_t rc = v->rc;
+            if (rc < 0) return;
+            if (--rc != 0) { v->rc = rc; return; }
+            v->rc = 0;
+        }
+        first = 0;
         if (v->tag == TAG_CONS) {
             Value *head = (Value *)(intptr_t)v->i;
             Value *tail = (Value *)v->p;
@@ -182,8 +273,11 @@ void lambda_release(Value *v) {
             break;
         case TAG_ARRAYF:
         case TAG_ARRAYI:
+            pool_put(v->p, sizeof(double) * (size_t)(v->i > 0 ? v->i : 1));
+            v->p = NULL;
+            break;
         case TAG_ARRAYB:
-            free(v->p);
+            pool_put(v->p, (size_t)(v->i > 0 ? v->i : 1));
             v->p = NULL;
             break;
         default:
@@ -194,6 +288,12 @@ void lambda_release(Value *v) {
         STAT_ADD(live_values, -1);
         return;
     }
+}
+
+void lambda_release(Value *v) {
+    if (!v) return;
+    if (!rc_release_once(v)) return;
+    lambda_release_zero(v);
 }
 
 /* ------------------------------------------------------------------ */
@@ -296,6 +396,10 @@ static void fail_type(const char *expected, Value *got) {
 
 void lambda_check_function(Value *v) {
     if (!v || v->tag != TAG_CLOSURE) fail_type("Function", v);
+}
+
+void lambda_bad_enum(void) {
+    fail("invalid enum tag");
 }
 
 int64_t lambda_get_int(Value *v) {
@@ -586,7 +690,8 @@ Value *lambda_arrayf_new(int64_t n, double init) {
     if (n < 0) fail("array size must be non-negative");
     Value *a = value_alloc(TAG_ARRAYF);
     a->i = n;
-    a->p = xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+    size_t cap = 0;
+    a->p = pool_take(sizeof(double) * (size_t)(n > 0 ? n : 1), &cap);
     double *d = (double *)a->p;
     for (int64_t i = 0; i < n; ++i) d[i] = init;
     return a;
@@ -618,7 +723,8 @@ Value *lambda_arrayi_new(int64_t n, int64_t init) {
     if (n < 0) fail("array size must be non-negative");
     Value *a = value_alloc(TAG_ARRAYI);
     a->i = n;
-    a->p = xmalloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
+    size_t cap = 0;
+    a->p = pool_take(sizeof(int64_t) * (size_t)(n > 0 ? n : 1), &cap);
     int64_t *d = (int64_t *)a->p;
     for (int64_t i = 0; i < n; ++i) d[i] = init;
     return a;
@@ -655,7 +761,8 @@ Value *lambda_arrayb_new(int64_t n, int64_t init) {
     if (n < 0) fail("array size must be non-negative");
     Value *a = value_alloc(TAG_ARRAYB);
     a->i = n;
-    a->p = xmalloc((size_t)(n > 0 ? n : 1));
+    size_t cap = 0;
+    a->p = pool_take((size_t)(n > 0 ? n : 1), &cap);
     uint8_t *d = (uint8_t *)a->p;
     uint8_t b = (uint8_t)byte_value(init);
     for (int64_t i = 0; i < n; ++i) d[i] = b;
@@ -682,6 +789,25 @@ Value *lambda_arrayb_clone(Value *a) {
     Value *b = lambda_arrayb_new(a->i, 0);
     memcpy(b->p, a->p, (size_t)a->i);
     return b;
+}
+
+int64_t lambda_arrayi_sum(Value *a) {
+    if (!a || a->tag != TAG_ARRAYI) fail_type("ArrayI", a);
+    const int64_t *restrict p = (const int64_t *)a->p;
+    int64_t n = a->i, s = 0;
+#pragma clang loop vectorize(enable) interleave(enable)
+    for (int64_t i = 0; i < n; ++i) s += p[i];
+    return s;
+}
+
+double lambda_arrayf_sum(Value *a) {
+    if (!a || a->tag != TAG_ARRAYF) fail_type("ArrayF", a);
+    const double *restrict p = (const double *)a->p;
+    int64_t n = a->i;
+    double s = 0.0;
+#pragma clang loop vectorize(enable) interleave(enable)
+    for (int64_t i = 0; i < n; ++i) s += p[i];
+    return s;
 }
 
 /* Boxed entry points for the dynamic backend.  Arguments are consumed; the
@@ -1813,6 +1939,7 @@ static BinRoot root_map = { { NULL }, lambda_op_map };
 static BinRoot root_pmap = { { NULL }, lambda_op_pmap };
 
 void lambda_runtime_init(void) {
+    pool_init();
     lambda_prim_add = make_immortal_closure((void *)bin_stage1, &root_add);
     lambda_prim_sub = make_immortal_closure((void *)bin_stage1, &root_sub);
     lambda_prim_mul = make_immortal_closure((void *)bin_stage1, &root_mul);
@@ -1907,7 +2034,9 @@ declare %Value* @lambda_make_closure(i8*, i8*)
 
 declare void @lambda_retain(%Value*)
 declare void @lambda_release(%Value*)
+declare void @lambda_release_zero(%Value*)
 declare void @lambda_check_function(%Value*)
+declare void @lambda_bad_enum()
 declare i64 @lambda_get_int(%Value*)
 declare i64 @lambda_get_bool(%Value*)
 declare double @lambda_get_float(%Value*)
@@ -1955,6 +2084,8 @@ declare %Value* @lambda_arrayi_clone(%Value*)
 declare %Value* @lambda_arrayb_new(i64, i64)
 declare i64 @lambda_arrayb_get(%Value*, i64)
 declare void @lambda_arrayb_set(%Value*, i64, i64)
+declare i64 @lambda_arrayi_sum(%Value*)
+declare double @lambda_arrayf_sum(%Value*)
 declare i64 @lambda_arrayb_length(%Value*)
 declare %Value* @lambda_arrayb_clone(%Value*)
 declare %Value* @lambda_arrayi_pmap(%Value*, i64)

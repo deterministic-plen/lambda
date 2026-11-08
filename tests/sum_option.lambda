@@ -1,0 +1,11 @@
+type Option (
+  None
+| Some (value: Float)
+)
+
+unwrap → (λo: Option.
+  match o with
+    None: 0.0,
+    Some x: x)
+
+(unwrap (Some 3.5))

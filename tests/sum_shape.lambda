@@ -1,0 +1,13 @@
+type Shape (
+  Circle (radius: Float)
+| Rectangle (width: Float, height: Int)
+| Dot
+)
+
+area → (λs: Shape.
+  match s with
+    Circle r: (* 3.0 (* r r)),
+    Rectangle w h: (* w (int->float h)),
+    Dot: 0.0)
+
+[(area (Circle 2.0)), (area (Rectangle 2.0 3)), (area Dot)]

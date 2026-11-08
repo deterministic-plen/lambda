@@ -1,0 +1,4 @@
+﻿type Box (value: Float)
+
+choose → (λb: Box. if true then b else b)
+(Box-value (choose (Box 3.0)))

@@ -1,0 +1,10 @@
+type Vec2 (x: Float, y: Float)
+
+add → (λa: Vec2 b: Vec2.
+  (Vec2 (+ a_x b_x) (+ a_y b_y)))
+
+dot → (λa: Vec2 b: Vec2.
+  (+ (* a_x b_x) (* a_y b_y)))
+
+v → (add (Vec2 1.0 2.0) (Vec2 3.0 4.0))
+[v_x, v_y, (dot v v)]

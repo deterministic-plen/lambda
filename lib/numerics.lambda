@@ -1,0 +1,22 @@
+iexp → (λb:Int p.
+if (== p 0) then 1 else
+if (== p 1) then b else
+if (== (% p 2) 1)
+then (* b (iexp b (- p 1))) 
+else (* (iexp b (/ p 2)) (iexp b (/ p 2)))
+)
+
+derivative  → (λf.
+A  → (λm n x.
+if (== 1 m) then
+step → (/ 1e-4 (int->float (iexp 2 (- n 1))))
+factor → (/ (int->float (iexp 2 (- n 2))) 1e-4)
+(* factor (- (f (+ x step)) (f (- x step))))
+else
+factor → (int->float (iexp 4 (- m 1)))
+(/ (- (* factor ( A (- m 1) (+ n 1) x)) (A (- m 1) n x)) (- factor 1.0))
+) 
+A 4 4
+)
+h → (λx. sin x)
+(derivative h) 2.0

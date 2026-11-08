@@ -1,0 +1,4 @@
+include "lib/bigint.lambda"
+
+x → (bi-fib 1000000 23221)
+(bi-len x)

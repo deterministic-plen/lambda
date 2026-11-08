@@ -15,8 +15,8 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
 from ast import (
-    App, Binding, Block, Def, If, Lam, Lit, LOCAL_DEF, Node, PARAM, PRIM,
-    TOP_DEF, Var, walk,
+    App, Binding, Block, Borrow, Def, If, Lam, Lit, LOCAL_DEF, Match, Node,
+    PARAM, PRIM, RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
 )
 from errors import CompileError
 from parser import ARITH_OPS, COMPARE_OPS, OP_CANON, PRIMITIVES
@@ -30,6 +30,7 @@ IMPURE_PRIMITIVES = {
     "arrayf_get", "arrayf_set", "arrayf_length", "arrayf_clone",
     "arrayi_get", "arrayi_set", "arrayi_length", "arrayi_clone",
     "arrayb_get", "arrayb_set", "arrayb_length", "arrayb_clone",
+    "arrayi_sum", "arrayf_sum",
     "arrayi_pmap",
     "arrayi_pmap_chunk",
     "write_bytes", "write_f64s", "write_i64s",
@@ -54,6 +55,7 @@ PRIM_ARITY = {
     "arrayf_get": 2, "arrayf_set": 3, "arrayf_length": 1, "arrayf_clone": 1,
     "arrayi_get": 2, "arrayi_set": 3, "arrayi_length": 1, "arrayi_clone": 1,
     "arrayb_get": 2, "arrayb_set": 3, "arrayb_length": 1, "arrayb_clone": 1,
+    "arrayi_sum": 1, "arrayf_sum": 1,
     "arrayf_get_ro": 2, "arrayi_get_ro": 2, "arrayb_get_ro": 2,
     "arrayi_pmap": 2, "arrayi_pmap_chunk": 3,
     "write_bytes": 1, "write_f64s": 1, "write_i64s": 1,
@@ -89,6 +91,23 @@ def _bound_inside(lam: Lam) -> Set[int]:
             visit(n.cond)
             visit(n.then)
             visit(n.else_)
+        elif isinstance(n, Match):
+            visit(n.subject)
+            for idx, (_, arm) in enumerate(n.arms):
+                if idx < len(n.arm_bindings):
+                    for b in n.arm_bindings[idx]:
+                        bound.add(b.uid)
+                visit(arm)
+        elif isinstance(n, RecordLit):
+            for a in n.args:
+                visit(a)
+        elif isinstance(n, SumLit):
+            for a in n.args:
+                visit(a)
+        elif isinstance(n, RecordField):
+            visit(n.value)
+        elif isinstance(n, Borrow):
+            visit(n.value)
         elif isinstance(n, App):
             visit(n.func)
             for a in n.args:
@@ -125,6 +144,20 @@ def _collect_refs(lam: Lam) -> Tuple[Set[int], Set[int]]:
             visit(n.cond)
             visit(n.then)
             visit(n.else_)
+        elif isinstance(n, Match):
+            visit(n.subject)
+            for _, arm in n.arms:
+                visit(arm)
+        elif isinstance(n, RecordLit):
+            for a in n.args:
+                visit(a)
+        elif isinstance(n, SumLit):
+            for a in n.args:
+                visit(a)
+        elif isinstance(n, RecordField):
+            visit(n.value)
+        elif isinstance(n, Borrow):
+            visit(n.value)
         elif isinstance(n, App):
             visit(n.func)
             for a in n.args:
@@ -276,6 +309,16 @@ def compute_purity(program: Node) -> Dict[int, bool]:
             return scan(n.body)
         if isinstance(n, If):
             return scan(n.cond) and scan(n.then) and scan(n.else_)
+        if isinstance(n, Match):
+            return scan(n.subject) and all(scan(arm) for _, arm in n.arms)
+        if isinstance(n, RecordLit):
+            return all(scan(a) for a in n.args)
+        if isinstance(n, SumLit):
+            return all(scan(a) for a in n.args)
+        if isinstance(n, RecordField):
+            return scan(n.value)
+        if isinstance(n, Borrow):
+            return scan(n.value)
         if isinstance(n, App):
             if not call_pure(n):
                 return False
@@ -336,6 +379,17 @@ def compute_lambda_purity(program: Node) -> Dict[int, bool]:
         if isinstance(n, If):
             return (expr_pure(n.cond) and expr_pure(n.then)
                     and expr_pure(n.else_))
+        if isinstance(n, Match):
+            return (expr_pure(n.subject)
+                    and all(expr_pure(arm) for _, arm in n.arms))
+        if isinstance(n, RecordLit):
+            return all(expr_pure(a) for a in n.args)
+        if isinstance(n, SumLit):
+            return all(expr_pure(a) for a in n.args)
+        if isinstance(n, RecordField):
+            return expr_pure(n.value)
+        if isinstance(n, Borrow):
+            return expr_pure(n.value)
         if isinstance(n, Block):
             for d in n.defs:
                 if not isinstance(d.value, Lam) and not expr_pure(d.value):
@@ -435,7 +489,7 @@ class _Share:
         if isinstance(n, Var):
             if n.binding is None:
                 return None
-            return f"v{n.binding.uid}"
+            return f"v{n.binding.uid}:{n.field_name or ''}"
         if isinstance(n, App):
             fk = self.key(n.func)
             if fk is None:
@@ -454,6 +508,25 @@ class _Share:
             return
         if isinstance(n, If):
             self.count(n.cond, counts)
+            return
+        if isinstance(n, Match):
+            self.count(n.subject, counts)
+            for _, arm in n.arms:
+                self.count(arm, counts)
+            return
+        if isinstance(n, RecordLit):
+            for a in n.args:
+                self.count(a, counts)
+            return
+        if isinstance(n, SumLit):
+            for a in n.args:
+                self.count(a, counts)
+            return
+        if isinstance(n, RecordField):
+            self.count(n.value, counts)
+            return
+        if isinstance(n, Borrow):
+            self.count(n.value, counts)
             return
         if isinstance(n, App):
             self.count(n.func, counts)
@@ -477,6 +550,22 @@ class _Share:
             n.cond = self.rewrite(n.cond, selected, cache, prelude)
             n.then = self.wrap_region(n.then)
             n.else_ = self.wrap_region(n.else_)
+            return n
+        if isinstance(n, Match):
+            n.subject = self.rewrite(n.subject, selected, cache, prelude)
+            n.arms = [(pat, self.wrap_region(arm)) for pat, arm in n.arms]
+            return n
+        if isinstance(n, RecordLit):
+            n.args = [self.wrap_region(a) for a in n.args]
+            return n
+        if isinstance(n, SumLit):
+            n.args = [self.wrap_region(a) for a in n.args]
+            return n
+        if isinstance(n, RecordField):
+            n.value = self.wrap_region(n.value)
+            return n
+        if isinstance(n, Borrow):
+            n.value = self.wrap_region(n.value)
             return n
         if isinstance(n, App):
             # Decide using the *original* key (children may be replaced by
@@ -578,6 +667,25 @@ def top_level_order(block: Block) -> List[Def]:
             scan(n.cond, deps_out)
             scan(n.then, deps_out)
             scan(n.else_, deps_out)
+            return
+        if isinstance(n, Match):
+            scan(n.subject, deps_out)
+            for _, arm in n.arms:
+                scan(arm, deps_out)
+            return
+        if isinstance(n, RecordLit):
+            for a in n.args:
+                scan(a, deps_out)
+            return
+        if isinstance(n, SumLit):
+            for a in n.args:
+                scan(a, deps_out)
+            return
+        if isinstance(n, RecordField):
+            scan(n.value, deps_out)
+            return
+        if isinstance(n, Borrow):
+            scan(n.value, deps_out)
             return
         if isinstance(n, App):
             scan(n.func, deps_out)

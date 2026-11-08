@@ -1,0 +1,4 @@
+type Complex (re: Float, im: Float)
+
+c → (Complex 1.0 2.0)
+[c_re, c_im]

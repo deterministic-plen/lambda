@@ -1,0 +1,36 @@
+type Vec2 (x: Float, y: Float)
+
+type Shape (
+  Circle (radius: Float)
+| Rect (width: Float, height: Float)
+| Dot
+)
+
+area → (λs: Shape.
+  match s with
+    Circle r: (* 3.0 (* r r)),
+    Rect w h: (* w h),
+    Dot: 0.0)
+
+step → (λi v: Vec2 acc.
+  if (>= i 20000000)
+  then acc
+  else
+    x → v_x
+    y → v_y
+    v2 → (Vec2 (+ x 1.0) (+ y 0.5))
+    m → (% i 3)
+    s → if (== m 0)
+        then (Circle x)
+        else if (== m 1)
+             then (Rect x y)
+             else Dot
+    total → (+ (area s) (+ v2_x v2_y))
+    (step (+ i 1) v2 (+ acc total)))
+
+run → (λr acc.
+  if (>= r 3)
+  then acc
+  else (run (+ r 1) (+ acc (step 0 (Vec2 0.0 0.0) 0.0))))
+
+(run 0 0.0)

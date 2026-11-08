@@ -1,0 +1,18 @@
+enum Turnstile (Locked, Unlocked)
+
+coin → (λs: Turnstile.
+  match s with
+    Locked: Unlocked,
+    Unlocked: Unlocked)
+
+push → (λs: Turnstile.
+  match s with
+    Locked: Locked,
+    Unlocked: Locked)
+
+name → (λs: Turnstile.
+  if (== s Locked) then "Locked" else "Unlocked")
+
+; one coin unlocks, one push locks, another coin unlocks again
+shown → (print (name (coin (push (coin Locked)))))
+""

@@ -1,0 +1,7 @@
+enum State (A, B)
+
+f → (λs: State.
+  match s with
+    A → A)
+
+(f A)

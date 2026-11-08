@@ -1,20 +1,5 @@
 ;simple 2D maxwell boltzmann simulation
-var → (λdata.
-  N → (arrayf-length data)
-  if (<= N 1)
-  then 0.0
-  else
-    go → (λi mean m2.
-      if (>= i N)
-      then (/ m2 (int->float N))       ; population
-      else
-        x → (arrayf-get data i)
-        delta → (- x mean)
-        mean2 → (+ mean (/ delta (int->float (+ i 1))))
-        delta2 → (- x mean2)
-        (go (+ i 1) mean2 (+ m2 (* delta delta2))))
-    (go 0 0.0 0.0)
-)
+
 ;Handle position updates
 update-pos → (λi dT x y vx vy.
     if (>= i N)

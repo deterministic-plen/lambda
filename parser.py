@@ -25,7 +25,10 @@ from __future__ import annotations
 import sys
 from typing import List, Optional, Tuple
 
-from ast import App, Block, Def, If, Lam, Lit, Loc, Node, Var
+from ast import (
+    App, Block, Borrow, Def, EnumLit, If, Lam, Lit, Loc, Match, Node,
+    RecordField, RecordLit, SumLit, Var,
+)
 from errors import SyntaxErr
 from lexer import Token, tokenize
 
@@ -42,6 +45,7 @@ PRIMITIVES = {
     "arrayf-get", "arrayf-set", "arrayf-length", "arrayf-clone",
     "arrayi-get", "arrayi-set", "arrayi-length", "arrayi-clone",
     "arrayb-get", "arrayb-set", "arrayb-length", "arrayb-clone",
+    "arrayi-sum", "arrayf-sum",
     "arrayf-get-ro", "arrayi-get-ro", "arrayb-get-ro",
     "arrayi-pmap", "arrayi-pmap-chunk",
     # binary data stream (requires --data)
@@ -60,7 +64,7 @@ PRIMITIVES = {
     "pow", "**", "^", "abs", "π", "pi", "e",
     "∑", "sum", "∏", "product",
     # bit-level integer operations
-    "&", "|", "!", "bit-and", "bit-or", "bit-xor", "bit-not",
+    "&", "|", "&&", "!", "bit-and", "bit-or", "bit-xor", "bit-not",
     "shl", "shr", "popcount",
     # lists and parallelism
     "map", "pmap", "range", "immortalize", "freeze",
@@ -90,6 +94,7 @@ OP_CANON = {
     "arrayi-length": "arrayi_length", "arrayi-clone": "arrayi_clone",
     "arrayb-get": "arrayb_get", "arrayb-set": "arrayb_set",
     "arrayb-length": "arrayb_length", "arrayb-clone": "arrayb_clone",
+    "arrayi-sum": "arrayi_sum", "arrayf-sum": "arrayf_sum",
     "arrayf-get-ro": "arrayf_get_ro", "arrayi-get-ro": "arrayi_get_ro",
     "arrayb-get-ro": "arrayb_get_ro", "arrayi-pmap": "arrayi_pmap",
     "arrayi-pmap-chunk": "arrayi_pmap_chunk",
@@ -110,7 +115,7 @@ OP_CANON = {
     "pow": "pow", "**": "pow", "^": "pow",
     "abs": "abs", "π": "pi", "pi": "pi", "e": "e",
     "∑": "sum", "sum": "sum", "∏": "product", "product": "product",
-    "&": "bit_and", "bit-and": "bit_and",
+    "&": "bit_and", "&&": "bit_and", "bit-and": "bit_and",
     "|": "bit_or", "bit-or": "bit_or",
     "bit-xor": "bit_xor",
     "!": "bit_not", "bit-not": "bit_not",
@@ -139,6 +144,8 @@ class Parser:
         self.legacy_used = False
         self.contexts: List[Tuple[str, Loc]] = []
         self.warn_infix = warn_infix
+        self.enum_types: set[str] = set()
+        self.record_types: set[str] = set()
 
     # -- token helpers ----------------------------------------------------
     def peek(self, offset: int = 0) -> Token:
@@ -186,6 +193,14 @@ class Parser:
         nxt = self.peek(1)
         return tok.kind == "ident" and nxt.kind == "arrow"
 
+    def at_enum_start(self) -> bool:
+        tok = self.peek()
+        return tok.kind == "keyword" and tok.value == "enum"
+
+    def at_type_start(self) -> bool:
+        tok = self.peek()
+        return tok.kind == "keyword" and tok.value == "type"
+
     def at_include(self) -> bool:
         return (self.peek().kind == "keyword"
                 and self.peek().value == "include"
@@ -206,12 +221,165 @@ class Parser:
 
     def parse_definitions(self) -> List[Def]:
         defs: List[Def] = []
-        while self.at_definition_start():
-            name_tok = self.pop()
-            self.expect("arrow", what="'→'")
-            value = self.parse_definition_value()
-            defs.append(Def(name_tok.value, value, name_tok.loc))
+        while self.at_enum_start() or self.at_type_start() or self.at_definition_start():
+            if self.at_enum_start():
+                defs.extend(self.parse_enum())
+            elif self.at_type_start():
+                defs.extend(self.parse_type_decl())
+            else:
+                name_tok = self.pop()
+                self.expect("arrow", what="'→'")
+                value = self.parse_definition_value()
+                defs.append(Def(name_tok.value, value, name_tok.loc))
         return defs
+
+    def parse_type_decl(self) -> List[Def]:
+        start = self.pop().loc  # type
+        name_tok = self.expect("ident", what="a product type name")
+        if name_tok.value in ("Int", "Float", "Bool", "String",
+                              "ArrayF", "ArrayI", "ArrayB"):
+            raise SyntaxErr(
+                f"'{name_tok.value}' is a built-in type name", name_tok.loc)
+        if name_tok.value in self.record_types or name_tok.value in self.enum_types:
+            raise SyntaxErr(
+                f"duplicate type '{name_tok.value}'", name_tok.loc)
+        self.record_types.add(name_tok.value)
+
+        self.expect("punct", "(", "'('")
+        # A field list starts with "name :"; otherwise this is a sum type.
+        if self.check("ident") and self.peek(1).kind == "punct" and self.peek(1).value == ":":
+            return self.parse_product_body(name_tok.value, start)
+        return self.parse_sum_body(name_tok.value, start)
+
+    def parse_product_body(self, type_name: str, start: Loc) -> List[Def]:
+        fields: List[tuple[str, str, Loc]] = []
+        seen = set()
+        while not self.check("punct", ")"):
+            field_tok = self.expect("ident", what="a field name")
+            if field_tok.value in seen:
+                raise SyntaxErr(
+                    f"duplicate field '{field_tok.value}'", field_tok.loc)
+            seen.add(field_tok.value)
+            self.expect("punct", ":", "':'")
+            ftype = self.parse_type_annotation()
+            fields.append((field_tok.value, ftype, field_tok.loc))
+            if self.check("punct", ","):
+                self.pop()
+                continue
+            break
+        self.expect("punct", ")", "')'")
+        if not fields:
+            raise SyntaxErr(f"type '{type_name}' needs at least one field",
+                            start)
+
+        names = [f[0] for f in fields]
+        types = [f[1] for f in fields]
+        ctor_body = RecordLit(
+            type_name, names, types,
+            [Var(n, start) for n in names], start)
+        ctor = Lam(names, ctor_body, start)
+        ctor.param_annotations = list(types)
+        defs = [Def(type_name, ctor, start)]
+
+        for field_name, field_type, _ in fields:
+            value_name = "record"
+            accessor = Lam(
+                [value_name],
+                RecordField(Var(value_name, start), type_name,
+                            field_name, field_type, start),
+                start)
+            accessor.param_annotations = [type_name]
+            defs.append(Def(f"{type_name}-{field_name}", accessor, start))
+        return defs
+
+    def parse_sum_body(self, type_name: str, start: Loc) -> List[Def]:
+        defs: List[Def] = []
+        seen_variants = set()
+        tag = 0
+        while not self.check("punct", ")"):
+            var_tok = self.expect("ident", what="a sum variant name")
+            if var_tok.value in seen_variants:
+                raise SyntaxErr(
+                    f"duplicate variant '{var_tok.value}'", var_tok.loc)
+            seen_variants.add(var_tok.value)
+            fields: List[tuple[str, str, Loc]] = []
+            if self.check("punct", "("):
+                self.pop()
+                seen_fields = set()
+                while not self.check("punct", ")"):
+                    field_tok = self.expect("ident", what="a payload field name")
+                    if field_tok.value in seen_fields:
+                        raise SyntaxErr(
+                            f"duplicate payload field '{field_tok.value}'",
+                            field_tok.loc)
+                    seen_fields.add(field_tok.value)
+                    self.expect("punct", ":", "':'")
+                    fields.append((field_tok.value,
+                                   self.parse_type_annotation(), field_tok.loc))
+                    if self.check("punct", ","):
+                        self.pop()
+                        continue
+                    break
+                self.expect("punct", ")", "')'")
+                if len(fields) > 4:
+                    raise SyntaxErr(
+                        f"variant '{var_tok.value}' has more than 4 inline "
+                        "payload fields", var_tok.loc)
+            field_names = [f[0] for f in fields]
+            field_types = [f[1] for f in fields]
+            body = SumLit(
+                type_name, var_tok.value, tag, field_names, field_types,
+                [Var(n, var_tok.loc) for n in field_names], var_tok.loc)
+            if fields:
+                ctor = Lam(field_names, body, var_tok.loc)
+                ctor.param_annotations = list(field_types)
+                defs.append(Def(var_tok.value, ctor, var_tok.loc))
+            else:
+                defs.append(Def(var_tok.value, body, var_tok.loc))
+            tag += 1
+            if self.check("pipe"):
+                self.pop()
+                continue
+            break
+        self.expect("punct", ")", "')'")
+        if tag == 0:
+            raise SyntaxErr(f"type '{type_name}' needs at least one variant",
+                            start)
+        return defs
+
+    def parse_enum(self) -> List[Def]:
+        start = self.pop().loc  # enum
+        name_tok = self.expect("ident", what="an enum type name")
+        if name_tok.value in ("Int", "Float", "Bool", "String",
+                              "ArrayF", "ArrayI", "ArrayB"):
+            raise SyntaxErr(
+                f"'{name_tok.value}' is a built-in type name", name_tok.loc)
+        if name_tok.value in self.enum_types or name_tok.value in self.record_types:
+            raise SyntaxErr(
+                f"duplicate enum type '{name_tok.value}'", name_tok.loc)
+        self.enum_types.add(name_tok.value)
+        self.expect("punct", "(", "'('")
+        variants: List[tuple[str, Loc]] = []
+        seen = set()
+        while not self.check("punct", ")"):
+            var_tok = self.expect("ident", what="an enum variant name")
+            if var_tok.value in seen:
+                raise SyntaxErr(
+                    f"duplicate enum variant '{var_tok.value}'", var_tok.loc)
+            seen.add(var_tok.value)
+            variants.append((var_tok.value, var_tok.loc))
+            if self.check("punct", ","):
+                self.pop()
+                continue
+            break
+        self.expect("punct", ")", "')'")
+        if not variants:
+            raise SyntaxErr(f"enum '{name_tok.value}' needs at least one variant",
+                            start)
+        return [
+            Def(variant, EnumLit(name_tok.value, tag, loc), loc)
+            for tag, (variant, loc) in enumerate(variants)
+        ]
 
     def parse_unit(self, loader=None, require_body: bool = True) -> Block:
         """Parse one file: leading includes, definitions, then optionally a body."""
@@ -251,12 +419,7 @@ class Parser:
     # -- blocks and definitions ------------------------------------------
     def parse_block(self) -> Block:
         start = self.peek().loc
-        defs: List[Def] = []
-        while self.at_definition_start():
-            name_tok = self.pop()
-            self.expect("arrow", what="'→'")
-            value = self.parse_definition_value()
-            defs.append(Def(name_tok.value, value, name_tok.loc))
+        defs = self.parse_definitions()
         if self.peek().kind == "eof":
             where = self.context_suffix()
             if defs:
@@ -281,8 +444,18 @@ class Parser:
         if tok.kind == "keyword":
             if tok.value == "if":
                 return self.parse_if()
+            if tok.value == "match":
+                return self.parse_match()
             if tok.value in ("let", "letrec", "letloop"):
                 return self.parse_let(tok.value)
+            if tok.value == "enum":
+                raise SyntaxErr(
+                    "enum declarations must appear before the block's final "
+                    "expression", tok.loc)
+            if tok.value == "type":
+                raise SyntaxErr(
+                    "type declarations must appear before the block's final "
+                    "expression", tok.loc)
             if tok.value == "include":
                 raise SyntaxErr(
                     "include directives must appear at the top of a file", tok.loc)
@@ -296,8 +469,14 @@ class Parser:
         self.push_context("lambda expression", start)
         params: List[str] = []
         annotations: List[Optional[str]] = []
+        borrows: List[bool] = []
         while not self.check("punct", "."):
+            borrowed = False
             tok = self.peek()
+            if tok.kind == "ident" and tok.value == "&":
+                self.pop()
+                borrowed = True
+                tok = self.peek()
             if tok.kind == "eof":
                 raise SyntaxErr(
                     "the lambda parameter list ended at the file end; "
@@ -306,7 +485,13 @@ class Parser:
             if tok.kind != "ident":
                 raise SyntaxErr(
                     f"expected a parameter name or '.', got '{tok.value}'", tok.loc)
-            params.append(self.pop().value)
+            name = tok.value
+            if name.startswith("&") and len(name) > 1:
+                name = name[1:]
+                borrowed = True
+            self.pop()
+            params.append(name)
+            borrows.append(borrowed)
             if self.check("punct", ":"):
                 self.pop()
                 annotations.append(self.parse_type_annotation())
@@ -319,6 +504,7 @@ class Parser:
         self.pop_context()
         lam = Lam(params, body, start)
         lam.param_annotations = annotations
+        lam.param_borrows = borrows
         lam.is_parallel = parallel
         return lam
 
@@ -329,11 +515,11 @@ class Parser:
             inner = self.parse_type_annotation()
             self.expect("punct", "]", "']'")
             return f"[{inner}]"
-        if tok.kind == "ident" and tok.value in ("Int", "Float", "Bool", "String"):
+        if tok.kind == "ident":
             self.pop()
             return tok.value
         raise SyntaxErr(
-            f"expected a type annotation (Int, Float, Bool, String or [T]), "
+            "expected a type name or [T], "
             f"got '{tok.value}'", tok.loc)
 
     def parse_if(self) -> If:
@@ -346,6 +532,34 @@ class Parser:
         else_ = self.parse_expr()
         self.pop_context()
         return If(cond, then, else_, start)
+
+    def parse_match(self) -> Match:
+        start = self.pop().loc  # match
+        self.push_context("match expression", start)
+        subject = self.parse_expr()
+        self.expect("keyword", "with", "'with'")
+        arms = []
+        binders = []
+        while True:
+            pat = self.expect("ident", what="an enum or sum variant name")
+            arm_binders = []
+            while self.check("ident"):
+                arm_binders.append(self.pop().value)
+            if self.check("arrow"):
+                self.pop()
+            else:
+                self.expect("punct", ":", "':' or '→'")
+            arm = self.parse_expr()
+            arms.append((pat.value, arm))
+            binders.append(arm_binders)
+            if self.check("punct", ",") or self.check("pipe"):
+                self.pop()
+                continue
+            break
+        self.pop_context()
+        match = Match(subject, arms, start)
+        match.binders = binders
+        return match
 
     def parse_let(self, keyword: str) -> Block:
         start = self.pop().loc
@@ -481,6 +695,12 @@ class Parser:
         if tok.kind == "pipe":
             self.pop()
             return Var("|", tok.loc)
+        if tok.kind == "borrow":
+            start = self.pop().loc
+            name = self.expect("ident", what="a variable after '&'")
+            node = Borrow(Var(name.value, name.loc), start)
+            node.value.type = None
+            return node
         if tok.kind in ("ident", "op"):
             self.pop()
             if tok.value == "true":

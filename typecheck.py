@@ -16,7 +16,10 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from ast import App, Binding, Block, Def, If, Lam, Lit, Node, PRIM, Var, walk
+from ast import (
+    App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, Match, Node, PRIM,
+    RecordField, RecordLit, SumLit, Var, walk,
+)
 from errors import TypeError_
 
 INFIX_NAMES = {
@@ -72,6 +75,58 @@ class TCon(Type):
 
     def __repr__(self) -> str:  # pragma: no cover
         return self.name
+
+
+class TEnum(TCon):
+    """A nominal nullary enum type; its values are unboxed tag integers."""
+
+    __slots__ = ()
+
+
+class TRecord(TCon):
+    """A nominal monomorphic product type with named scalar fields."""
+
+    __slots__ = ("fields",)
+
+    def __init__(self, name: str, fields) -> None:
+        super().__init__(name)
+        self.fields = tuple(fields)
+
+    def field(self, name: str):
+        for fname, ftype in self.fields:
+            if fname == name:
+                return ftype
+        return None
+
+
+class TSum(TRecord):
+    """A fixed-mode inline sum type.
+
+    ``variants`` holds ``(variant, tag, ((field, type), ...))`` triples.  The
+    hidden record fields are a tag word followed by the maximum payload words.
+    """
+
+    __slots__ = ("variants", "max_words", "word_rep")
+
+    def __init__(self, name: str, variants, max_words: int) -> None:
+        payload_types = [ft for _, _, fields in variants for _, ft in fields]
+        word_rep = F64 if payload_types and all(
+            isinstance(ft, TCon) and ft.name == "Float"
+            for ft in payload_types) else I64
+        fields = [("__tag", TINT)] + [
+            (f"__w{i}", TFLOAT if word_rep == F64 else TINT)
+            for i in range(max_words)
+        ]
+        super().__init__(name, fields)
+        self.variants = tuple(variants)
+        self.max_words = max_words
+        self.word_rep = word_rep
+
+    def variant(self, name: str):
+        for variant, tag, fields in self.variants:
+            if variant == name:
+                return tag, fields
+        return None
 
 
 class TList(Type):
@@ -213,16 +268,23 @@ def default_numeric(t: Type) -> None:
         default_numeric(t.ret)
 
 
-def parse_type_annotation(text: str, loc=None) -> Type:
+def parse_type_annotation(text: str, loc=None,
+                          known_enums: Optional[Set[str]] = None,
+                          known_records: Optional[Dict[str, "TRecord"]] = None) -> Type:
     text = text.strip()
     if text.startswith("[") and text.endswith("]"):
-        return TList(parse_type_annotation(text[1:-1], loc))
+        return TList(parse_type_annotation(text[1:-1], loc, known_enums,
+                                           known_records))
     simple = {
         "Int": TINT, "Float": TFLOAT, "Bool": TBOOL, "String": TSTR,
         "ArrayF": TARRAYF, "ArrayI": TARRAYI, "ArrayB": TARRAYB,
     }
     if text in simple:
         return simple[text]
+    if known_enums is not None and text in known_enums:
+        return TEnum(text)
+    if known_records is not None and text in known_records:
+        return known_records[text]
     raise TypeError_(f"unknown type annotation '{text}'", loc)
 
 
@@ -307,6 +369,10 @@ def rep_of(t: Optional[Type]) -> str:
     if t is None:
         return BOX
     t = prune(t)
+    if isinstance(t, TEnum):
+        return I64
+    if isinstance(t, TRecord):
+        return "REC:" + t.name
     if isinstance(t, TCon) and t.name in ("Int", "Bool"):
         return I64
     if isinstance(t, TCon) and t.name == "Float":
@@ -423,7 +489,7 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
     if name == "abs":
         return _numeric(lambda n: tfun([n], n))
     # Bit-level integer operations (used by the segmented sieve).
-    if name in ("&", "|", "bit-and", "bit-or", "bit-xor", "shl", "shr"):
+    if name in ("&", "&&", "|", "bit-and", "bit-or", "bit-xor", "shl", "shr"):
         return mono(tfun([TINT, TINT], TINT))
     if name in ("!", "bit-not", "popcount"):
         return mono(tfun([TINT], TINT))
@@ -477,6 +543,10 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TARRAYB], TINT))
     if name == "arrayb-clone":
         return mono(tfun([TARRAYB], TARRAYB))
+    if name == "arrayi-sum":
+        return mono(tfun([TARRAYI], TINT))
+    if name == "arrayf-sum":
+        return mono(tfun([TARRAYF], TFLOAT))
     if name == "write-bytes":
         return mono(tfun([TARRAYB], TINT))
     if name == "write-f64s":
@@ -493,8 +563,73 @@ class Inferencer:
     def __init__(self) -> None:
         self.env: Dict[int, TScheme] = {}
         self.errors: List[str] = []
+        self.enum_names: Set[str] = set()
+        self.enum_variants: Dict[str, Dict[str, int]] = {}
+        self.record_schemas: Dict[str, TRecord] = {}
 
     def infer_program(self, program: Node) -> Type:
+        self.enum_names = {
+            n.enum_name for n in walk(program) if isinstance(n, EnumLit)
+        }
+        # Product fields are restricted to unboxed scalar/enum values for now.
+        self.record_schemas = {}
+        for node in walk(program):
+            if not isinstance(node, RecordLit):
+                continue
+            fields = []
+            for fname, ftype_text in zip(node.field_names, node.field_types):
+                ft = parse_type_annotation(
+                    ftype_text, node.loc, self.enum_names, {})
+                if not (isinstance(ft, TEnum)
+                        or (isinstance(ft, TCon) and ft.name in
+                            ("Int", "Float", "Bool"))):
+                    raise TypeError_(
+                        f"record field '{node.record_name}.{fname}' must be a "
+                        "scalar or enum", node.loc)
+                fields.append((fname, ft))
+            existing = self.record_schemas.get(node.record_name)
+            if existing is not None and existing.fields != tuple(fields):
+                raise TypeError_(
+                    f"inconsistent product type '{node.record_name}'", node.loc)
+            self.record_schemas[node.record_name] = TRecord(
+                node.record_name, fields)
+
+        # Sum payloads are inline scalar/enum words (maximum four per variant).
+        sum_variants: Dict[str, Dict[int, tuple]] = {}
+        sum_words: Dict[str, int] = {}
+        for node in walk(program):
+            if not isinstance(node, SumLit):
+                continue
+            fields = []
+            for fname, ftype_text in zip(node.field_names, node.field_types):
+                ft = parse_type_annotation(
+                    ftype_text, node.loc, self.enum_names, {})
+                if not (isinstance(ft, TEnum)
+                        or (isinstance(ft, TCon) and ft.name in
+                            ("Int", "Float", "Bool"))):
+                    raise TypeError_(
+                        f"sum payload '{node.sum_name}.{fname}' must be a "
+                        "scalar or enum", node.loc)
+                fields.append((fname, ft))
+            if len(fields) > 4:
+                raise TypeError_(
+                    f"sum variant '{node.variant}' has more than 4 payload "
+                    "fields", node.loc)
+            sum_variants.setdefault(node.sum_name, {})[node.tag] = (
+                node.variant, tuple(fields))
+            sum_words[node.sum_name] = max(
+                sum_words.get(node.sum_name, 0), len(fields))
+        for name, by_tag in sum_variants.items():
+            variants = [(by_tag[t][0], t, by_tag[t][1]) for t in sorted(by_tag)]
+            self.record_schemas[name] = TSum(name, variants, sum_words[name])
+        self.enum_variants = {}
+        for block in walk(program):
+            if not isinstance(block, Block):
+                continue
+            for d in block.defs:
+                if isinstance(d.value, EnumLit):
+                    self.enum_variants.setdefault(
+                        d.value.enum_name, {})[d.name] = d.value.tag
         result = self.infer(program, {})
         # Any numeric constraint that never met an Int/Float use defaults to
         # Int, keeping function ABIs concrete for code generation.
@@ -517,6 +652,65 @@ class Inferencer:
         return t
 
     def _infer(self, node: Node, env: Dict[int, TScheme]) -> Type:
+        if isinstance(node, SumLit):
+            rec = self.record_schemas.get(node.sum_name)
+            if not isinstance(rec, TSum):
+                raise TypeError_(
+                    f"unknown sum type '{node.sum_name}'", node.loc)
+            info = rec.variant(node.variant)
+            if info is None:
+                raise TypeError_(
+                    f"unknown variant '{node.variant}'", node.loc)
+            _, fields = info
+            if len(fields) != len(node.args):
+                raise TypeError_(
+                    f"'{node.variant}' expects {len(fields)} payload fields, "
+                    f"got {len(node.args)}", node.loc)
+            for arg, (_, ftype) in zip(node.args, fields):
+                arg_t = self.infer(arg, env)
+                try:
+                    unify(arg_t, ftype)
+                except UnifyError as exc:
+                    raise TypeError_(
+                        f"payload of '{node.variant}' has wrong type: "
+                        f"{exc.message}", arg.loc) from None
+            return rec
+
+        if isinstance(node, RecordLit):
+            rec = self.record_schemas.get(node.record_name)
+            if rec is None:
+                raise TypeError_(
+                    f"unknown product type '{node.record_name}'", node.loc)
+            if len(node.args) != len(rec.fields):
+                raise TypeError_(
+                    f"'{node.record_name}' expects {len(rec.fields)} fields, "
+                    f"got {len(node.args)}", node.loc)
+            for arg, (_, ftype) in zip(node.args, rec.fields):
+                arg_t = self.infer(arg, env)
+                try:
+                    unify(arg_t, ftype)
+                except UnifyError as exc:
+                    raise TypeError_(
+                        f"field of '{node.record_name}' has wrong type: "
+                        f"{exc.message}", arg.loc) from None
+            return rec
+
+        if isinstance(node, RecordField):
+            value_t = prune(self.infer(node.value, env))
+            if not isinstance(value_t, TRecord):
+                raise TypeError_(
+                    f"field access requires a record, got "
+                    f"{show_type(value_t)}", node.value.loc)
+            ftype = value_t.field(node.field_name)
+            if ftype is None:
+                raise TypeError_(
+                    f"'{value_t.name}' has no field '{node.field_name}'",
+                    node.loc)
+            return ftype
+
+        if isinstance(node, EnumLit):
+            return TEnum(node.enum_name)
+
         if isinstance(node, Lit):
             if isinstance(node.value, bool):
                 return TBOOL
@@ -525,6 +719,9 @@ class Inferencer:
             if isinstance(node.value, float):
                 return TFLOAT
             return TSTR
+
+        if isinstance(node, Borrow):
+            return self.infer(node.value, env)
 
         if isinstance(node, Var):
             b: Binding = node.binding
@@ -535,7 +732,20 @@ class Inferencer:
                 # A top-level binding whose type has not been inferred yet;
                 # this is an internal error rather than a user error.
                 raise TypeError_(f"internal: no type for '{b.name}'", node.loc)
-            return instantiate(scheme)
+            t = instantiate(scheme)
+            if node.field_name is not None:
+                rt = prune(t)
+                if not isinstance(rt, TRecord):
+                    raise TypeError_(
+                        f"'{node.name}' uses field syntax, but "
+                        f"'{b.name}' is not a product value", node.loc)
+                ftype = rt.field(node.field_name)
+                if ftype is None:
+                    raise TypeError_(
+                        f"'{rt.name}' has no field '{node.field_name}'",
+                        node.loc)
+                return ftype
+            return t
 
         if isinstance(node, Lam):
             env2 = dict(env)
@@ -544,7 +754,8 @@ class Inferencer:
                 ann = (node.param_annotations[i]
                        if i < len(node.param_annotations) else None)
                 if ann:
-                    v = parse_type_annotation(ann, node.loc)
+                    v = parse_type_annotation(
+                        ann, node.loc, self.enum_names, self.record_schemas)
                 else:
                     v = TVar()
                 b.type = v
@@ -574,6 +785,117 @@ class Inferencer:
                     raise TypeError_(exc.message + hint, arg.loc) from None
                 func_t = res_t
             return func_t
+
+        if isinstance(node, Match):
+            subject_t = self.infer(node.subject, env)
+            pr = prune(subject_t)
+            if isinstance(pr, TSum):
+                by_name = {variant: (tag, fields)
+                           for variant, tag, fields in pr.variants}
+                seen = set()
+                tags = []
+                result_t = None
+                for arm_idx, ((pattern, arm), binders) in enumerate(
+                        zip(node.arms, node.arm_bindings)):
+                    info = by_name.get(pattern)
+                    if info is None:
+                        raise TypeError_(
+                            f"'{pattern}' is not a variant of sum {pr.name}",
+                            arm.loc)
+                    tag, fields = info
+                    if tag in seen:
+                        raise TypeError_(
+                            f"duplicate match arm for '{pattern}'", arm.loc)
+                    if len(fields) != len(binders):
+                        raise TypeError_(
+                            f"'{pattern}' expects {len(fields)} payload "
+                            f"binders, got {len(binders)}", arm.loc)
+                    seen.add(tag)
+                    tags.append(tag)
+                    env2 = dict(env)
+                    for (fname, ftype), bnd in zip(fields, binders):
+                        env2[bnd.uid] = mono(ftype)
+                    arm_t = self.infer(arm, env2)
+                    if result_t is None:
+                        result_t = arm_t
+                    else:
+                        try:
+                            unify(result_t, arm_t)
+                        except UnifyError as exc:
+                            raise TypeError_(
+                                f"match arms have different types: "
+                                f"{show_type(result_t)} vs {show_type(arm_t)}",
+                                arm.loc) from None
+                missing = [variant for variant, tag, _ in pr.variants
+                           if tag not in seen]
+                if missing:
+                    raise TypeError_(
+                        "non-exhaustive match; missing "
+                        + ", ".join(sorted(missing)), node.loc)
+                node.pattern_tags = tags
+                return result_t if result_t is not None else TUNIT
+
+            if isinstance(pr, TEnum):
+                enum_name = pr.name
+            else:
+                enum_name = None
+                for pattern, _ in node.arms:
+                    for name, variants in self.enum_variants.items():
+                        if pattern in variants:
+                            enum_name = name
+                            break
+                    if enum_name is not None:
+                        break
+                if enum_name is None:
+                    raise TypeError_(
+                        "match patterns do not name an enum variant",
+                        node.arms[0][1].loc if node.arms else node.loc)
+                try:
+                    unify(pr, TEnum(enum_name))
+                except UnifyError as exc:
+                    raise TypeError_(
+                        f"match subject must be {enum_name}, got {show_type(pr)}",
+                        node.subject.loc) from None
+
+            variants = self.enum_variants.get(enum_name, {})
+            seen = set()
+            tags = []
+            result_t = None
+            for arm_idx, (pattern, arm) in enumerate(node.arms):
+                if pattern not in variants:
+                    raise TypeError_(
+                        f"'{pattern}' is not a variant of enum {enum_name}",
+                        arm.loc)
+                if arm_idx < len(node.binders) and node.binders[arm_idx]:
+                    raise TypeError_(
+                        f"enum variant '{pattern}' has no payload binders",
+                        arm.loc)
+                tag = variants[pattern]
+                if tag in seen:
+                    raise TypeError_(
+                        f"duplicate match arm for '{pattern}'", arm.loc)
+                seen.add(tag)
+                tags.append(tag)
+                arm_t = self.infer(arm, env)
+                if result_t is None:
+                    result_t = arm_t
+                else:
+                    try:
+                        unify(result_t, arm_t)
+                    except UnifyError as exc:
+                        raise TypeError_(
+                            f"match arms have different types: "
+                            f"{show_type(result_t)} vs {show_type(arm_t)}",
+                            arm.loc) from None
+            missing = [name for name, tag in variants.items() if tag not in seen]
+            if missing:
+                raise TypeError_(
+                    "non-exhaustive match; missing "
+                    + ", ".join(sorted(missing)), node.loc)
+            if not tags:
+                raise TypeError_("match needs at least one arm", node.loc)
+            node.pattern_tags = tags
+            return result_t if result_t is not None else TUNIT
 
         if isinstance(node, If):
             cond_t = self.infer(node.cond, env)

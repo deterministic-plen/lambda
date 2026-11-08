@@ -1,3 +1,4 @@
+; Add --input to compiler flag
 ; As part of any good esolang we will write a truth machine.
 truth → (read-int "> ")
 f → (λx. 

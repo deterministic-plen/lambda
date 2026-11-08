@@ -1,0 +1,4 @@
+include "lib/bigint.lambda"
+
+x → (bi-fib 100000 4000)
+(arrayi-sum x)

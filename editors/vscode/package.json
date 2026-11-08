@@ -1,0 +1,43 @@
+{
+  "name": "lambda-language",
+  "displayName": "Lambda",
+  "description": "Syntax highlighting for the Lambda language",
+  "version": "0.1.0",
+  "publisher": "lambda",
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:lambda"
+  ],
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "lambda",
+    "functional"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lambda",
+        "aliases": [
+          "Lambda",
+          "lambda"
+        ],
+        "extensions": [
+          ".lambda"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lambda",
+        "scopeName": "source.lambda",
+        "path": "./syntaxes/lambda.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -39,7 +39,7 @@ python lambda.py examples/nth_prime_sieve.lambda -o sieve
 python lambda.py tests/input_int.lambda -o ask --input
 echo 41 | ./ask
 
-python run_tests.py          # 100 regression tests
+python run_tests.py          # 129 regression tests
 ```
 
 Requirements: Python 3.10+, LLVM `clang` on `PATH`.
@@ -89,7 +89,8 @@ Other forms:
 
 ```lambda
 (λx y. (+ x y))                 ; multiple parameters
-(λp x. (+ x 1))                 ; parallel-safe marker (must be pure)(λx: Float. (* x x))            ; parameter type annotation
+(λp x. (+ x 1))                 ; parallel-safe marker (must be pure)
+(λx: Float. (* x x))            ; parameter type annotation
 (let x = (fib 5) in (+ x 1))     ; local definition sugar
 [1, 2, 3]                        ; list literal
 [ (* x x) | x ← [1..10] ]        ; sequential comprehension
@@ -97,6 +98,7 @@ Other forms:
 [0..n]                           ; half-open integer range 0 .. n-1
 "a\nb"                           ; strings
 (if cond then a else b)
+enum Turnstile (Locked, Unlocked) ; nullary enum declaration
 ```
 
 A definition value is one atom, so compound values go in parentheses:
@@ -120,6 +122,20 @@ that writes the directive, then in `LAMBDA_PATH`, the compiler root, and
 `lib/`.  A file is included at most once per compilation; cycles are errors;
 duplicate definition names are errors.  Compiled definitions carry their own
 source file in diagnostics.
+
+### Qualified names
+
+A definition name may contain `::` segments.  The segments are ordinary parts of
+one global name; this is namespacing sugar, not a module system yet:
+
+```lambda
+Complex::add → (λa: Complex b: Complex. ...)
+(Complex::add z w)
+```
+
+Use it for numeric libraries (`Complex::add`, `Matrix::mul`, `Vector::dot`)
+instead of flooding the global namespace with `cadd`/`cmul`.  A single `:` is
+still the type/field/match separator; only the doubled `::` is part of a name.
 
 ### Types and annotations
 
@@ -147,8 +163,8 @@ squarei → (λx. (* x x))           ; Int -> Int
 | conversions | `int->float`, `float->int`, `str->float`, `float->str` |
 | reductions | `sum`, `product` (same type as the list) |
 | lists | `cons`, `head`, `tail`, `empty?`, `nil`, `map`, `pmap`, `range`, `immortalize`/`freeze` |
-| flat arrays | `arrayf`, `arrayi`, `arrayb`, `*-get`, `*-get-ro`, `*-set`, `*-length`, `*-clone`, `arrayi-pmap`, `arrayi-pmap-chunk` |
-| bit-level | `&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
+| flat arrays | `arrayf`, `arrayi`, `arrayb`, `*-get`, `*-get-ro`, `*-set`, `*-length`, `*-clone`, `arrayi-sum`, `arrayf-sum`, `arrayi-pmap`, `arrayi-pmap-chunk` |
+| bit-level | `&&`/`&`/`bit-and`, `\|`/`bit-or`, `bit-xor`, `!`/`bit-not`, `shl`, `shr`, `popcount` |
 | strings | `str->int`, `int->str`, `str->list`, `str-len`, `str-append`, `read-file` |
 | IO | `print`, `println` (return their argument), `not` |
 | binary data (`--data`) | `write-bytes : ArrayB -> Int`, `write-f64s : ArrayF -> Int`, `write-i64s : ArrayI -> Int` |
@@ -187,6 +203,43 @@ programs.
 * If inference fails (for example self-application in a fixed-point
   combinator), the driver warns and compiles the whole program with the boxed
   dynamic backend.  `--strict` makes that a hard error.
+
+## Borrowed array parameters and `&x`
+
+A `&` parameter is a read-only borrow:
+
+```lambda
+sum → (λ&a: ArrayI.
+  go → (λ i acc &a2: ArrayI.
+    if (>= i (arrayi-length a2))
+    then acc
+    else (go (+ i 1) (+ acc (arrayi-get a2 i)) a2))
+  (go 0 0 a))
+```
+
+An expression `&x` is an **idempotent inspection view** of a variable.  It never
+moves, mutates, retains or releases `x`, so `x` remains usable afterwards:
+
+```lambda
+first → (λ&a. (arrayi-get a 0))
+a → (arrayi-set (arrayi 3 0) 1 9)
+[(first &a), (first &a), (arrayi-get &a 1)]
+```
+
+`&x` is only valid on a named variable.  It may be read, passed to a `&`
+parameter, or used in `arrayi-get`; it cannot be consumed, returned, captured or
+stored.  `&&` is the preferred spelling for bitwise and, leaving `&` for
+inspection; the legacy binary `&` primitive still works.
+
+The checker rejects mutating the borrowed buffer, returning it, capturing it in
+a closure, passing it to a consuming parameter, or using a borrowed-parameter
+function as a first-class value.  Borrowed parameters are true non-owning
+references: no retain at the call boundary, no release in the callee, and LLVM
+`nocapture readonly` metadata.  `noalias` is still withheld because callers may
+alias two borrowed arguments.  This is explicit borrow checking, not general
+inferred linear ownership yet; normal arrays retain their existing RC ownership.
+The dynamic (boxed) backend ignores parameter borrow markers, and `&x`
+inspection requires typed mode.
 
 ## Flat arrays (consume-on-write)
 
@@ -234,6 +287,11 @@ they are excluded from CSE, and `λp`/`pmap` bodies cannot use them.  Equality i
 identity, and arrays print as `[arrayf N]` / `[arrayi N]` / `[arrayb N]`.
 Bounds are checked; byte values are checked to be in `0..255`.
 
+`arrayi-sum` and `arrayf-sum` are flat reduction kernels implemented as
+`restrict` C loops. They are auto-vectorized by clang; a 10M-element i64 sum is
+about 2.6× C in the current build. The kernels are runtime SIMD, not
+compiler-generated SIMD over Lambda loops.
+
 `(arrayi-pmap f n)` is the controlled parallel array builder: it spawns workers,
 applies a provably pure `Int -> Int` function to `0..n-1`, and writes a flat
 `arrayi` result.  It never builds a per-item list.  The `*-get-ro` accessors are
@@ -245,10 +303,138 @@ function (for example, to read a shared base-prime array).  Ordinary
 arrays, arrays of arrays, and a typed `Array a` are not implemented yet; the
 three concrete types keep the element representation unboxed.
 
+## Enums
+
+Nullary enums are supported as nominal unboxed tags:
+
+```lambda
+enum Turnstile (Locked, Unlocked)
+
+next → (λs: Turnstile.
+  match s with
+    Locked: Unlocked,
+    Unlocked: Locked)
+```
+
+Each constructor is a value of type `Turnstile`; the parser expands the
+declaration into ordinary definitions.  At runtime a constructor is an `i64`
+tag: `Locked = 0`, `Unlocked = 1`, in declaration order.  There is no per-state
+closure or allocation.  `==` works on enum values; arithmetic and ordering
+reject them.
+
+The type is nominal: `Locked` cannot be used as an `Int`, and two different
+enums are distinct types even if they have the same number of variants.
+Annotations use the enum name (`λs: Turnstile. ...`).
+
+`match` is exhaustive over the enum: every variant must appear exactly once,
+and an unknown or duplicate variant is a type error.  Arms are
+comma-separated `Variant: expression` pairs; the older
+`| Variant → expression` form is still accepted.  The compiler lowers the tag
+to an LLVM `switch`; the default edge calls a runtime failure rather than
+executing an arbitrary branch.  An `if`/`==` chain is also allowed.
+
+To print a name, write a display function:
+
+```lambda
+name → (λs: Turnstile.
+  if (== s Locked) then "Locked" else "Unlocked")
+
+shown → (print (name (next Locked)))
+""
+```
+
+The last `""` is the block's final expression; the `shown` definition sequences
+the print.  See `examples/turnstile.lambda` and
+`examples/coffee_machine.lambda`.
+
+This is substantially cheaper than a Church encoding for nullary states: a
+Church state is a closure and each transition is an indirect call, while the
+enum is a compare/branch over an integer tag.  A 20-million-transition local
+microbenchmark was orders of magnitude faster with the native enum.  Tail calls
+inside `match` arms are emitted as real tail calls; a million-transition test
+(`tests/enum_match_deep.lambda`) exercises that path without stack growth.
+
+Payload-carrying variants are supported in fixed-mode form; tuples, generics,
+and arena-backed variable-size payloads remain future work.  The planned syntax
+for borrowing, arenas, and defunctionalization is in
+[docs/roadmap.md](docs/roadmap.md).
+
+## Product types
+
+Monomorphic product types with scalar/enum fields are unboxed LLVM structs:
+
+```lambda
+type Complex (re: Float, im: Float)
+type Vec3 (x: Float, y: Float, z: Float)
+
+add → (λa: Complex b: Complex.
+  (Complex (+ a_re b_re) (+ a_im b_im)))
+```
+
+`Complex` is the constructor; `a_re`/`a_im` are field sugar for
+`(Complex-re a)`/`(Complex-im a)`.  The generated accessor functions remain
+available.  Field sugar splits at the **last** underscore only: an exact
+variable name always wins, and `vector-2-dimensional_x` means the field `x` of
+`vector-2-dimensional`, never a search through earlier prefixes.  If that prefix
+is not a record with field `x`, it is an error.
+Values are passed by value in registers/stack: there is no heap allocation or
+runtime tag for the product itself.
+
+Current restrictions:
+
+- fields must be `Int`, `Float`, `Bool`, or an enum;
+- product types are monomorphic;
+- functions taking/returning product values are direct-call only — using one as
+  a first-class closure is rejected rather than boxed;
+- printing/equality of whole product values is not implemented; compare fields.
+
+These restrictions keep the representation flat.  The first-class/closure,
+generic, and arena-memory cases are later phases of the roadmap.
+
+## Sum types
+
+Monomorphic fixed-mode sums with up to four inline payload fields per variant:
+
+```lambda
+type Shape (
+  Circle (radius: Float)
+| Rectangle (width: Float, height: Int)
+| Dot
+)
+
+area → (λs: Shape.
+  match s with
+    Circle r: (* 3.0 (* r r)),
+    Rectangle w h: (* w (int->float h)),
+    Dot: 0.0)
+```
+
+Representation is a tagged aggregate:
+
+```text
+{ i64 tag, i64 word0, i64 word1, ... }
+```
+
+- the word count is the maximum payload field count over the variants;
+- `Float` fields are bitcast into i64 words, `Int`/`Bool`/enum fields are stored
+  directly;
+- nullary variants leave the words zero;
+- no heap allocation per value;
+- `match` is exhaustive and lowers to an LLVM `switch`;
+- payload binders are checked for arity and scoped to their arm.
+
+A 20-million-transition sum-state loop ran in ~0.009 s with zero allocations.
+
+Current restrictions: payload fields must be scalar or enum, at most four per
+variant, no nested product/sum payloads, monomorphic only, and sum values are
+direct-call-only rather than first-class closures.  Larger payloads will use
+the rooted segmented-arena descriptor.
+
 ## Big integers
 
-`lib/bigint.lambda` is a pure-Lambda arbitrary-precision unsigned integer
-library; it adds no compiler primitives.  A number is one `arrayi`:
+`lib/bigint.lambda` is an arbitrary-precision unsigned integer library written
+entirely in Lambda over `arrayi`.  It adds no compiler primitives.  A number is
+one `arrayi`:
 
 ```
 a[0]        = number of limbs
@@ -256,20 +442,33 @@ a[1..n]     = little-endian base-1e9 limbs
 unused      = zero
 ```
 
-Base 1e9 keeps every `a[i] * b[j] + carry` within `i64` and makes decimal output
-trivial.  The library provides add/subtract, schoolbook multiplication,
-Karatsuba above 24 limbs, fast doubling for Fibonacci, and streamed decimal
-printing (most-significant limb first, nine-digit zero-padded lower limbs).
-`F(100)` and `F(1000)` are exact regression cases; `F(1,000,000)` (208,988
-digits) is an example and benchmark:
+The library uses direct `arrayi-get`/`arrayi-set` in its kernels, a dedicated
+Karatsuba squaring path, in-place subtraction inside the Karatsuba combine, and
+tuned multiplication/squaring cutoffs.  Fast doubling and streamed decimal
+printing are also ordinary Lambda.
+
+Most of the speedup came from structural compiler/runtime work rather than from
+the library: reference-count fast paths are emitted inline, plain variables
+passed to `&` parameters are borrowed without a retain/release round trip, tail
+calls transfer ownership of parameters and captures, immutable array
+length/data fields are loaded once per frame with `!invariant.load`, literal
+top-level scalars become LLVM constants, and the single-threaded array-data pool
+no longer takes a mutex.  The public API is unchanged: `bi-get`, `bi-set`,
+`bi-add`, `bi-mul`, `bi-fib`, `bi-print` and the `arrayi` layout all still work.
+
+`F(100)` and `F(1000)` are exact regression cases; `F(100000)` is checked
+through a limb checksum, and `F(1,000,000)` (208,988 digits) is the benchmark:
 
 ```
-examples/bigint_fib1m.lambda   ; ~760 ms, exactly 208,988 digits
+examples/bigint_fib1m.lambda   ; ~103 ms compute + output, exactly 208,988 digits
 ```
 
-This is 1.44x Python’s C-backed bigint on the same fast-doubling computation.
-It is not close to GMP’s `F(216,000,000)` territory; that would need FFT/NTT
-limb kernels and much more tuning.
+Compute-only, Lambda is about **100 ms** versus Python's C-backed bigint at
+~36 ms and gmpy2/GMP at ~2.8 ms.  The total including decimal output is
+~103 ms versus ~512 ms for Python, because base-1e9 printing is essentially
+free.  This is the "same order as Python" target; GMP is a different class of
+implementation (FFT plus assembly).  Full protocol and medians:
+[bench/results.md](bench/results.md).
 
 ## Sharing, memory, and ownership
 
@@ -443,7 +642,8 @@ Windows x64, clang `-O3`, 16 logical CPUs:
 
 * `nth-prime 670000`: sequential ~1.00 s; parallel trial division ~0.17 s;
   segmented sieve ~0.23 s (0.034 s at 16 threads).
-* Pure-Lambda `F(1,000,000)`: 208,988 digits in ~0.76 s (`live=0`).
+* `F(1,000,000)`: 208,988 digits in ~103 ms compute+output (`live=0`);
+  compute-only ~100 ms versus Python ~36 ms and gmpy2 ~2.8 ms.
 * 100,000-iteration string churn: 100,004 values / 100,002 envs, `live=0`.
 * 100,000-element list construction/teardown: 200,002 values, `live=0`.
 * 100,000 closures created/dropped: 100,004 values / 100,002 envs, `live=0`.
@@ -473,19 +673,23 @@ there is no I/O inside a timed region. CPU: AMD Ryzen 7 9700X, 8 cores /
 The sequential and parallel trial-division paths and the f64 Newton kernel are
 at parity. The sieve now uses a flat `arrayi` of base primes, chunked
 `arrayi-pmap-chunk` counts into a flat result array, and materialises only the
-selected block’s mask. That reduced the gap from 5.1x/8.8x to **1.37x/1.61x**.
-The remaining sieve overhead is the Lambda-level 64-bit mask loop (list-free but
-still recursive calls) and bounds checks; it is no longer dominated by list
-garbage or per-task refcount contention. The 10M-element array test is **1.13x
-C**, with one contiguous allocation per pass and no per-element wrappers.
+selected block’s mask. A `p >= 64` fast path marks at most one bit directly,
+avoiding the recursive mark loop for almost all base primes; this reduced the
+gap from 5.1x/8.8x to **1.09x/1.45x**. The remaining single-thread overhead is
+the Lambda-level mask loop and bounds checks; the parallel gap is mostly chunk
+dispatch. The 10M-element array test is **1.21x C**, with one contiguous
+allocation per pass and no per-element wrappers.
 
-The pure-Lambda bigint library (`lib/bigint.lambda`) computes
-**F(1,000,000) = 208,988 digits in 760 ms**, exactly matching Python’s
-C-backed bigint at 528 ms (1.44x). It uses base-1e9 limbs in one `arrayi`,
-length in limb 0, Karatsuba multiplication, fast doubling, and streamed decimal
-output (no giant intermediate string). GMP and Boost are not installed here, so
-Python is the available big-number reference. Full protocol and raw medians:
-[bench/results.md](bench/results.md).
+The bigint library (`lib/bigint.lambda`) computes **F(1,000,000) = 208,988
+digits in ~103 ms**, including decimal output, versus ~512 ms for Python’s
+C-backed bigint.  Compute-only it is ~100 ms versus Python ~36 ms (2.8x) and
+gmpy2/GMP ~2.8 ms (36x).  The representation is unchanged (base-1e9 limbs in
+one `arrayi`, length in limb 0); all arithmetic is Lambda over `arrayi`, with
+Karatsuba squaring and fast doubling.  The compiler now inlines reference-count
+fast paths, borrows plain variables passed to `&` parameters, moves tail-call
+ownership, caches immutable array metadata per frame, folds literal top-level
+scalars into LLVM constants, and skips the array-pool mutex in single-threaded
+builds.  Full protocol and raw medians: [bench/results.md](bench/results.md).
 
 Known numerical-methods caveat: `matrix.rs` is not used as a benchmark because
 Lambda has no 2D array/matrix primitive; a list-of-lists matrix would measure
@@ -509,27 +713,51 @@ Rust file also allocates `Vec<Vec<f64>>` and clones rows per elimination, and it
 | `lambda.py` | CLI driver, include loading, clang invocation, runtime variants |
 | `lib/prime.lambda` | shared primality/bounds/block helpers |
 | `lib/list.lambda` | `length`, `reverse`, `filter`, `foldl`, `append` |
-| `lib/bigint.lambda` | pure-Lambda base-1e9 bigint, Karatsuba, fast doubling |
+| `lib/bigint.lambda` | pure-Lambda base-1e9 bigint, Karatsuba squaring, fast doubling |
 | `lib/stream.lambda` | LMB1 binary frame headers, f64/i64/byte emitters |
 | `tools/stream_plot.py` | binary frame reader, CSV export, optional matplotlib |
-| `run_tests.py` | 100 compile/run/leak regression cases |
+| `editors/` | VS Code TextMate grammar + completion data, Pygments lexer |
+| `docs/roadmap.md` | product/sum types, linearity, defunctionalization plan |
+| `docs/roadmap-checklist.md` | completed/pending checklist with evidence |
+| `run_tests.py` | 129 compile/run/leak regression cases |
 | `tests/`, `examples/` | test corpus and runnable examples |
 | `bench/` | fair Lambda/C/C++/Rust comparison and results |
 
 ## Minimalism review
 
-The bigint layer adds **no compiler primitives**; it is a library over `arrayi`.
-That is the right direction for bootstrapping: language-level algorithms should
-be written in Lambda, with only representation primitives in the runtime.
+The bigint work adds **no language primitives or syntax**.  It is still a
+library over `arrayi`; the speedup came from making idiomatic Lambda run
+better:
+
+* reference-count fast paths are emitted inline, with a runtime slow path only
+  when the last reference goes away;
+* a plain variable passed to an explicitly borrowed (`&`) parameter is passed
+  without a retain/release round trip;
+* tail calls transfer ownership of parameters and captures instead of
+  retaining them;
+* immutable array length/data fields are cached per frame and marked
+  `!invariant.load`, so the optimizer can hoist them;
+* literal top-level scalars are emitted as LLVM constants;
+* the single-threaded array-data pool is lock-free (the atomic/pmap variant
+  keeps the lock);
+* bigint kernels use direct `arrayi` operations, dedicated Karatsuba squaring,
+  in-place subtraction inside the combine step, and tuned cutoffs.
+
+These are compiler/runtime improvements that also benefit other array-heavy
+programs; `run_tests.py` still reports 129/129 with `live=0`.  GMP-class
+performance would require an FFT/NTT multiplier, but that is a separate
+algorithmic step, not a language feature.
 
 The array additions are deliberately narrow: three concrete element types, one
 generic read-only accessor promise, and one chunked parallel map.  They avoid a
 generic `Array a`/type-class layer that would complicate inference and boxing.
 `arrayi-pmap-chunk` is the most specialised primitive; it is justified by the
 sieve benchmark, but future parallel work should try to generalise it rather
-than add more sieve-shaped operations.  Tuples and enums should stay out until
-their syntax pays for itself; multiple parameters already cover multi-variable
-iteration, and nullary enums are only named integer tags.
+than add more sieve-shaped operations.  Nullary enums are now included because
+they make FSM state explicit at the cost of one integer tag; fixed-mode
+payload sums add inline payload words without heap allocation.  Generic ADTs,
+tuples, and arena-backed variable-size payloads remain out until their syntax
+pays for itself.  Multiple parameters still cover multi-variable iteration.
 
 For self-hosting, the practical remaining dependencies are: strings (lexer and
 diagnostics), lists (AST), arrays (token/byte buffers), `read-file`, and the
@@ -562,11 +790,14 @@ required external interface is the clang/process boundary.
 * Arrays are effects: they are not usable in `pmap`/`λp`, and first-class
   arrays (`map arrayf-get ...`), arrays of arrays, and generic `Array a` are not
   implemented.
-* Typed array get/set are emitted inline with bounds checks.  A consumed array
-  parameter is moved into `set` with no retain/release, and reads borrow the
-  buffer; globals and captured/shared arrays still take the retaining path.
-  Bounds checks remain unless a future unchecked mode is added.
-* Tuples, named enums and FFT/NTT multiplication are not implemented yet.
-* `lib/bigint.lambda` is unsigned add/sub/mul/fast-doubling only; capacity is
-  supplied by the caller, and division, FFT/NTT multiplication and arbitrary
-  radix parsing are not implemented.
+* Typed array get/set are emitted inline with bounds checks.  Array length and
+  data pointers are immutable and are cached per frame; plain variables passed
+  to `&` parameters are borrowed without retain/release.  Bounds checks remain
+  unless a future unchecked mode is added.
+* Tuples, generic ADTs, arena-backed variable-size payloads, and FFT/NTT
+  multiplication are not implemented yet.  Enums/products/fixed-mode sums have
+  exhaustive matching; sums currently support up to four scalar payload fields
+  per variant and are direct-call-only.
+* `lib/bigint.lambda` is unsigned add/sub/mul/fast-doubling only; `bi-add`,
+  `bi-sub` and `bi-mul` accept a caller-supplied `cap` argument.  Division,
+  FFT/NTT multiplication and arbitrary-radix parsing are not implemented.

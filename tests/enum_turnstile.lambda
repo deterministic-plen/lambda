@@ -1,0 +1,8 @@
+enum Turnstile (Locked, Unlocked)
+
+step → (λs: Turnstile.
+  if (== s Locked)
+  then Unlocked
+  else Locked)
+
+(step (step Locked))

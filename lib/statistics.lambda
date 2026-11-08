@@ -1,0 +1,39 @@
+;variance
+varp → (λdata.
+  N → (arrayf-length data)
+  if (<= N 1)
+  then 0.0
+  else
+    go → (λi mean m2.
+      if (>= i N)
+      then (/ m2 (int->float N))       ; population
+      else
+        x → (arrayf-get data i)
+        delta → (- x mean)
+        mean2 → (+ mean (/ delta (int->float (+ i 1))))
+        delta2 → (- x mean2)
+        (go (+ i 1) mean2 (+ m2 (* delta delta2))))
+    (go 0 0.0 0.0)
+)
+;minimum float
+minf → (λdata m.
+    go → (λiter data m.
+    if iter >= (arrayf-length data)
+    then m
+    else if m >= (arrayf-get data iter)    
+    then go (+ iter 1) data (arrayf-get data iter)
+    else go (+ iter 1) data m
+    )
+)
+
+;maximum float
+maxf → (λdata m.
+    go → (λiter data m.
+    if iter >= (arrayf-length data)
+    then m
+    else if m <= (arrayf-get data iter)    
+    then go (+ iter 1) data (arrayf-get data iter)
+    else go (+ iter 1) data m
+    )
+)
+

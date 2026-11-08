@@ -91,8 +91,8 @@ class Lam(Node):
     """
 
     __slots__ = (
-        "params", "body", "param_bindings", "param_annotations", "is_parallel",
-        "info", "captures", "capture_set",
+        "params", "body", "param_bindings", "param_annotations", "param_borrows",
+        "is_parallel", "info", "captures", "capture_set",
     )
 
     def __init__(self, params: List[str], body: Node, loc: Optional[Loc] = None) -> None:
@@ -101,6 +101,7 @@ class Lam(Node):
         self.body = body
         self.param_bindings: List["Binding"] = []
         self.param_annotations: List[Optional[str]] = [None] * len(params)
+        self.param_borrows: List[bool] = [False] * len(params)
         self.is_parallel = False
         self.info: Any = None
         self.captures: List["Binding"] = []
@@ -137,6 +138,28 @@ class If(Node):
         return f"If({self.cond!r}, {self.then!r}, {self.else_!r})"
 
 
+class Match(Node):
+    """Exhaustive match over a nullary enum.
+
+    ``arms`` holds ``(variant_name, expression)`` pairs.  The type checker
+    stores the corresponding tags in ``pattern_tags`` and verifies that every
+    variant is covered; code generation lowers the tag to an LLVM ``switch``.
+    """
+
+    __slots__ = ("subject", "arms", "binders", "pattern_tags", "arm_bindings")
+
+    def __init__(self, subject: Node, arms, loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.subject = subject
+        self.arms = arms
+        self.binders = [[] for _ in arms]
+        self.pattern_tags = []
+        self.arm_bindings = [[] for _ in arms]
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return f"Match({self.subject!r}, {self.arms!r})"
+
+
 class Lit(Node):
     """Integer, boolean or string literal."""
 
@@ -150,18 +173,109 @@ class Lit(Node):
         return f"Lit({self.value!r})"
 
 
+class EnumLit(Node):
+    """A nullary enum constructor value.
+
+    Enum declarations expand to one definition per constructor, so ``Locked``
+    is an ordinary value of its enum type whose runtime representation is its
+    tag.  The tag is unboxed and is compared directly with ``==``.
+    """
+
+    __slots__ = ("enum_name", "tag")
+
+    def __init__(self, enum_name: str, tag: int, loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.enum_name = enum_name
+        self.tag = tag
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return f"EnumLit({self.enum_name}.{self.tag})"
+
+
+class RecordLit(Node):
+    """A monomorphic product value.
+
+    The parser turns ``type Complex (re: Float, im: Float)`` into a constructor
+    lambda whose body is a ``RecordLit``.  Field types are stored as annotation
+    strings and resolved by the type checker.
+    """
+
+    __slots__ = ("record_name", "field_names", "field_types", "args")
+
+    def __init__(self, record_name: str, field_names, field_types, args,
+                 loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.record_name = record_name
+        self.field_names = list(field_names)
+        self.field_types = list(field_types)
+        self.args = list(args)
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return f"RecordLit({self.record_name}, {self.args!r})"
+
+
+class SumLit(Node):
+    """A constructor value of a monomorphic inline sum type."""
+
+    __slots__ = ("sum_name", "variant", "tag", "field_names", "field_types", "args")
+
+    def __init__(self, sum_name: str, variant: str, tag: int, field_names,
+                 field_types, args, loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.sum_name = sum_name
+        self.variant = variant
+        self.tag = tag
+        self.field_names = list(field_names)
+        self.field_types = list(field_types)
+        self.args = list(args)
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return f"SumLit({self.sum_name}.{self.variant}, {self.args!r})"
+
+
+class RecordField(Node):
+    """Extract one field from a product value."""
+
+    __slots__ = ("value", "record_name", "field_name", "field_type")
+
+    def __init__(self, value: Node, record_name: str, field_name: str,
+                 field_type: str, loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.value = value
+        self.record_name = record_name
+        self.field_name = field_name
+        self.field_type = field_type
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return f"RecordField({self.record_name}.{self.field_name})"
+
+
 class Var(Node):
     """A variable reference, optionally resolved to a :class:`Binding`."""
 
-    __slots__ = ("name", "binding")
+    __slots__ = ("name", "binding", "field_name")
 
     def __init__(self, name: str, loc: Optional[Loc] = None) -> None:
         super().__init__(loc)
         self.name = name
         self.binding: Optional["Binding"] = None
+        self.field_name: Optional[str] = None
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"Var({self.name!r})"
+
+
+class Borrow(Node):
+    """A non-owning, read-only inspection of a variable (``&x``)."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Node, loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.value = value
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return f"Borrow({self.value!r})"
 
 
 # Binding kinds -------------------------------------------------------------
@@ -180,6 +294,7 @@ class Binding:
 
     __slots__ = (
         "uid", "name", "kind", "def_node", "lam", "scheme", "type", "loc",
+        "borrowed",
     )
 
     _next_uid = 0
@@ -195,6 +310,7 @@ class Binding:
         self.scheme = None   # TypeScheme after inference
         self.type = None     # Type for parameters
         self.loc = loc
+        self.borrowed = False
 
     @property
     def is_local(self) -> bool:
@@ -228,3 +344,17 @@ def walk(node: Node):
         yield from walk(node.cond)
         yield from walk(node.then)
         yield from walk(node.else_)
+    elif isinstance(node, Match):
+        yield from walk(node.subject)
+        for _, arm in node.arms:
+            yield from walk(arm)
+    elif isinstance(node, RecordLit):
+        for a in node.args:
+            yield from walk(a)
+    elif isinstance(node, SumLit):
+        for a in node.args:
+            yield from walk(a)
+    elif isinstance(node, RecordField):
+        yield from walk(node.value)
+    elif isinstance(node, Borrow):
+        yield from walk(node.value)

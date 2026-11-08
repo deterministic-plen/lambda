@@ -1,0 +1,2 @@
+a → (arrayi-set (arrayi 3 1) 1 9)
+(arrayi-get &a 1)

@@ -322,20 +322,81 @@ def main() -> int:
     bigint_table = "\n".join([
         "| bigint | Lambda | Python (C bigint) | Lambda / Python |",
         "|---|---:|---:|---:|",
-        f"| F(1,000,000), {ref_digits} digits | {lam_t * 1000:.1f} ms | "
-        f"{py_t * 1000:.1f} ms | {lam_t / py_t:.2f}x |",
+        f"| F(1,000,000), {ref_digits} digits (compute + output) | "
+        f"{lam_t * 1000:.1f} ms | {py_t * 1000:.1f} ms | "
+        f"{lam_t / py_t:.2f}x |",
     ])
     print(bigint_table)
+
+    # Compute-only comparison.  Lambda's executable is timed as a process
+    # (startup included); Python and gmpy2 report their own in-process compute
+    # time so decimal conversion and interpreter startup do not hide the gap.
+    compute_lam_exe = os.path.join(BUILD, "lam_bigint_compute")
+    build = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "lambda.py"),
+         os.path.join(BENCH, "bigint_fib1m_compute.lambda"),
+         "-o", compute_lam_exe],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    if build.returncode != 0:
+        raise RuntimeError("bigint compute build failed:\n" + build.stderr)
+    if os.name == "nt" and not compute_lam_exe.lower().endswith(".exe"):
+        compute_lam_exe += ".exe"
+    run_capture([compute_lam_exe])
+    compute_lam_samples = [run_capture([compute_lam_exe])[1] for _ in range(3)]
+    compute_lam_t = statistics.median(compute_lam_samples) * 1000.0
+
+    def bigint_compute_ref(backend):
+        try:
+            out, _ = run_capture(
+                [sys.executable, os.path.join(BENCH, "bigint_compute_ref.py"),
+                 backend], timeout=180)
+        except RuntimeError:
+            return None
+        try:
+            return json.loads(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return None
+
+    py_compute = bigint_compute_ref("python")
+    gmp_compute = bigint_compute_ref("gmp")
+    py_compute_ms = py_compute["compute_ms"] if py_compute else float("nan")
+    gmp_compute_ms = (gmp_compute["compute_ms"]
+                      if gmp_compute else float("nan"))
+    gmp_cell = f"{gmp_compute_ms:.2f} ms" if gmp_compute else "n/a"
+    gmp_ratio = (f"{compute_lam_t / gmp_compute_ms:.1f}x"
+                 if gmp_compute else "n/a")
+    compute_table = "\n".join([
+        "| bigint compute | Lambda | Python int | gmpy2 (GMP) | "
+        "Lambda / Python | Lambda / gmpy2 |",
+        "|---|---:|---:|---:|---:|---:|",
+        f"| F(1,000,000) compute only | {compute_lam_t:.1f} ms | "
+        f"{py_compute_ms:.1f} ms | {gmp_cell} | "
+        f"{compute_lam_t / py_compute_ms:.2f}x | {gmp_ratio} |",
+    ])
+    print()
+    print(compute_table)
+    bigint_compute_row = {
+        "n": 1_000_000,
+        "lambda_ms": compute_lam_t,
+        "python_ms": py_compute_ms,
+        "gmpy2_ms": gmp_compute_ms if gmp_compute else None,
+        "python_samples_ms": py_compute["samples_ms"] if py_compute else [],
+        "gmpy2_samples_ms": gmp_compute["samples_ms"] if gmp_compute else [],
+        "lambda_samples_s": compute_lam_samples,
+        "bits": py_compute["bits"] if py_compute else None,
+    }
 
     with open(os.path.join(BENCH, "results.json"), "w", encoding="utf-8") as f:
         json.dump({"metadata": metadata, "results": results,
                    "newton": newton_row, "array": array_row,
-                   "bigint": bigint_row}, f, indent=2)
+                   "bigint": bigint_row,
+                   "bigint_compute": bigint_compute_row}, f, indent=2)
     with open(os.path.join(BENCH, "results.md"), "w", encoding="utf-8") as f:
         f.write("# Lambda benchmark results\n\n")
         f.write(f"CPU: {metadata['cpu']} ({metadata['logical_processors']} logical)\n\n")
         f.write(table + "\n\n" + newton_table + "\n\n" + array_table + "\n\n"
-                + bigint_table + "\n")
+                + bigint_table + "\n\n" + compute_table + "\n")
     print("\nWrote bench/results.json and bench/results.md")
     return 0
 

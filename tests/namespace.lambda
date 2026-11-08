@@ -1,0 +1,11 @@
+type Complex (re: Float, im: Float)
+
+Complex::add → (λa: Complex b: Complex.
+  (Complex (+ a_re b_re) (+ a_im b_im)))
+
+Complex::scale → (λa: Complex k: Float.
+  (Complex (* a_re k) (* a_im k)))
+
+z → (Complex 1.5 2.0)
+w → (Complex::scale (Complex::add z (Complex 0.5 -2.0)) 2.0)
+(+ w_re w_im)

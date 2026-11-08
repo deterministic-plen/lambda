@@ -29,6 +29,7 @@ RANGE = ".."
 
 KEYWORDS = {
     "if", "then", "else", "let", "in", "letrec", "letloop", "include",
+    "enum", "type", "match", "with",
 }
 
 _ESCAPES = {
@@ -130,6 +131,7 @@ def _scan_number(source: str, start: int):
 
 def tokenize(source: str, filename: str = "<input>") -> List[Token]:
     tokens: List[Token] = []
+    in_lambda_params = False
     i = 0
     n = len(source)
     line = 1
@@ -201,12 +203,14 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
                 and (i + 2 >= n or source[i + 2].isspace())):
             marker = source[i:i + 2]
             tokens.append(Token("lambda_par", marker, loc()))
+            in_lambda_params = True
             advance(marker)
             i += 2
             continue
 
         if ch in LAMBDA_CHARS:
             tokens.append(Token("lambda", ch, loc()))
+            in_lambda_params = True
             advance(ch)
             i += 1
             continue
@@ -253,12 +257,28 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
                 i += 2
             else:
                 tokens.append(Token("punct", ".", loc()))
+                in_lambda_params = False
                 advance(".")
                 i += 1
             continue
 
+        # A borrow view is written ``&x`` (adjacent).  ``&&`` is the bitwise
+        # operator and ``λ&x`` is a borrowed parameter, so both keep the old
+        # atom path below.
+        if ch == "&" and not source.startswith("&&", i):
+            prev = tokens[-1].kind if tokens else ""
+            nxt = source[i + 1] if i + 1 < n else ""
+            if prev not in ("lambda", "lambda_par") and not in_lambda_params and (
+                    nxt.isalpha() or nxt == "_"):
+                tokens.append(Token("borrow", "&", loc()))
+                advance("&")
+                i += 1
+                continue
+
         if ch in PUNCT:
             tokens.append(Token("punct", ch, loc()))
+            if ch == ".":
+                in_lambda_params = False
             advance(ch)
             i += 1
             continue
@@ -285,6 +305,14 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
         j = i + 1
         while j < n:
             c = source[j]
+            # Qualified names use ``::``; a single ``:`` remains punctuation
+            # for type annotations, fields and match arms.
+            if source.startswith("::", j):
+                k = j + 2
+                if k < n and (source[k].isalpha() or source[k] == "_"):
+                    j = k
+                    continue
+                break
             if (c.isspace() or c in '()[],.:;"#' or c in LAMBDA_CHARS
                     or c in (ARROW, LARROW, "|", "∥")
                     or c in UNICODE_OPS):

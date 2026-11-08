@@ -1,0 +1,6 @@
+﻿a0 → (arrayi 5 0)
+a1 → (arrayi-set a0 0 1)
+a2 → (arrayi-set a1 1 2)
+a3 → (arrayi-set a2 2 3)
+a4 → (arrayi-set a3 3 4)
+(arrayi-sum (arrayi-set a4 4 5))

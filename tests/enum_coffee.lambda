@@ -1,0 +1,20 @@
+enum Coffee (Idle, Paid, Brewing)
+
+coin → (λs: Coffee.
+  if (== s Idle) then Paid else s)
+
+brew → (λs: Coffee.
+  if (== s Paid) then Brewing else s)
+
+finish → (λs: Coffee.
+  if (== s Brewing) then Idle else s)
+
+name → (λs: Coffee.
+  if (== s Idle)
+  then "Idle"
+  else if (== s Paid)
+       then "Paid"
+       else "Brewing")
+
+shown → (print (name (finish (brew (coin Idle)))))
+""

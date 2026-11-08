@@ -3,31 +3,33 @@
 ; Representation: one arrayi per number.
 ;   a[0] = number of limbs
 ;   a[1 .. n] = little-endian base-1e9 limbs
-; Unused capacity is zero.  Operations return fresh arrays; inputs are read-only.
+; Unused capacity is zero.  Operations return fresh arrays; inputs are read-only
+; except for the explicit `!` in-place variants.
 ; All limb products fit in i64 because (1e9-1)^2 plus a carry is < 1e18.
 
 base → 1000000000
-karatsuba-cutoff → 24
+karatsuba-cutoff → 50
+square-cutoff → 52
 
 bi-zero → (λcap. (arrayi (+ cap 1) 0))
-bi-len → (λa. (arrayi-get a 0))
-bi-get → (λa i. (arrayi-get a (+ i 1)))
+bi-len → (λ&a. (arrayi-get a 0))
+bi-get → (λ&a i. (arrayi-get a (+ i 1)))
 bi-set → (λa i v. (arrayi-set a (+ i 1) v))
 bi-set-len → (λa n. (arrayi-set a 0 n))
 
 bi-trim → (λa n.
   if (== n 0)
-  then (bi-set-len a 0)
-  else if (== 0 (bi-get a (- n 1)))
+  then (arrayi-set a 0 0)
+  else if (== 0 (arrayi-get a n))
   then (bi-trim a (- n 1))
-  else (bi-set-len a n))
+  else (arrayi-set a 0 n))
 
 bi-from-int → (λcap x.
   if (== x 0)
   then (bi-zero cap)
   else
     r → (bi-zero cap)
-    (bi-set-len (bi-set r 0 x) 1))
+    (arrayi-set (arrayi-set r 1 x) 0 1))
 
 bi-add → (λa b cap.
   al → (bi-len a)
@@ -37,14 +39,31 @@ bi-add → (λa b cap.
     if (>= i n)
     then
       if (== carry 0)
-      then (bi-set-len r n)
-      else (bi-set-len (bi-set r n carry) (+ n 1))
+      then (arrayi-set r 0 n)
+      else (arrayi-set (arrayi-set r (+ n 1) carry) 0 (+ n 1))
     else
-      av → (if (< i al) then (bi-get a i) else 0)
-      bv → (if (< i bl) then (bi-get b i) else 0)
+      av → (if (< i al) then (arrayi-get a (+ i 1)) else 0)
+      bv → (if (< i bl) then (arrayi-get b (+ i 1)) else 0)
       s → (+ av (+ bv carry))
-      (go (+ i 1) (/ s base) (bi-set r i (% s base))))
+      (go (+ i 1) (/ s base) (arrayi-set r (+ i 1) (% s base))))
   (go 0 0 (bi-zero cap)))
+
+bi-add! → (λa b.
+  al → (bi-len a)
+  bl → (bi-len b)
+  n → (if (> al bl) then al else bl)
+  go → (λi carry r.
+    if (>= i n)
+    then
+      if (== carry 0)
+      then (arrayi-set r 0 n)
+      else (arrayi-set (arrayi-set r (+ n 1) carry) 0 (+ n 1))
+    else
+      av → (arrayi-get r (+ i 1))
+      bv → (if (< i bl) then (arrayi-get b (+ i 1)) else 0)
+      s → (+ av (+ bv carry))
+      (go (+ i 1) (/ s base) (arrayi-set r (+ i 1) (% s base))))
+  (go 0 0 a))
 
 bi-sub → (λa b cap.
   al → (bi-len a)
@@ -53,27 +72,45 @@ bi-sub → (λa b cap.
     if (>= i al)
     then (bi-trim r al)
     else
-      av → (bi-get a i)
-      bv → (if (< i bl) then (bi-get b i) else 0)
+      av → (arrayi-get a (+ i 1))
+      bv → (if (< i bl) then (arrayi-get b (+ i 1)) else 0)
       d → (- (- av bv) borrow)
       if (< d 0)
-      then (go (+ i 1) 1 (bi-set r i (+ d base)))
-      else (go (+ i 1) 0 (bi-set r i d)))
+      then (go (+ i 1) 1 (arrayi-set r (+ i 1) (+ d base)))
+      else (go (+ i 1) 0 (arrayi-set r (+ i 1) d)))
   (go 0 0 (bi-zero cap)))
+
+bi-sub! → (λa b.
+  al → (bi-len a)
+  bl → (bi-len b)
+  go → (λi borrow r.
+    if (>= i al)
+    then (bi-trim r al)
+    else
+      av → (arrayi-get r (+ i 1))
+      bv → (if (< i bl) then (arrayi-get b (+ i 1)) else 0)
+      d → (- (- av bv) borrow)
+      if (< d 0)
+      then (go (+ i 1) 1 (arrayi-set r (+ i 1) (+ d base)))
+      else (go (+ i 1) 0 (arrayi-set r (+ i 1) d)))
+  (go 0 0 a))
 
 bi-slice → (λa start count cap.
   go → (λi r.
     if (>= i count)
     then (bi-trim r count)
-    else (go (+ i 1) (bi-set r i (bi-get a (+ start i)))))
+    else (go (+ i 1) (arrayi-set r (+ i 1) (arrayi-get a (+ (+ start i) 1)))))
   (go 0 (bi-zero cap)))
 
 bi-carry-add → (λr k carry.
   if (== carry 0)
   then r
   else
-    cur → (+ (bi-get r k) carry)
-    (bi-carry-add (bi-set r k (% cur base)) (+ k 1) (/ cur base)))
+    cur → (+ (arrayi-get r (+ k 1)) carry)
+    (bi-carry-add
+      (arrayi-set r (+ k 1) (% cur base))
+      (+ k 1)
+      (/ cur base)))
 
 bi-add-range → (λa aoff alen b boff blen cap.
   n → (if (> alen blen) then alen else blen)
@@ -81,13 +118,17 @@ bi-add-range → (λa aoff alen b boff blen cap.
     if (>= i n)
     then
       if (== carry 0)
-      then (bi-set-len r n)
-      else (bi-set-len (bi-set r n carry) (+ n 1))
+      then (arrayi-set r 0 n)
+      else (arrayi-set (arrayi-set r (+ n 1) carry) 0 (+ n 1))
     else
-      av → (if (< i alen) then (bi-get a (+ aoff i)) else 0)
-      bv → (if (< i blen) then (bi-get b (+ boff i)) else 0)
+      av → (if (< i alen)
+            then (arrayi-get a (+ (+ aoff i) 1))
+            else 0)
+      bv → (if (< i blen)
+            then (arrayi-get b (+ (+ boff i) 1))
+            else 0)
       s → (+ av (+ bv carry))
-      (go (+ i 1) (/ s base) (bi-set r i (% s base))))
+      (go (+ i 1) (/ s base) (arrayi-set r (+ i 1) (% s base))))
   (go 0 0 (bi-zero cap)))
 
 bi-mul-school-range → (λa aoff alen b boff blen cap.
@@ -95,14 +136,16 @@ bi-mul-school-range → (λa aoff alen b boff blen cap.
     if (>= i alen)
     then (bi-trim r (+ alen blen))
     else
+      ai → (arrayi-get a (+ (+ aoff i) 1))
       inner → (λj carry r.
         if (>= j blen)
         then (bi-carry-add r (+ i blen) carry)
         else
           k → (+ i j)
-          cur → (+ (bi-get r k)
-                   (+ (* (bi-get a (+ aoff i)) (bi-get b (+ boff j))) carry))
-          (inner (+ j 1) (/ cur base) (bi-set r k (% cur base))))
+          bj → (arrayi-get b (+ (+ boff j) 1))
+          rk → (arrayi-get r (+ k 1))
+          cur → (+ rk (+ (* ai bj) carry))
+          (inner (+ j 1) (/ cur base) (arrayi-set r (+ k 1) (% cur base))))
       (outer (+ i 1) (inner 0 0 r)))
   (outer 0 (bi-zero cap)))
 
@@ -112,16 +155,68 @@ bi-add-shift → (λdst src shift.
     if (== carry 0)
     then r
     else
-      cur → (+ (bi-get r k) carry)
-      (prop (bi-set r k (% cur base)) (+ k 1) (/ cur base)))
+      cur → (+ (arrayi-get r (+ k 1)) carry)
+      (prop
+        (arrayi-set r (+ k 1) (% cur base))
+        (+ k 1)
+        (/ cur base)))
   go → (λi carry r.
     if (>= i sl)
     then (prop r (+ shift sl) carry)
     else
       k → (+ shift i)
-      cur → (+ (bi-get r k) (+ (bi-get src i) carry))
-      (go (+ i 1) (/ cur base) (bi-set r k (% cur base))))
+      cur → (+ (arrayi-get r (+ k 1))
+               (+ (arrayi-get src (+ i 1)) carry))
+      (go (+ i 1) (/ cur base) (arrayi-set r (+ k 1) (% cur base))))
   (go 0 0 dst))
+
+bi-square-school-range → (λa aoff alen cap.
+  r → (bi-zero cap)
+  outer → (λi r.
+    if (>= i alen)
+    then (bi-trim r (+ alen alen))
+    else
+      ai → (arrayi-get a (+ (+ aoff i) 1))
+      ai2 → (* 2 ai)
+      diag → (* ai ai)
+      cur → (+ (arrayi-get r (+ (+ i i) 1)) diag)
+      r1 → (arrayi-set r (+ (+ i i) 1) (% cur base))
+      carry1 → (/ cur base)
+      inner → (λj carry r.
+        if (>= j alen)
+        then (bi-carry-add r (+ i alen) carry)
+        else
+          k → (+ i j)
+          aj → (arrayi-get a (+ (+ aoff j) 1))
+          rk → (arrayi-get r (+ k 1))
+          cur2 → (+ rk (+ (* ai2 aj) carry))
+          (inner (+ j 1) (/ cur2 base)
+                  (arrayi-set r (+ k 1) (% cur2 base))))
+      (outer (+ i 1) (inner (+ i 1) carry1 r1)))
+  (outer 0 (bi-zero cap)))
+
+bi-square-range → (λa aoff alen cap.
+  if (< alen square-cutoff)
+  then (bi-square-school-range a aoff alen cap)
+  else
+    m → (/ alen 2)
+    ah → (- alen m)
+    z0 → (bi-square-range a aoff m (+ (+ m m) 2))
+    z2 → (bi-square-range a (+ aoff m) ah (+ (+ ah ah) 2))
+    sm → (if (> m ah) then m else ah)
+    sa → (bi-add-range a aoff m a (+ aoff m) ah (+ sm 2))
+    z1 → (bi-square-range sa 0 (bi-len sa)
+                         (+ (+ (bi-len sa) (bi-len sa)) 2))
+    z1a → (bi-sub! z1 z0)
+    z1b → (bi-sub! z1a z2)
+    r → (bi-zero cap)
+    r1 → (bi-add-shift r z0 0)
+    r2 → (bi-add-shift r1 z1b m)
+    r3 → (bi-add-shift r2 z2 (+ m m))
+    (bi-trim r3 cap))
+
+bi-square → (λa cap.
+  (bi-square-range a 0 (bi-len a) cap))
 
 bi-mul-range → (λa aoff alen b boff blen cap.
   mn → (if (< alen blen) then alen else blen)
@@ -139,8 +234,8 @@ bi-mul-range → (λa aoff alen b boff blen cap.
     sb → (bi-add-range b boff m b (+ boff m) bh (+ sn 2))
     z1 → (bi-mul-range sa 0 (bi-len sa) sb 0 (bi-len sb)
                       (+ (+ (bi-len sa) (bi-len sb)) 2))
-    z1a → (bi-sub z1 z0 (bi-len z1))
-    z1b → (bi-sub z1a z2 (bi-len z1a))
+    z1a → (bi-sub! z1 z0)
+    z1b → (bi-sub! z1a z2)
     r → (bi-zero cap)
     r1 → (bi-add-shift r z0 0)
     r2 → (bi-add-shift r1 z1b m)
@@ -163,12 +258,14 @@ bi-fib → (λn cap.
       then a
       else
         bit → (% (/ n p) 2)
-        t → (bi-sub (bi-add b b cap) a cap)
-        c → (bi-mul a t cap)
-        d → (bi-add (bi-mul a a cap) (bi-mul b b cap) cap)
+        need → (+ (+ (bi-len a) (bi-len b)) 4)
+        work-cap → (if (< cap need) then cap else need)
+        d → (bi-add! (bi-square a work-cap) (bi-square b work-cap))
+        t → (bi-sub! (bi-add! b b) a)
+        c → (bi-mul a t work-cap)
         if (== bit 0)
         then (go (/ p 2) c d)
-        else (go (/ p 2) d (bi-add c d cap)))
+        else (go (/ p 2) d (bi-add! c d)))
     (go p0 a b))
 
 bi-pad9 → (λs.
@@ -183,11 +280,11 @@ bi-print → (λa.
   if (== n 0)
   then (print "0")
   else
-    first → (print (int->str (bi-get a (- n 1))))
+    first → (print (int->str (arrayi-get a n)))
     go → (λi.
       if (< i 0)
       then ""
       else
-        s → (print (bi-pad9 (int->str (bi-get a i))))
+        s → (print (bi-pad9 (int->str (arrayi-get a (+ i 1)))))
         (go (- i 1)))
     (go (- n 2)))

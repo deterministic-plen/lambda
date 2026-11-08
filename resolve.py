@@ -10,8 +10,8 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from ast import (
-    App, Binding, Block, Def, If, Lam, Lit, LOCAL_DEF, Node, PARAM, PRIM,
-    TOP_DEF, Var,
+    App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, LOCAL_DEF, Match,
+    Node, PARAM, PRIM, RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
 )
 from errors import ResolveError
 from parser import PRIMITIVES
@@ -58,6 +58,10 @@ class Resolver:
 
     def resolve_program(self, program: Node) -> Node:
         self.program = program
+        self.record_fields = set()
+        for n in walk(program):
+            if isinstance(n, RecordLit):
+                self.record_fields.update(n.field_names)
         if not isinstance(program, Block):
             program = Block([], program, program.loc)
             self.program = program
@@ -67,15 +71,48 @@ class Resolver:
     def resolve(self, node: Node, scope: Scope) -> None:
         if isinstance(node, Var):
             b = scope.lookup(node.name)
-            if b is None:
-                if node.name in PRIMITIVES:
-                    b = self.primitive(node.name)
-                else:
-                    raise ResolveError(f"unbound variable '{node.name}'", node.loc)
+            if b is not None:
+                node.binding = b
+                return
+            # Physics-style field sugar: split at the LAST underscore only.
+            # vector-2-dimensional_x means (Vec-x vector-2-dimensional).
+            # Exact names win; no prefix searching.
+            if "_" in node.name:
+                prefix, field = node.name.rsplit("_", 1)
+                if prefix and field in self.record_fields:
+                    pb = scope.lookup(prefix)
+                    if pb is not None:
+                        node.binding = pb
+                        node.field_name = field
+                        return
+            if node.name in PRIMITIVES:
+                b = self.primitive(node.name)
+            else:
+                raise ResolveError(f"unbound variable '{node.name}'", node.loc)
             node.binding = b
             return
 
         if isinstance(node, Lit):
+            return
+        if isinstance(node, EnumLit):
+            return
+
+        if isinstance(node, RecordLit):
+            for a in node.args:
+                self.resolve(a, scope)
+            return
+
+        if isinstance(node, SumLit):
+            for a in node.args:
+                self.resolve(a, scope)
+            return
+
+        if isinstance(node, Borrow):
+            self.resolve(node.value, scope)
+            return
+
+        if isinstance(node, RecordField):
+            self.resolve(node.value, scope)
             return
 
         if isinstance(node, Lam):
@@ -88,6 +125,9 @@ class Resolver:
                 seen.add(p)
                 # A parameter shadows anything in the enclosing scope.
                 b = Binding(p, PARAM, loc=node.loc)
+                idx = len(bindings)
+                if idx < len(node.param_borrows):
+                    b.borrowed = node.param_borrows[idx]
                 inner.names[p] = b
                 bindings.append(b)
             node.param_bindings = bindings
@@ -104,6 +144,20 @@ class Resolver:
             self.resolve(node.cond, scope)
             self.resolve(node.then, scope)
             self.resolve(node.else_, scope)
+            return
+
+        if isinstance(node, Match):
+            self.resolve(node.subject, scope)
+            for idx, (_, arm) in enumerate(node.arms):
+                inner = scope.extend()
+                bindings = []
+                if idx < len(node.binders):
+                    for name in node.binders[idx]:
+                        b = Binding(name, PARAM, loc=arm.loc)
+                        inner.define(b, arm.loc)
+                        bindings.append(b)
+                node.arm_bindings[idx] = bindings
+                self.resolve(arm, inner)
             return
 
         if isinstance(node, Block):

@@ -1,0 +1,3 @@
+consume → (λa. (arrayi-set a 0 1))
+a → (arrayi 2 0)
+(consume &a)

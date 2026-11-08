@@ -25,11 +25,17 @@ nth-prime-sieve → (λn.
     rem → (% lo p)
     first0 → (if (== rem 0) then lo else (+ lo (- p rem)))
     first → (if (< first0 p2) then p2 else first0)
-    mark → (λoff mask.
+    mark → (λ p off mask.
       if (>= off 64)
       then mask
-      else (mark (+ off p) (& mask (! (shl 1 off)))))
-    (mark (- first lo) mask))
+      else (mark p (+ off p) (& mask (! (shl 1 off)))))
+    off → (- first lo)
+    if (>= p 64)
+    then
+      if (>= off 64)
+      then mask
+      else (& mask (! (shl 1 off)))
+    else (mark p off mask))
 
   block-mask → (λb.
     lo → (* b 64)

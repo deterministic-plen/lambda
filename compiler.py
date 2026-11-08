@@ -30,13 +30,14 @@ import math
 from typing import Dict, List, Optional, Set, Tuple
 
 from ast import (
-    App, Binding, Block, Def, If, Lam, Lit, Node, PARAM, PRIM, TOP_DEF, Var, walk,
+    App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, Match, Node, PARAM, PRIM,
+    RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
 )
 from analysis import IMPURE_PRIMITIVES, PRIM_ARITY, top_level_order
 from errors import CompileError
 from parser import OP_CANON
 from runtime import RUNTIME_IR_DECLS
-from typecheck import BOX, F64, I64, TCon, prune, rep_of
+from typecheck import BOX, F64, I64, TCon, TRecord, TSum, prune, rep_of
 
 PRIM_GLOBALS = {
     "add": "@lambda_prim_add",
@@ -186,15 +187,67 @@ class IRBuilder:
         return "\n".join(lines)
 
 
-class Val:
-    __slots__ = ("rep", "name", "owned", "immortal")
+def emit_retain_ir(b: IRBuilder, value: str, atomic: bool = False) -> None:
+    """Inline the common reference-count increment.
 
+    Compiler-generated boxed values are never null (``nil`` is a real immortal
+    value), so the fast path needs only a load/select/store.  Parallel programs
+    use the runtime's atomic functions instead."""
+    if atomic:
+        b.emit(f"call void @lambda_retain(%Value* {value})")
+        return
+    rcp = b.new_reg()
+    b.emit(f"{rcp} = getelementptr %Value, %Value* {value}, i32 0, i32 1")
+    rc = b.new_reg()
+    b.emit(f"{rc} = load i32, i32* {rcp}")
+    pos = b.new_reg()
+    b.emit(f"{pos} = icmp sgt i32 {rc}, 0")
+    inc = b.new_reg()
+    b.emit(f"{inc} = add i32 {rc}, 1")
+    new = b.new_reg()
+    b.emit(f"{new} = select i1 {pos}, i32 {inc}, i32 {rc}")
+    b.emit(f"store i32 {new}, i32* {rcp}")
+
+
+def emit_release_ir(b: IRBuilder, value: str, atomic: bool = False) -> None:
+    """Inline the reference-count decrement; call the runtime only when the
+    last reference goes away.  Parallel programs use the atomic runtime."""
+    if atomic:
+        b.emit(f"call void @lambda_release(%Value* {value})")
+        return
+    free = b.new_label("rc_free")
+    done = b.new_label("rc_done")
+    rcp = b.new_reg()
+    b.emit(f"{rcp} = getelementptr %Value, %Value* {value}, i32 0, i32 1")
+    rc = b.new_reg()
+    b.emit(f"{rc} = load i32, i32* {rcp}")
+    pos = b.new_reg()
+    b.emit(f"{pos} = icmp sgt i32 {rc}, 0")
+    dec = b.new_reg()
+    b.emit(f"{dec} = sub i32 {rc}, 1")
+    new = b.new_reg()
+    b.emit(f"{new} = select i1 {pos}, i32 {dec}, i32 {rc}")
+    b.emit(f"store i32 {new}, i32* {rcp}")
+    last = b.new_reg()
+    b.emit(f"{last} = icmp eq i32 {new}, 0")
+    drop = b.new_reg()
+    b.emit(f"{drop} = and i1 {pos}, {last}")
+    b.emit(f"br i1 {drop}, label %{free}, label %{done}")
+    b.label(free)
+    b.emit(f"call void @lambda_release_zero(%Value* {value})")
+    b.emit(f"br label %{done}")
+    b.label(done)
+
+
+class Val:
+    __slots__ = ("rep", "name", "owned", "immortal", "borrowed")
     def __init__(self, rep: str, name: str, owned: bool = False,
-                 immortal: bool = False) -> None:
+                 immortal: bool = False, borrowed: bool = False) -> None:
         self.rep = rep
         self.name = name
         self.owned = owned
         self.immortal = immortal
+        self.borrowed = borrowed
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"Val({self.rep},{self.name},owned={self.owned})"
@@ -214,7 +267,7 @@ class FunctionInfo:
         "lam", "id", "captures", "capture_reps", "capture_types",
         "params", "param_reps", "param_types", "ret_rep", "ret_type",
         "arity", "direct_name", "wrapper_names", "env_type_names",
-        "env_dtors", "generated", "generating",
+        "env_dtors", "generated", "generating", "param_borrows",
     )
 
     def __init__(self) -> None:
@@ -229,6 +282,7 @@ class FunctionInfo:
         self.ret_rep = BOX
         self.ret_type = None
         self.arity = 0
+        self.param_borrows = []
         self.direct_name = ""
         self.wrapper_names: List[str] = []
         self.env_type_names: List[str] = []
@@ -253,6 +307,13 @@ def is_bool_type(t) -> bool:
         return False
     t = prune(t)
     return isinstance(t, TCon) and t.name == "Bool"
+
+
+def is_array_type(t) -> bool:
+    if t is None:
+        return False
+    t = prune(t)
+    return isinstance(t, TCon) and t.name in ("ArrayI", "ArrayF", "ArrayB")
 
 
 def is_float_type(t) -> bool:
@@ -291,6 +352,9 @@ class Compiler:
         self.uses_parallel = False
         self.allow_input = allow_input
         self.allow_data = allow_data
+        self.variant_tags = {}
+        self.record_schemas = {}
+        self.value_functions: Set[int] = set()
 
         self.type_defs: List[str] = []
         self.globals: List[str] = []
@@ -305,6 +369,7 @@ class Compiler:
         self.top_storage: Dict[int, Storage] = {}
         self.top_function_globals: Dict[int, str] = {}
         self.top_value_globals: Dict[int, str] = {}
+        self.top_constants: Set[int] = set()
         self.top_defs: List[Def] = []
 
         self.lam_infos: Dict[int, FunctionInfo] = {}
@@ -318,6 +383,8 @@ class Compiler:
         self.terminated = False
         self.moved_uids: Set[int] = set()
         self.captured_uids: Set[int] = set()
+        self.array_meta: Dict[str, Tuple[str, str]] = {}
+        self.atomic_rc = False
         self.moves_allowed: bool = True
 
         self.string_counter = 0
@@ -325,9 +392,107 @@ class Compiler:
     # ------------------------------------------------------------------
     # top-level setup
     # ------------------------------------------------------------------
+    def _mark_function_values(self, program: Node) -> None:
+        """Find function bindings that actually escape as first-class values.
+
+        A function referenced only as the head of a fully applied call can stay
+        closure-free; top-level closures are allocated only for this set.
+        """
+
+        def visit(n: Node, direct_head: bool = False) -> None:
+            if isinstance(n, Var):
+                b = n.binding
+                if b is not None and b.is_function and not direct_head:
+                    self.value_functions.add(b.uid)
+                return
+            if isinstance(n, App):
+                head, args = self.flatten_app(n)
+                if isinstance(head, Var) and head.binding is not None \
+                        and head.binding.is_function:
+                    arity = len(head.binding.lam.param_bindings) \
+                        if head.binding.lam is not None else 0
+                    if len(args) < arity:
+                        self.value_functions.add(head.binding.uid)
+                    for a in args:
+                        visit(a)
+                    return
+                visit(head)
+                for a in args:
+                    visit(a)
+                return
+            if isinstance(n, Lam):
+                visit(n.body)
+                return
+            if isinstance(n, Block):
+                for d in n.defs:
+                    if isinstance(d.value, Lam):
+                        visit(d.value.body)
+                    else:
+                        visit(d.value)
+                visit(n.body)
+                return
+            if isinstance(n, If):
+                visit(n.cond)
+                visit(n.then)
+                visit(n.else_)
+                return
+            if isinstance(n, Match):
+                visit(n.subject)
+                for _, arm in n.arms:
+                    visit(arm)
+                return
+            if isinstance(n, (RecordLit, SumLit)):
+                for a in n.args:
+                    visit(a)
+                return
+            if isinstance(n, RecordField):
+                visit(n.value)
+
+        visit(program)
+
+    def _uses_parallel_primitives(self, program: Node) -> bool:
+        for n in walk(program):
+            if (isinstance(n, App) and isinstance(n.func, Var)
+                    and n.func.binding is not None):
+                b = n.func.binding
+                if (b.kind == PRIM
+                        and OP_CANON.get(b.name)
+                        in ("pmap", "arrayi_pmap", "arrayi_pmap_chunk")):
+                    return True
+        return False
+
     def compile_program(self, program: Node) -> str:
         if not isinstance(program, Block):
             program = Block([], program, program.loc)
+        self.atomic_rc = self._uses_parallel_primitives(program)
+        self.variant_tags = {}
+        for block in walk(program):
+            if not isinstance(block, Block):
+                continue
+            for d in block.defs:
+                if isinstance(d.value, EnumLit):
+                    self.variant_tags[d.name] = (
+                        d.value.enum_name, d.value.tag)
+        self.value_functions = set()
+        self._mark_function_values(program)
+        self.record_schemas = {}
+        for node in walk(program):
+            if isinstance(node, RecordLit) and isinstance(node.type, TRecord):
+                self.record_schemas[node.record_name] = node.type
+            if isinstance(node, SumLit) and isinstance(node.type, TRecord):
+                self.record_schemas[node.sum_name] = node.type
+        for name, rec in sorted(self.record_schemas.items()):
+            field_types = []
+            for _, ftype in rec.fields:
+                rep = rep_of(ftype)
+                if rep not in (I64, F64):
+                    raise CompileError(
+                        f"product field '{name}' is not unboxed",
+                        program.loc)
+                field_types.append(self.rep_type(rep))
+            self.type_defs.append(
+                f"{self.record_llvm_name(name)} = type {{ "
+                f"{', '.join(field_types)} }}")
         self.top_defs = list(program.defs)
         self.captured_uids = {
             b.uid
@@ -353,6 +518,7 @@ class Compiler:
         parts.extend(self.functions)
         parts.append("\n; ---- program entry ----")
         parts.append(self.main_text)
+        parts.append("\n!0 = !{}")
         return "\n".join(parts) + "\n"
 
     def _setup_top_level(self, program: Block) -> None:
@@ -368,10 +534,30 @@ class Compiler:
             else:
                 rep = self.binding_rep(b)
                 name = f"@gval_{b.uid}"
+                if isinstance(d.value, Lit) and rep in (I64, F64):
+                    # Top-level bindings are immutable.  Emitting literal scalars
+                    # as LLVM constants lets the optimizer fold loads and, in
+                    # particular, strength-reduce division/modulo by a named
+                    # constant such as the bigint base.
+                    v = d.value.value
+                    if rep == I64:
+                        text = "1" if v is True else "0" if v is False else str(v)
+                        self.top_globals.append(
+                            f"{name} = internal constant i64 {text}")
+                    else:
+                        self.top_globals.append(
+                            f"{name} = internal constant double {float_const(float(v))}")
+                    self.top_constants.add(b.uid)
+                    self.top_storage[b.uid] = Storage(rep, name, is_global=True)
+                    self.top_value_globals[b.uid] = name
+                    continue
                 if rep == I64:
                     self.top_globals.append(f"{name} = internal global i64 0")
                 elif rep == F64:
                     self.top_globals.append(f"{name} = internal global double 0.0")
+                elif rep.startswith("REC:"):
+                    self.top_globals.append(
+                        f"{name} = internal global {self.rep_type(rep)} zeroinitializer")
                 else:
                     self.top_globals.append(f"{name} = internal global %Value* null")
                 self.top_storage[b.uid] = Storage(rep, name, is_global=True)
@@ -411,6 +597,7 @@ class Compiler:
             info.ret_type = lam.body.type
             info.ret_rep = rep_of(lam.body.type)
 
+        info.param_borrows = [b.borrowed for b in info.params]
         info.direct_name = f"@fn_{info.id}"
         info.wrapper_names = [f"@wrap_{info.id}_{k}" for k in range(1, info.arity + 1)]
         info.env_type_names = [f"%env_{info.id}_{k}" for k in range(1, info.arity + 1)]
@@ -443,6 +630,11 @@ class Compiler:
         self.type_defs.append(f"{ty} = type {{ {', '.join(fields)} }}")
 
     def _gen_wrappers(self, info: FunctionInfo) -> None:
+        # Product values are unboxed aggregates.  Wrappers would need a boxed
+        # representation, so record functions are direct-call-only for now.
+        reps = info.capture_reps + info.param_reps + [info.ret_rep]
+        if any(rep.startswith("REC:") for rep in reps) or any(info.param_borrows):
+            return
         # All stage types must exist before any wrapper is generated, because a
         # wrapper for stage k allocates an environment for stage k+1.
         for stage in range(1, info.arity + 1):
@@ -455,7 +647,7 @@ class Compiler:
         ty, fields, cap_idx, arg_idx = self._env_layout(info, stage)
         b = IRBuilder()
         name = info.env_dtors[stage - 1]
-        b.raw(f"define void {name}(i8* %raw) {{")
+        b.raw(f"define internal void {name}(i8* %raw) {{")
         b.label("entry")
         env = b.new_reg("env")
         b.emit(f"{env} = bitcast i8* %raw to {ty}*")
@@ -466,13 +658,13 @@ class Compiler:
             b.emit(f"{p} = getelementptr {ty}, {ty}* {env}, i32 0, i32 {idx}")
             v = b.new_reg()
             b.emit(f"{v} = load %Value*, %Value** {p}")
-            b.emit(f"call void @lambda_release(%Value* {v})")
+            emit_release_ir(b, v, self.atomic_rc)
         for idx in arg_idx:
             p = b.new_reg()
             b.emit(f"{p} = getelementptr {ty}, {ty}* {env}, i32 0, i32 {idx}")
             v = b.new_reg()
             b.emit(f"{v} = load %Value*, %Value** {p}")
-            b.emit(f"call void @lambda_release(%Value* {v})")
+            emit_release_ir(b, v, self.atomic_rc)
         b.emit("call void @lambda_free_env(i8* %raw)")
         b.emit("ret void")
         b.raw("}")
@@ -498,11 +690,17 @@ class Compiler:
         return 8 * len(fields)
 
     @staticmethod
-    def rep_type(rep: str) -> str:
+    def record_llvm_name(name: str) -> str:
+        return "%rec_" + "".join(
+            c if c.isalnum() or c == "_" else "_" for c in name)
+
+    def rep_type(self, rep: str) -> str:
         if rep == I64:
             return "i64"
         if rep == F64:
             return "double"
+        if rep.startswith("REC:"):
+            return self.record_llvm_name(rep[4:])
         return "%Value*"
 
     def _alloc_env(self, b: IRBuilder, ty: str, fields: List[str],
@@ -520,7 +718,7 @@ class Compiler:
         ty, fields, cap_idx, arg_idx = self._env_layout(info, stage)
         b = IRBuilder()
         name = info.wrapper_names[stage - 1]
-        b.raw(f"define %Value* {name}(i8* %env_raw, %Value* %arg) {{")
+        b.raw(f"define internal %Value* {name}(i8* %env_raw, %Value* %arg) {{")
         b.label("entry")
         env = b.new_reg("env")
         b.emit(f"{env} = bitcast i8* %env_raw to {ty}*")
@@ -533,7 +731,7 @@ class Compiler:
                     cap_idx, ncap_idx, info.capture_reps):
                 if rep == BOX:
                     v = self._load_env_field(b, ty, env, old_idx, "%Value*")
-                    b.emit(f"call void @lambda_retain(%Value* {v})")
+                    emit_retain_ir(b, v, self.atomic_rc)
                     self._store_env_field(b, nty, nenv, new_idx, "%Value*", v)
                 elif rep == F64:
                     v = self._load_env_field(b, ty, env, old_idx, "double")
@@ -543,7 +741,7 @@ class Compiler:
                     self._store_env_field(b, nty, nenv, new_idx, "i64", v)
             for old_idx, new_idx in zip(arg_idx, narg_idx):
                 v = self._load_env_field(b, ty, env, old_idx, "%Value*")
-                b.emit(f"call void @lambda_retain(%Value* {v})")
+                emit_retain_ir(b, v, self.atomic_rc)
                 self._store_env_field(b, nty, nenv, new_idx, "%Value*", v)
             # The newly supplied argument is the last field of the new env.
             new_arg_idx = len(nfields) - 1
@@ -570,7 +768,7 @@ class Compiler:
                 call_args.append(f"double {v}")
             else:
                 v = self._load_env_field(b, ty, env, idx, "%Value*")
-                b.emit(f"call void @lambda_retain(%Value* {v})")
+                emit_retain_ir(b, v, self.atomic_rc)
                 call_args.append(f"%Value* {v}")
         for j, idx in enumerate(arg_idx):
             rep = info.param_reps[j]
@@ -586,7 +784,7 @@ class Compiler:
                 b.emit(f"{raw} = call double @lambda_get_float(%Value* {v})")
                 call_args.append(f"double {raw}")
             else:
-                b.emit(f"call void @lambda_retain(%Value* {v})")
+                emit_retain_ir(b, v, self.atomic_rc)
                 call_args.append(f"%Value* {v}")
         # The argument that triggered this final stage.
         rep = info.param_reps[info.arity - 1]
@@ -595,12 +793,12 @@ class Compiler:
             getter = "@lambda_get_bool" if (not self.dynamic and is_bool_type(ptype)) else "@lambda_get_int"
             raw = b.new_reg()
             b.emit(f"{raw} = call i64 {getter}(%Value* %arg)")
-            b.emit("call void @lambda_release(%Value* %arg)")
+            emit_release_ir(b, "%arg", self.atomic_rc)
             call_args.append(f"i64 {raw}")
         elif rep == F64:
             raw = b.new_reg()
             b.emit(f"{raw} = call double @lambda_get_float(%Value* %arg)")
-            b.emit("call void @lambda_release(%Value* %arg)")
+            emit_release_ir(b, "%arg", self.atomic_rc)
             call_args.append(f"double {raw}")
         else:
             call_args.append("%Value* %arg")
@@ -617,6 +815,8 @@ class Compiler:
             boxed = b.new_reg()
             b.emit(f"{boxed} = call %Value* @lambda_box_float(double {res})")
             b.emit(f"ret %Value* {boxed}")
+        elif info.ret_rep.startswith("REC:"):
+            b.emit(f"ret {ret_ty} {res}")
         else:
             b.emit(f"ret %Value* {res}")
         b.raw("}")
@@ -633,6 +833,18 @@ class Compiler:
             if info.generated:
                 continue
             self._gen_function_body(info)
+
+    def _cache_array_meta(self, value: str) -> None:
+        """Load an array's immutable length and data pointer once per frame."""
+        lenp = self.new_reg()
+        self.emit_inst(f"{lenp} = getelementptr %Value, %Value* {value}, i32 0, i32 2")
+        length = self.new_reg()
+        self.emit_inst(f"{length} = load i64, i64* {lenp}, !invariant.load !0")
+        datap = self.new_reg()
+        self.emit_inst(f"{datap} = getelementptr %Value, %Value* {value}, i32 0, i32 3")
+        data = self.new_reg()
+        self.emit_inst(f"{data} = load i8*, i8** {datap}, !invariant.load !0")
+        self.array_meta[value] = (length, data)
 
     def _gen_function_body(self, info: FunctionInfo) -> None:
         if info.generated or info.generating:
@@ -653,8 +865,11 @@ class Compiler:
         for i, rep in enumerate(info.capture_reps):
             sig.append(f"{self.rep_type(rep)} %cap{i}")
         for i, rep in enumerate(info.param_reps):
-            sig.append(f"{self.rep_type(rep)} %par{i}")
-        self.builder.raw(f"define {ret_ty} {info.direct_name}({', '.join(sig)}) {{")
+            attr = ""
+            if i < len(info.param_borrows) and info.param_borrows[i]:
+                attr = " nocapture readonly"
+            sig.append(f"{self.rep_type(rep)}{attr} %par{i}")
+        self.builder.raw(f"define internal {ret_ty} {info.direct_name}({', '.join(sig)}) inlinehint {{")
         self.builder.label("entry")
 
         scope: Dict[int, Storage] = {}
@@ -671,8 +886,16 @@ class Compiler:
             rep = info.param_reps[i]
             op = f"%par{i}"
             scope[b.uid] = Storage(rep, op)
-            if rep == BOX:
+            if rep == BOX and not b.borrowed:
                 cleanup.append((op, False))
+
+        self.array_meta = {}
+        for i, ctype in enumerate(info.capture_types):
+            if info.capture_reps[i] == BOX and is_array_type(ctype):
+                self._cache_array_meta(f"%cap{i}")
+        for i, ptype in enumerate(info.param_types):
+            if info.param_reps[i] == BOX and is_array_type(ptype):
+                self._cache_array_meta(f"%par{i}")
 
         body = self.compile(info.lam.body, is_tail=True)
         if not self.terminated:
@@ -712,9 +935,17 @@ class Compiler:
                     "cannot implicitly convert Float to Int; use float->int",
                     getattr(type_hint, "loc", None))
             return self.unbox(val, type_hint)
+        if target.startswith("REC:"):
+            raise CompileError(
+                "cannot implicitly convert to a product type",
+                getattr(type_hint, "loc", None))
         raise CompileError(f"cannot coerce {val.rep} to {target}")
 
     def box(self, val: Val, type_hint) -> Val:
+        if val.rep.startswith("REC:"):
+            raise CompileError(
+                "product values cannot be boxed/first-class yet",
+                getattr(type_hint, "loc", None))
         if val.rep == BOX:
             return val
         if val.rep == F64:
@@ -729,6 +960,10 @@ class Compiler:
     def unbox(self, val: Val, type_hint) -> Val:
         if val.rep == I64:
             return val
+        if val.rep.startswith("REC:"):
+            raise CompileError(
+                "product values have no implicit scalar conversion",
+                getattr(type_hint, "loc", None))
         if val.rep == F64:
             raise CompileError(
                 "cannot implicitly convert Float to Int; use float->int",
@@ -751,11 +986,14 @@ class Compiler:
 
     def retain(self, val: Val) -> Val:
         if val.rep == BOX and not val.immortal:
-            self.emit_inst(f"call void @lambda_retain(%Value* {val.name})")
+            emit_retain_ir(self.builder, val.name, self.atomic_rc)
             val.owned = True
         return val
 
     def ensure_owned(self, val: Val) -> Val:
+        if val.rep == BOX and val.borrowed:
+            raise CompileError(
+                "a borrowed inspection cannot be consumed, stored, or returned")
         if val.rep == BOX and not val.owned and not val.immortal:
             return self.retain(val)
         return val
@@ -764,7 +1002,7 @@ class Compiler:
         if val is None:
             return
         if val.rep == BOX and val.owned and not val.immortal:
-            self.emit_inst(f"call void @lambda_release(%Value* {val.name})")
+            emit_release_ir(self.builder, val.name, self.atomic_rc)
             val.owned = False
 
     def emit_inst(self, text: str) -> None:
@@ -790,7 +1028,7 @@ class Compiler:
         if not self.terminated:
             for name, immortal in reversed(self.cleanup_stack[-1]):
                 if not immortal:
-                    self.emit_inst(f"call void @lambda_release(%Value* {name})")
+                    emit_release_ir(self.builder, name, self.atomic_rc)
         self.cleanup_stack.pop()
         self.scope_stack.pop()
 
@@ -805,19 +1043,25 @@ class Compiler:
         for cleanup in self.cleanup_stack:
             for name, immortal in reversed(cleanup):
                 if not immortal:
-                    self.emit_inst(f"call void @lambda_release(%Value* {name})")
+                    emit_release_ir(self.builder, name, self.atomic_rc)
 
     def emit_return(self, val: Optional[Val], type_hint) -> None:
         if self.ctx is None:
             raise CompileError("internal: return outside function")
         if val is None:
             return
+        if val.borrowed:
+            raise CompileError(
+                "a borrowed parameter cannot be returned", type_hint.loc
+                if hasattr(type_hint, "loc") else None)
         val = self.coerce(val, self.ctx.ret_rep, type_hint)
         self.emit_cleanup_all()
         if self.ctx.ret_rep == I64:
             self.emit_inst(f"ret i64 {val.name}")
         elif self.ctx.ret_rep == F64:
             self.emit_inst(f"ret double {val.name}")
+        elif self.ctx.ret_rep.startswith("REC:"):
+            self.emit_inst(f"ret {self.rep_type(self.ctx.ret_rep)} {val.name}")
         else:
             self.emit_inst(f"ret %Value* {val.name}")
         self.terminated = True
@@ -897,8 +1141,18 @@ class Compiler:
     # expressions
     # ------------------------------------------------------------------
     def compile(self, node: Node, is_tail: bool = False) -> Optional[Val]:
+        if isinstance(node, RecordLit):
+            return self.compile_record(node)
+        if isinstance(node, SumLit):
+            return self.compile_sum(node)
+        if isinstance(node, RecordField):
+            return self.compile_record_field(node)
+        if isinstance(node, EnumLit):
+            return Val(I64, str(node.tag))
         if isinstance(node, Lit):
             return self.compile_lit(node, is_tail)
+        if isinstance(node, Borrow):
+            return self.compile_borrow(node)
         if isinstance(node, Var):
             return self.compile_var(node)
         if isinstance(node, Lam):
@@ -907,6 +1161,8 @@ class Compiler:
             return self.compile_app(node, is_tail)
         if isinstance(node, If):
             return self.compile_if(node, is_tail)
+        if isinstance(node, Match):
+            return self.compile_match(node, is_tail)
         if isinstance(node, Block):
             return self.compile_block(node, is_tail)
         raise CompileError(f"cannot compile {type(node).__name__}", node.loc)
@@ -935,10 +1191,150 @@ class Compiler:
             return Val(F64, float_const(v))
         return self.string_value(v)
 
+    def compile_sum(self, node: SumLit) -> Val:
+        schema = self.record_schemas.get(node.sum_name)
+        if not isinstance(schema, TSum):
+            raise CompileError(f"unknown sum type '{node.sum_name}'", node.loc)
+        info = schema.variant(node.variant)
+        if info is None:
+            raise CompileError(f"unknown variant '{node.variant}'", node.loc)
+        _, fields = info
+        if len(fields) != len(node.args):
+            raise CompileError(
+                f"'{node.variant}' expects {len(fields)} payload fields",
+                node.loc)
+        rep = "REC:" + node.sum_name
+        ty = self.rep_type(rep)
+        all_float = schema.word_rep == F64
+        cur = "undef"
+        tag_reg = self.new_reg()
+        self.emit_inst(f"{tag_reg} = insertvalue {ty} {cur}, i64 {node.tag}, 0")
+        cur = tag_reg
+        for i in range(schema.max_words):
+            if all_float:
+                word = "0.0"
+                if i < len(fields):
+                    arg = node.args[i]
+                    ftype = fields[i][1]
+                    fval = self.compile(arg, is_tail=False)
+                    if fval is None:
+                        raise CompileError("sum payload produced no value", arg.loc)
+                    fval = self.coerce(fval, F64, ftype)
+                    word = fval.name
+                nxt = self.new_reg()
+                self.emit_inst(
+                    f"{nxt} = insertvalue {ty} {cur}, double {word}, {i + 1}")
+            else:
+                word = "0"
+                if i < len(fields):
+                    arg = node.args[i]
+                    ftype = fields[i][1]
+                    fval = self.compile(arg, is_tail=False)
+                    if fval is None:
+                        raise CompileError("sum payload produced no value", arg.loc)
+                    fval = self.coerce(fval, rep_of(ftype), ftype)
+                    if rep_of(ftype) == F64:
+                        word_reg = self.new_reg()
+                        self.emit_inst(
+                            f"{word_reg} = bitcast double {fval.name} to i64")
+                        word = word_reg
+                    else:
+                        word = fval.name
+                nxt = self.new_reg()
+                self.emit_inst(
+                    f"{nxt} = insertvalue {ty} {cur}, i64 {word}, {i + 1}")
+            cur = nxt
+        return Val(rep, cur)
+
+    def compile_record(self, node: RecordLit) -> Val:
+        rec = self.record_schemas.get(node.record_name)
+        if rec is None:
+            raise CompileError(
+                f"unknown product type '{node.record_name}'", node.loc)
+        rep = "REC:" + node.record_name
+        ty = self.rep_type(rep)
+        cur = "undef"
+        for idx, (arg, (_, ftype)) in enumerate(zip(node.args, rec.fields)):
+            fval = self.compile(arg, is_tail=False)
+            if fval is None:
+                raise CompileError("record field produced no value", arg.loc)
+            frep = rep_of(ftype)
+            fval = self.coerce(fval, frep, ftype)
+            nxt = self.new_reg()
+            self.emit_inst(
+                f"{nxt} = insertvalue {ty} {cur}, "
+                f"{self.rep_type(frep)} {fval.name}, {idx}")
+            cur = nxt
+        return Val(rep, cur)
+
+    def compile_record_field(self, node: RecordField) -> Val:
+        value = self.compile(node.value, is_tail=False)
+        if value is None:
+            raise CompileError("record field base produced no value", node.loc)
+        rep = "REC:" + node.record_name
+        value = self.coerce(value, rep, node.value.type)
+        rec = self.record_schemas.get(node.record_name)
+        if rec is None:
+            raise CompileError(
+                f"unknown product type '{node.record_name}'", node.loc)
+        idx = None
+        ftype = None
+        for i, (fname, ft) in enumerate(rec.fields):
+            if fname == node.field_name:
+                idx, ftype = i, ft
+                break
+        if idx is None:
+            raise CompileError(
+                f"'{node.record_name}' has no field '{node.field_name}'",
+                node.loc)
+        res = self.new_reg()
+        self.emit_inst(
+            f"{res} = extractvalue {self.rep_type(rep)} {value.name}, {idx}")
+        return Val(rep_of(ftype), res)
+
+    def compile_borrow(self, node: Borrow) -> Val:
+        """Compile ``&x`` into a non-owning view of x's storage.
+
+        The view is read-only and may not be consumed, returned, stored or
+        captured.  For scalars it is just the value; the borrow marker mainly
+        gives the type checker and the RC fast paths a precise lifetime.
+        """
+        inner = node.value
+        if not isinstance(inner, Var) or inner.binding is None:
+            raise CompileError("'&' expects a variable name", node.loc)
+        b = inner.binding
+        if b.is_function or b.kind == PRIM:
+            raise CompileError("'&' cannot inspect a function value", node.loc)
+        if b.uid in self.moved_uids:
+            raise CompileError(
+                f"'{b.name}' was consumed and cannot be inspected", node.loc)
+        st = self.find_storage(b.uid)
+        if st is None:
+            raise CompileError(
+                f"definition '{b.name}' is used before it is initialised",
+                node.loc)
+        if st.rep in (I64, F64) or st.rep.startswith("REC:"):
+            return Val(st.rep, st.name, borrowed=True)
+        if st.is_global:
+            res = self.new_reg()
+            self.emit_inst(f"{res} = load %Value*, %Value** {st.name}")
+            return Val(BOX, res, owned=False, borrowed=True)
+        return Val(BOX, st.name, owned=False, borrowed=True)
+
     def compile_var(self, node: Var) -> Val:
         b = node.binding
         if b is None:
             raise CompileError(f"unresolved variable '{node.name}'", node.loc)
+        if node.field_name is not None:
+            rt = prune(b.type)
+            if not isinstance(rt, TRecord):
+                raise CompileError(
+                    f"'{b.name}' is not a product value", node.loc)
+            base = Var(b.name, node.loc)
+            base.binding = b
+            base.type = rt
+            return self.compile_record_field(
+                RecordField(base, rt.name, node.field_name, "", node.loc))
         if b.kind == PRIM:
             return self.primitive_global(b)
         if b.is_function:
@@ -964,12 +1360,21 @@ class Compiler:
                 self.emit_inst(f"{res} = load double, double* {st.name}")
                 return Val(F64, res)
             return Val(F64, st.name)
+        if st.rep.startswith("REC:"):
+            if st.is_global:
+                res = self.new_reg()
+                ty = self.rep_type(st.rep)
+                self.emit_inst(f"{res} = load {ty}, {ty}* {st.name}")
+                return Val(st.rep, res)
+            return Val(st.rep, st.name)
         if st.is_global:
             res = self.new_reg()
             self.emit_inst(f"{res} = load %Value*, %Value** {st.name}")
             val = Val(BOX, res, owned=True)
             self.retain(val)
             return val
+        if b.borrowed:
+            return Val(BOX, st.name, owned=False, borrowed=True)
         val = Val(BOX, st.name, owned=True)
         self.retain(val)
         return val
@@ -979,6 +1384,9 @@ class Compiler:
             return self.primitive_global(b)
         if b.is_function:
             return self.materialize_function(b)
+        if b.borrowed:
+            raise CompileError(
+                "a borrowed parameter cannot be captured by a closure", loc)
         st = self.find_storage(b.uid)
         if st is None:
             raise CompileError(
@@ -996,6 +1404,13 @@ class Compiler:
                 self.emit_inst(f"{res} = load double, double* {st.name}")
                 return Val(F64, res)
             return Val(F64, st.name)
+        if st.rep.startswith("REC:"):
+            if st.is_global:
+                res = self.new_reg()
+                ty = self.rep_type(st.rep)
+                self.emit_inst(f"{res} = load {ty}, {ty}* {st.name}")
+                return Val(st.rep, res)
+            return Val(st.rep, st.name)
         if st.is_global:
             res = self.new_reg()
             self.emit_inst(f"{res} = load %Value*, %Value** {st.name}")
@@ -1007,6 +1422,17 @@ class Compiler:
         return val
 
     def materialize_function(self, b: Binding) -> Val:
+        if b.lam is not None:
+            info = self.ensure_function(b.lam)
+            reps = info.capture_reps + info.param_reps + [info.ret_rep]
+            if any(rep.startswith("REC:") for rep in reps):
+                raise CompileError(
+                    "product-typed functions cannot be used as first-class "
+                    "values yet", b.loc)
+            if any(info.param_borrows):
+                raise CompileError(
+                    "functions with borrowed parameters cannot be first-class "
+                    "values yet", b.loc)
         if b.kind == TOP_DEF:
             gname = self.top_function_globals.get(b.uid)
             if gname is None:
@@ -1022,6 +1448,15 @@ class Compiler:
 
     def emit_make_closure(self, lam: Lam) -> Val:
         info = self.ensure_function(lam)
+        reps = info.capture_reps + info.param_reps + [info.ret_rep]
+        if any(rep.startswith("REC:") for rep in reps):
+            raise CompileError(
+                "product-typed functions cannot be captured as closures yet",
+                lam.loc)
+        if any(info.param_borrows):
+            raise CompileError(
+                "functions with borrowed parameters cannot be captured as "
+                "closures yet", lam.loc)
         ty, fields, cap_idx, _ = self._env_layout(info, 1)
         env = self._alloc_env(self.builder, ty, fields, info.env_dtors[0])
         for idx, cap, rep, ctype in zip(cap_idx, info.captures,
@@ -1063,6 +1498,237 @@ class Compiler:
             self.cleanup_stack.pop()
             self.scope_stack.pop()
         return result
+
+    def compile_match(self, node: Match, is_tail: bool) -> Optional[Val]:
+        subject_type = prune(node.subject.type)
+        if isinstance(subject_type, TSum):
+            return self.compile_sum_match(node, subject_type, is_tail)
+        subject = self.compile(node.subject, is_tail=False)
+        if subject is None:
+            raise CompileError("match subject produced no value", node.subject.loc)
+        if self.dynamic or subject.rep == BOX:
+            tag = self.new_reg()
+            self.emit_inst(f"{tag} = call i64 @lambda_get_int(%Value* {subject.name})")
+            self.release(subject)
+        elif subject.rep == I64:
+            tag = subject.name
+        else:
+            raise CompileError("match subject must be an enum", node.subject.loc)
+
+        arms = []
+        enum_name = None
+        for pattern, arm in node.arms:
+            info = self.variant_tags.get(pattern)
+            if info is None:
+                raise CompileError(f"unknown enum variant '{pattern}'", arm.loc)
+            name, arm_tag = info
+            if enum_name is None:
+                enum_name = name
+            elif enum_name != name:
+                raise CompileError(
+                    f"match mixes variants of {enum_name} and {name}", arm.loc)
+            arms.append((arm_tag, arm))
+
+        saved_moved = set(self.moved_uids)
+        saved_cleanup = [list(c) for c in self.cleanup_stack]
+        saved_allowed = self.moves_allowed
+
+        def restore_branch_state() -> None:
+            self.moved_uids = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed and is_tail
+
+        default_bb = self.new_label("match_default")
+        arm_bbs = [self.new_label("match_arm") for _ in arms]
+        cases = " ".join(
+            f"i64 {arm_tag}, label %{bb}"
+            for (arm_tag, _), bb in zip(arms, arm_bbs)
+        )
+        self.emit_inst(
+            f"switch i64 {tag}, label %{default_bb} [ {cases} ]")
+
+        if is_tail:
+            for bb, (_, arm) in zip(arm_bbs, arms):
+                self.builder.label(bb)
+                self.terminated = False
+                restore_branch_state()
+                value = self.compile(arm, is_tail=True)
+                if not self.terminated:
+                    self.emit_return(value, arm.type)
+            self.builder.label(default_bb)
+            self.emit_inst("call void @lambda_bad_enum()")
+            self.emit_inst("unreachable")
+            self.terminated = True
+            self.moved_uids = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed
+            return None
+
+        common = self.node_rep(node)
+        slot = self.builder.new_alloca(self.rep_type(common))
+        merge_bb = self.new_label("match_merge")
+        for bb, (_, arm) in zip(arm_bbs, arms):
+            self.builder.label(bb)
+            self.terminated = False
+            restore_branch_state()
+            value = self.compile(arm, is_tail=False)
+            if value is None:
+                raise CompileError("match arm produced no value", arm.loc)
+            value = self.coerce(value, common, arm.type)
+            if common == I64:
+                self.emit_inst(f"store i64 {value.name}, i64* {slot}")
+            elif common == F64:
+                self.emit_inst(f"store double {value.name}, double* {slot}")
+            else:
+                self.emit_inst(f"store %Value* {value.name}, %Value** {slot}")
+            self.emit_inst(f"br label %{merge_bb}")
+
+        self.builder.label(default_bb)
+        self.emit_inst("call void @lambda_bad_enum()")
+        self.emit_inst("unreachable")
+
+        self.builder.label(merge_bb)
+        self.terminated = False
+        self.moved_uids = set(saved_moved)
+        self.cleanup_stack = [list(c) for c in saved_cleanup]
+        self.moves_allowed = saved_allowed
+        res = self.new_reg()
+        if common == I64:
+            self.emit_inst(f"{res} = load i64, i64* {slot}")
+            return Val(I64, res)
+        if common == F64:
+            self.emit_inst(f"{res} = load double, double* {slot}")
+            return Val(F64, res)
+        if common.startswith("REC:"):
+            ty = self.rep_type(common)
+            self.emit_inst(f"{res} = load {ty}, {ty}* {slot}")
+            return Val(common, res)
+        self.emit_inst(f"{res} = load %Value*, %Value** {slot}")
+        return Val(BOX, res, owned=True)
+
+    def compile_sum_match(self, node: Match, rec: TSum,
+                          is_tail: bool) -> Optional[Val]:
+        subject = self.compile(node.subject, is_tail=False)
+        if subject is None:
+            raise CompileError("match subject produced no value", node.subject.loc)
+        rep = "REC:" + rec.name
+        if subject.rep != rep:
+            raise CompileError("sum match subject is not unboxed", node.subject.loc)
+        ty = self.rep_type(rep)
+        tag = self.new_reg()
+        self.emit_inst(f"{tag} = extractvalue {ty} {subject.name}, 0")
+
+        arms = []
+        for pattern, arm in node.arms:
+            info = rec.variant(pattern)
+            if info is None:
+                raise CompileError(f"unknown sum variant '{pattern}'", arm.loc)
+            arm_tag, fields = info
+            arms.append((arm_tag, fields, arm))
+
+        saved_moved = set(self.moved_uids)
+        saved_cleanup = [list(c) for c in self.cleanup_stack]
+        saved_allowed = self.moves_allowed
+
+        def restore() -> None:
+            self.moved_uids = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed and is_tail
+
+        default_bb = self.new_label("sum_default")
+        arm_bbs = [self.new_label("sum_arm") for _ in arms]
+        cases = " ".join(
+            f"i64 {arm_tag}, label %{bb}"
+            for (arm_tag, _, _), bb in zip(arms, arm_bbs))
+        self.emit_inst(f"switch i64 {tag}, label %{default_bb} [ {cases} ]")
+
+        def bind_payload(arm_idx: int, fields) -> None:
+            self.push_scope()
+            bindings = (node.arm_bindings[arm_idx]
+                        if arm_idx < len(node.arm_bindings) else [])
+            for j, bnd in enumerate(bindings):
+                ftype = fields[j][1]
+                frep = rep_of(ftype)
+                if rec.word_rep == F64:
+                    word = self.new_reg()
+                    self.emit_inst(
+                        f"{word} = extractvalue {ty} {subject.name}, {j + 1}")
+                    self.scope_stack[-1][bnd.uid] = Storage(F64, word)
+                else:
+                    word = self.new_reg()
+                    self.emit_inst(
+                        f"{word} = extractvalue {ty} {subject.name}, {j + 1}")
+                    if frep == F64:
+                        val = self.new_reg()
+                        self.emit_inst(f"{val} = bitcast i64 {word} to double")
+                        self.scope_stack[-1][bnd.uid] = Storage(F64, val)
+                    else:
+                        self.scope_stack[-1][bnd.uid] = Storage(I64, word)
+
+        if is_tail:
+            for idx, (bb, (_, fields, arm)) in enumerate(zip(arm_bbs, arms)):
+                self.builder.label(bb)
+                self.terminated = False
+                restore()
+                bind_payload(idx, fields)
+                value = self.compile(arm, is_tail=True)
+                if not self.terminated:
+                    self.emit_return(value, arm.type)
+                self.pop_scope()
+            self.builder.label(default_bb)
+            self.emit_inst("call void @lambda_bad_enum()")
+            self.emit_inst("unreachable")
+            self.terminated = True
+            self.moved_uids = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed
+            return None
+
+        common = self.node_rep(node)
+        slot = self.builder.new_alloca(self.rep_type(common))
+        merge_bb = self.new_label("sum_merge")
+        for idx, (bb, (_, fields, arm)) in enumerate(zip(arm_bbs, arms)):
+            self.builder.label(bb)
+            self.terminated = False
+            restore()
+            bind_payload(idx, fields)
+            value = self.compile(arm, is_tail=False)
+            if value is None:
+                raise CompileError("sum match arm produced no value", arm.loc)
+            value = self.coerce(value, common, arm.type)
+            self.pop_scope()
+            if common == I64:
+                self.emit_inst(f"store i64 {value.name}, i64* {slot}")
+            elif common == F64:
+                self.emit_inst(f"store double {value.name}, double* {slot}")
+            elif common.startswith("REC:"):
+                sty = self.rep_type(common)
+                self.emit_inst(f"store {sty} {value.name}, {sty}* {slot}")
+            else:
+                self.emit_inst(f"store %Value* {value.name}, %Value** {slot}")
+            self.emit_inst(f"br label %{merge_bb}")
+
+        self.builder.label(default_bb)
+        self.emit_inst("call void @lambda_bad_enum()")
+        self.emit_inst("unreachable")
+        self.builder.label(merge_bb)
+        self.terminated = False
+        self.moved_uids = set(saved_moved)
+        self.cleanup_stack = [list(c) for c in saved_cleanup]
+        self.moves_allowed = saved_allowed
+        res = self.new_reg()
+        if common == I64:
+            self.emit_inst(f"{res} = load i64, i64* {slot}")
+            return Val(I64, res)
+        if common == F64:
+            self.emit_inst(f"{res} = load double, double* {slot}")
+            return Val(F64, res)
+        if common.startswith("REC:"):
+            sty = self.rep_type(common)
+            self.emit_inst(f"{res} = load {sty}, {sty}* {slot}")
+            return Val(common, res)
+        self.emit_inst(f"{res} = load %Value*, %Value** {slot}")
+        return Val(BOX, res, owned=True)
 
     def compile_if(self, node: If, is_tail: bool) -> Optional[Val]:
         cond = self.compile(node.cond, is_tail=False)
@@ -1127,6 +1793,9 @@ class Compiler:
             self.emit_inst(f"store i64 {tv.name}, i64* {slot}")
         elif common == F64:
             self.emit_inst(f"store double {tv.name}, double* {slot}")
+        elif common.startswith("REC:"):
+            ty = self.rep_type(common)
+            self.emit_inst(f"store {ty} {tv.name}, {ty}* {slot}")
         else:
             self.emit_inst(f"store %Value* {tv.name}, %Value** {slot}")
         self.emit_inst(f"br label %{merge_bb}")
@@ -1142,6 +1811,9 @@ class Compiler:
             self.emit_inst(f"store i64 {ev.name}, i64* {slot}")
         elif common == F64:
             self.emit_inst(f"store double {ev.name}, double* {slot}")
+        elif common.startswith("REC:"):
+            ty = self.rep_type(common)
+            self.emit_inst(f"store {ty} {ev.name}, {ty}* {slot}")
         else:
             self.emit_inst(f"store %Value* {ev.name}, %Value** {slot}")
         self.emit_inst(f"br label %{merge_bb}")
@@ -1155,6 +1827,10 @@ class Compiler:
         if common == F64:
             self.emit_inst(f"{res} = load double, double* {slot}")
             return Val(F64, res)
+        if common.startswith("REC:"):
+            ty = self.rep_type(common)
+            self.emit_inst(f"{res} = load {ty}, {ty}* {slot}")
+            return Val(common, res)
         self.emit_inst(f"{res} = load %Value*, %Value** {slot}")
         return Val(BOX, res, owned=True)
 
@@ -1210,12 +1886,10 @@ class Compiler:
         arguments; this keeps the move local and linear.
         """
 
-        if not self.moves_allowed:
-            return None
         if not isinstance(node, Var) or node.binding is None:
             return None
         b = node.binding
-        if b.kind != PARAM or b.uid in self.captured_uids:
+        if b.kind != PARAM or b.uid in self.captured_uids or b.borrowed:
             return None
         if any(c.uid == b.uid for c in info.captures):
             return None
@@ -1242,33 +1916,59 @@ class Compiler:
     def emit_direct_call(self, info: FunctionInfo, args: List[Node],
                          result_type, is_tail: bool) -> Optional[Val]:
         call_args: List[str] = []
+        borrow_temps: List[Val] = []
 
         for cap, rep, ctype in zip(info.captures, info.capture_reps,
                                    info.capture_types):
-            val = self._capture_value(cap, info.lam.loc if info.lam else None)
-            val = self.coerce(val, rep, ctype)
+            val = None
+            if rep == BOX and is_tail:
+                val = self._move_tail_capture(cap)
+            if val is None:
+                val = self._capture_value(cap, info.lam.loc if info.lam else None)
+                val = self.coerce(val, rep, ctype)
             if rep == I64:
                 call_args.append(f"i64 {val.name}")
             elif rep == F64:
                 call_args.append(f"double {val.name}")
+            elif rep.startswith("REC:"):
+                call_args.append(f"{self.rep_type(rep)} {val.name}")
             else:
                 val = self.ensure_owned(val)
                 call_args.append(f"%Value* {val.name}")
 
         for pos, (arg, rep, ptype) in enumerate(zip(args, info.param_reps,
                                                     info.param_types)):
+            callee_borrow = (pos < len(info.param_borrows)
+                             and info.param_borrows[pos])
+            if (isinstance(arg, Var) and arg.binding is not None
+                    and arg.binding.borrowed and not callee_borrow):
+                raise CompileError(
+                    "a borrowed value cannot be passed to a consuming "
+                    "parameter", arg.loc)
             val = None
-            if rep == BOX and is_tail:
+            if rep == BOX and callee_borrow:
+                val = self._borrow_value_for_call(arg)
+            if rep == BOX and is_tail and not callee_borrow:
                 val = self._move_tail_arg(arg, args, info, pos)
             if val is None:
                 val = self.compile(arg, is_tail=False)
                 if val is None:
                     return None
                 val = self.coerce(val, rep, arg.type)
+            if not callee_borrow and val.borrowed:
+                raise CompileError(
+                    "a borrowed inspection cannot be passed to a consuming "
+                    "parameter", arg.loc)
             if rep == I64:
                 call_args.append(f"i64 {val.name}")
             elif rep == F64:
                 call_args.append(f"double {val.name}")
+            elif rep.startswith("REC:"):
+                call_args.append(f"{self.rep_type(rep)} {val.name}")
+            elif callee_borrow:
+                if val.owned:
+                    borrow_temps.append(val)
+                call_args.append(f"%Value* {val.name}")
             else:
                 val = self.ensure_owned(val)
                 call_args.append(f"%Value* {val.name}")
@@ -1276,7 +1976,7 @@ class Compiler:
         ret_ty = self.rep_type(info.ret_rep)
         joined = ", ".join(call_args)
 
-        if (is_tail and self.use_musttail
+        if (is_tail and self.use_musttail and not borrow_temps
                 and info.ret_rep == self.ctx.ret_rep):
             self.emit_cleanup_all()
             # LLVM's ``musttail`` requires matching argument counts, which our
@@ -1297,6 +1997,8 @@ class Compiler:
 
         res = self.new_reg("res")
         self.emit_inst(f"{res} = call {ret_ty} {info.direct_name}({joined})")
+        for tmp in borrow_temps:
+            self.release(tmp)
         val = Val(info.ret_rep, res, owned=(info.ret_rep == BOX))
         target = BOX if self.dynamic else rep_of(result_type)
         val = self.coerce(val, target, result_type)
@@ -1434,6 +2136,43 @@ class Compiler:
         val = self.coerce(val, rep, hint if hint is not None else node.type)
         return self.ensure_owned(val) if rep == BOX else val
 
+    def _move_tail_capture(self, b: Binding) -> Optional[Val]:
+        """Transfer a boxed capture into a tail call instead of retaining it."""
+        st = self.find_storage(b.uid)
+        if st is None or st.rep != BOX or st.is_global:
+            return None
+        if not (st.name.startswith("%cap") or st.name.startswith("%par")):
+            return None
+        if b.uid in self.moved_uids:
+            return None
+        self.moved_uids.add(b.uid)
+        for cleanup in self.cleanup_stack:
+            cleanup[:] = [(name, immortal) for name, immortal in cleanup
+                          if name != st.name]
+        return Val(BOX, st.name, owned=True)
+
+    def _borrow_value_for_call(self, node: Node) -> Optional[Val]:
+        """Pass a plain local/global variable to a borrowed parameter without
+        a retain/release round trip.  The callee cannot store or return the
+        borrow, so the storage outlives the call."""
+        if not isinstance(node, Var) or node.binding is None:
+            return None
+        b = node.binding
+        if b.is_function or b.kind == PRIM:
+            return None
+        st = self.find_storage(b.uid)
+        if st is None or st.rep != BOX:
+            return None
+        if not st.is_global and b.uid in self.moved_uids:
+            raise CompileError(
+                f"'{b.name}' was consumed by a destructive array update and "
+                f"cannot be used again", node.loc)
+        if st.is_global:
+            res = self.new_reg()
+            self.emit_inst(f"{res} = load %Value*, %Value** {st.name}")
+            return Val(BOX, res, owned=False)
+        return Val(BOX, st.name, owned=False, borrowed=True)
+
     def _array_borrow(self, node: Node) -> Val:
         """Read an array argument without a retain when it is a simple value.
 
@@ -1457,6 +2196,8 @@ class Compiler:
                             f"{res} = load %Value*, %Value** {st.name}")
                         return Val(BOX, res, owned=False)
                     return Val(BOX, st.name, owned=False)
+        if isinstance(node, Borrow):
+            return self.compile_borrow(node)
         val = self.compile(node, is_tail=False)
         if val is None:
             raise CompileError("array argument did not produce a value", node.loc)
@@ -1476,7 +2217,7 @@ class Compiler:
         if not isinstance(node, Var) or node.binding is None:
             return None
         b = node.binding
-        if b.kind != PARAM or b.uid in self.captured_uids:
+        if b.kind != PARAM or b.uid in self.captured_uids or b.borrowed:
             return None
         st = self.find_storage(b.uid)
         if st is None or st.rep != BOX or st.is_global:
@@ -1495,11 +2236,15 @@ class Compiler:
 
     def _array_bounds(self, arr: Val, idx: Val) -> None:
         """Emit a checked bounds branch; types already guarantee the tag."""
-        lenp = self.new_reg()
-        self.emit_inst(
-            f"{lenp} = getelementptr %Value, %Value* {arr.name}, i32 0, i32 2")
-        length = self.new_reg()
-        self.emit_inst(f"{length} = load i64, i64* {lenp}")
+        meta = self.array_meta.get(arr.name)
+        if meta is not None:
+            length = meta[0]
+        else:
+            lenp = self.new_reg()
+            self.emit_inst(
+                f"{lenp} = getelementptr %Value, %Value* {arr.name}, i32 0, i32 2")
+            length = self.new_reg()
+            self.emit_inst(f"{length} = load i64, i64* {lenp}, !invariant.load !0")
         ok = self.new_reg()
         self.emit_inst(f"{ok} = icmp ult i64 {idx.name}, {length}")
         good = self.new_label("arr_ok")
@@ -1511,11 +2256,15 @@ class Compiler:
         self.builder.label(good)
 
     def _array_element_ptr(self, arr: Val, idx: Val, llty: str) -> str:
-        pp = self.new_reg()
-        self.emit_inst(
-            f"{pp} = getelementptr %Value, %Value* {arr.name}, i32 0, i32 3")
-        raw = self.new_reg()
-        self.emit_inst(f"{raw} = load i8*, i8** {pp}")
+        meta = self.array_meta.get(arr.name)
+        if meta is not None:
+            raw = meta[1]
+        else:
+            pp = self.new_reg()
+            self.emit_inst(
+                f"{pp} = getelementptr %Value, %Value* {arr.name}, i32 0, i32 3")
+            raw = self.new_reg()
+            self.emit_inst(f"{raw} = load i8*, i8** {pp}, !invariant.load !0")
         data = self.new_reg()
         self.emit_inst(f"{data} = bitcast i8* {raw} to {llty}*")
         ep = self.new_reg()
@@ -1840,6 +2589,10 @@ class Compiler:
             self.release(a)
             return Val(F64 if llty == "double" else I64, raw)
         if op in ("arrayf_set", "arrayi_set", "arrayb_set"):
+            if (isinstance(args[0], Var) and args[0].binding is not None
+                    and args[0].binding.borrowed):
+                raise CompileError(
+                    "cannot mutate a borrowed array parameter", args[0].loc)
             a = self._move_array_param(args[0])
             if a is None:
                 a = self._prim_arg(args[0], BOX, args[0].type)
@@ -1858,14 +2611,28 @@ class Compiler:
                 ptr = self._array_element_ptr(a, idx, llty)
                 self.emit_inst(f"store {llty} {v.name}, {llty}* {ptr}")
             return Val(BOX, a.name, owned=True)
+        if op in ("arrayi_sum", "arrayf_sum"):
+            a = self._array_borrow(args[0])
+            res = self.new_reg()
+            if op == "arrayi_sum":
+                self.emit_inst(f"{res} = call i64 @lambda_arrayi_sum(%Value* {a.name})")
+                self.release(a)
+                return Val(I64, res)
+            self.emit_inst(f"{res} = call double @lambda_arrayf_sum(%Value* {a.name})")
+            self.release(a)
+            return Val(F64, res)
         if op in ("arrayf_length", "arrayi_length", "arrayb_length"):
             a = self._array_borrow(args[0])
-            base = op.replace("_length", "")
-            lenp = self.new_reg()
-            self.emit_inst(
-                f"{lenp} = getelementptr %Value, %Value* {a.name}, i32 0, i32 2")
-            res = self.new_reg()
-            self.emit_inst(f"{res} = load i64, i64* {lenp}")
+            meta = self.array_meta.get(a.name)
+            if meta is not None:
+                res = meta[0]
+            else:
+                lenp = self.new_reg()
+                self.emit_inst(
+                    f"{lenp} = getelementptr %Value, %Value* {a.name}, i32 0, i32 2")
+                res = self.new_reg()
+                self.emit_inst(
+                    f"{res} = load i64, i64* {lenp}, !invariant.load !0")
             self.release(a)
             return Val(I64, res)
         if op in ("arrayf_clone", "arrayi_clone", "arrayb_clone"):
@@ -1916,6 +2683,7 @@ class Compiler:
         self.terminated = False
         self.moved_uids = set()
         self.moves_allowed = True
+        self.array_meta = {}
         self.builder.raw("define i32 @main(i32 %argc, i8** %argv) {")
         self.builder.label("entry")
         self.emit_inst("call void @lambda_runtime_init()")
@@ -1934,11 +2702,20 @@ class Compiler:
                 raise CompileError(
                     f"top-level function '{d.name}' unexpectedly captures variables",
                     d.loc)
+            if d.binding.uid not in self.value_functions:
+                continue
+            info = self.ensure_function(lam)
+            reps = info.capture_reps + info.param_reps + [info.ret_rep]
+            if (any(rep.startswith("REC:") for rep in reps)
+                    or any(info.param_borrows)):
+                continue
             clo = self.emit_make_closure(lam)
             gname = self.top_function_globals[d.binding.uid]
             self.emit_inst(f"store %Value* {clo.name}, %Value** {gname}")
 
         for d in top_level_order(program):
+            if d.binding.uid in self.top_constants:
+                continue
             val = self.compile(d.value, is_tail=False)
             if val is None:
                 raise CompileError("top-level value did not produce a value", d.loc)
@@ -1949,6 +2726,9 @@ class Compiler:
                 self.emit_inst(f"store i64 {val.name}, i64* {gname}")
             elif rep == F64:
                 self.emit_inst(f"store double {val.name}, double* {gname}")
+            elif rep.startswith("REC:"):
+                ty = self.rep_type(rep)
+                self.emit_inst(f"store {ty} {val.name}, {ty}* {gname}")
             else:
                 val = self.ensure_owned(val)
                 self.emit_inst(f"store %Value* {val.name}, %Value** {gname}")
@@ -1978,17 +2758,19 @@ class Compiler:
                 continue
             uid = d.binding.uid
             if d.is_function:
+                if uid not in self.value_functions:
+                    continue
                 gname = self.top_function_globals.get(uid)
                 if gname:
                     tmp = self.new_reg()
                     self.emit_inst(f"{tmp} = load %Value*, %Value** {gname}")
-                    self.emit_inst(f"call void @lambda_release(%Value* {tmp})")
+                    emit_release_ir(self.builder, tmp, self.atomic_rc)
             else:
                 gname = self.top_value_globals.get(uid)
                 if gname and self.binding_rep(d.binding) == BOX:
                     tmp = self.new_reg()
                     self.emit_inst(f"{tmp} = load %Value*, %Value** {gname}")
-                    self.emit_inst(f"call void @lambda_release(%Value* {tmp})")
+                    emit_release_ir(self.builder, tmp, self.atomic_rc)
 
         self.emit_inst("call void @lambda_flush()")
         self.emit_inst("call void @lambda_stats()")

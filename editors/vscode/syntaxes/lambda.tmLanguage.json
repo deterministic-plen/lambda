@@ -1,0 +1,215 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Lambda",
+  "scopeName": "source.lambda",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#lambda" },
+    { "include": "#arrows" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#types" },
+    { "include": "#definition" },
+    { "include": "#primitives" },
+    { "include": "#qualified" },
+    { "include": "#constructors" },
+    { "include": "#borrow" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "match": ";.*$",
+          "name": "comment.line.semicolon.lambda"
+        },
+        {
+          "match": "#.*$",
+          "name": "comment.line.number-sign.lambda"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.lambda",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.lambda"
+            }
+          ]
+        }
+      ]
+    },
+    "lambda": {
+      "patterns": [
+        {
+          "match": "(λp|\\\\p|λ|\\\\)(\\s*)(&)",
+          "captures": {
+            "1": { "name": "storage.type.function.lambda" },
+            "3": { "name": "storage.modifier.borrow.lambda" }
+          }
+        },
+        {
+          "match": "(λp|\\\\p)(?=\\s)",
+          "name": "storage.type.function.parallel.lambda"
+        },
+        {
+          "match": "(λ|\\\\)",
+          "name": "storage.type.function.lambda"
+        }
+      ]
+    },
+    "arrows": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_?!<>-])(?:→|->)(?![A-Za-z0-9_?!<>-])",
+          "name": "keyword.operator.arrow.lambda"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_?!<>-])(?:←|<-)(?![A-Za-z0-9_?!<>-])",
+          "name": "keyword.operator.larrow.lambda"
+        },
+        {
+          "match": "[.][.]",
+          "name": "keyword.operator.range.lambda"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_?!<>-])-?(?:(?:[0-9]+[.][0-9]+(?:[eE][+-]?[0-9]+)?)|(?:[0-9]+[eE][+-]?[0-9]+)|(?:[0-9]+))(?![A-Za-z0-9_?!<>-])",
+          "name": "constant.numeric.lambda"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_?!<>-]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.enum.lambda" },
+            "2": { "name": "entity.name.type.enum.lambda" }
+          }
+        },
+        {
+          "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_?!<>-]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.lambda" },
+            "2": { "name": "entity.name.type.record.lambda" }
+          }
+        },
+        {
+          "match": "\\binclude\\b",
+          "name": "keyword.other.import.lambda"
+        },
+        {
+          "match": "\\b(?:if|then|else|let|letrec|letloop|in|match|with)\\b",
+          "name": "keyword.control.lambda"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "match": "\\b(?:true|false)\\b",
+          "name": "constant.language.boolean.lambda"
+        },
+        {
+          "match": "\\bnil\\b",
+          "name": "constant.language.nil.lambda"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "match": "\\b(?:Int|Float|Bool|String|ArrayF|ArrayI|ArrayB)\\b",
+          "name": "support.type.lambda"
+        }
+      ]
+    },
+    "definition": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_?!<>-])((?:[A-Za-z_][A-Za-z0-9_?!<>-]*::)*[A-Za-z_][A-Za-z0-9_?!<>-]*)(?=\\s*(?:→|->))",
+          "captures": {
+            "1": { "name": "entity.name.function.lambda" }
+          }
+        }
+      ]
+    },
+    "primitives": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_?!<>-])(?:abs|acos|arrayb|arrayb-clone|arrayb-get|arrayb-get-ro|arrayb-length|arrayb-set|arrayf|arrayf-clone|arrayf-get|arrayf-get-ro|arrayf-length|arrayf-set|arrayi|arrayi-clone|arrayi-get|arrayi-get-ro|arrayi-length|arrayi-pmap|arrayi-pmap-chunk|arrayi-set|asin|atan|atan2|bit-and|bit-not|bit-or|bit-xor|ceil|cons|cos|e|empty\\?|exp|fix|float->int|float->str|floor|freeze|head|immortalize|int->float|int->str|ln|log10|log2|map|not|pi|pmap|popcount|pow|print|println|product|range|read-file|read-float|read-int|read-line|round|shl|shr|sin|sqrt|str->float|str->int|str->list|str-append|str-len|sum|tail|tan|trunc|write-bytes|write-f64s|write-i64s|Y|π|∑|∏|√)(?![A-Za-z0-9_?!<>-])",
+          "name": "support.function.lambda"
+        }
+      ]
+    },
+    "qualified": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_?!<>-])(?:[A-Za-z_][A-Za-z0-9_?!<>-]*::)+[A-Za-z_][A-Za-z0-9_?!<>-]*",
+          "name": "entity.name.namespace.lambda"
+        }
+      ]
+    },
+    "borrow": {
+      "patterns": [
+        {
+          "match": "&(?=[A-Za-z_])",
+          "name": "storage.modifier.borrow.lambda"
+        }
+      ]
+    },
+    "constructors": {
+      "patterns": [
+        {
+          "match": "\\b[A-Z][A-Za-z0-9_?!<>-]*\\b",
+          "name": "entity.name.type.lambda"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_?!<>-])(?:\\|\\||&&|==|<=|>=|\\*\\*|[-+*/%<>&|!^]|⊕|⊖|⊗|⊘|⊙|≡|≺|≼|≻|≽|∥)(?![A-Za-z0-9_?!<>-])",
+          "name": "keyword.operator.lambda"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "[()]",
+          "name": "punctuation.paren.lambda"
+        },
+        {
+          "match": "\\[|\\]",
+          "name": "punctuation.bracket.lambda"
+        },
+        {
+          "match": "[{},.:]",
+          "name": "punctuation.separator.lambda"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "match": "(?:[A-Za-z_][A-Za-z0-9_?!<>-]*::)*[A-Za-z_][A-Za-z0-9_?!<>-]*",
+          "name": "variable.other.lambda"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+enum State (A, B)
+
+go → (λi s: State.
+  match s with
+    A → if (>= i 1000000) then A else (go (+ i 1) B)
+  | B → if (>= i 1000000) then B else (go (+ i 1) A))
+
+(go 0 A)

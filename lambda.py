@@ -17,6 +17,7 @@ from analysis import (
 )
 from compiler import Compiler
 from errors import CompileError, LambdaError, TypeError_
+from ast import Lam, walk
 from loader import load_program
 from resolve import Resolver
 from runtime import RUNTIME_C
@@ -89,6 +90,15 @@ def build(input_file: str, output: str, *, strict: bool = False,
                 file=sys.stderr,
             )
 
+    if is_dynamic:
+        # The dynamic backend has a uniform boxed ABI, so borrowed parameters
+        # would otherwise be retained twice or released by the wrong frame.
+        for node in walk(program):
+            if isinstance(node, Lam):
+                node.param_borrows = [False] * len(node.params)
+                for b in node.param_bindings:
+                    b.borrowed = False
+
     compute_captures(program)
     lambda_purity = compute_lambda_purity(program)
     validate_parallel_lambdas(program, lambda_purity)
@@ -118,7 +128,7 @@ def build(input_file: str, output: str, *, strict: bool = False,
     if clang is None:
         raise CompileError("clang was not found on PATH")
 
-    runtime_obj = _runtime_object(workdir, clang, compiler.uses_parallel)
+    runtime_obj = _runtime_object(workdir, clang, compiler.atomic_rc)
     cmd = [clang, "-O3", "-Wno-override-module", ir_file, runtime_obj, "-o", exe]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

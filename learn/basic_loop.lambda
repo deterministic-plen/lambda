@@ -14,3 +14,4 @@ gauss (- i 1) (+ x i)
 ; gauss(3,0) = gauss(3-1,3) = gauss(2-1,3+2) = gauss(0,3 + 2 + 1)
 ; = 6
 ; In Lambda, our function arugments are our state variables.
+; Using this accumulator pattern improves speed since it ensures evaluations happen each step.

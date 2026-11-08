@@ -1,0 +1,12 @@
+﻿sum → (λ&a: ArrayI.
+  go → (λ i acc &a2: ArrayI.
+    if (>= i (arrayi-length a2))
+    then acc
+    else (go (+ i 1) (+ acc (arrayi-get a2 i)) a2))
+  (go 0 0 a))
+
+a0 → (arrayi 3 0)
+a1 → (arrayi-set a0 0 1)
+a2 → (arrayi-set a1 1 2)
+a3 → (arrayi-set a2 2 3)
+(sum a3)

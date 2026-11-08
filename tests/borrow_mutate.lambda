@@ -1,0 +1,2 @@
+﻿bad → (λ&a: ArrayI. (arrayi-set a 0 1))
+(bad (arrayi 1 0))

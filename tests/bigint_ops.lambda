@@ -1,0 +1,17 @@
+include "lib/bigint.lambda"
+
+; 999999999999999999999999999 = three base-1e9 limbs.
+a → (bi-set-len
+      (bi-set (bi-set (bi-set (bi-zero 4) 0 999999999) 1 999999999)
+              2 999999999)
+      3)
+seq → (λx y. y)
+
+(seq (println (bi-len a))
+  (seq (bi-print a)
+    (seq (bi-print (bi-add a (bi-from-int 2 1) 6))
+      (seq (bi-print (bi-sub a (bi-from-int 2 1) 5))
+        (seq (bi-print (bi-mul a a 8))
+          (bi-print (bi-mul (bi-from-int 2 999999999)
+                            (bi-from-int 2 999999999)
+                            4)))))))

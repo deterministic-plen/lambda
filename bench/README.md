@@ -48,19 +48,41 @@ See [results.md](results.md) for the latest table. Headline:
 * sequential nth-prime: Lambda ~1.01x C; C++/Rust within noise.
 * parallel trial division: Lambda ~1.00–1.02x C at 1 and 16 threads.
 * Newton f64: Lambda ~1.02x C.
-* segmented sieve: Lambda ~1.37x C single-thread, ~1.61x C at 16 threads.
-* 10M-element i64 fill+sum: Lambda ~1.13x C.
-* F(1,000,000) bigint: Lambda 760 ms vs Python's C-backed bigint 528 ms
-  (1.44x); output exactly 208,988 digits and matches.
+* segmented sieve: Lambda ~1.09x C single-thread, ~1.45x C at 16 threads.
+* 10M-element i64 fill+sum: Lambda ~1.21x C.
+* F(1,000,000) bigint: Lambda ~103 ms compute+output vs Python's C-backed
+  bigint ~512 ms; output exactly 208,988 digits and matches.
+* Bigint compute-only: Lambda ~100 ms, Python ~36 ms, gmpy2/GMP ~2.8 ms
+  (Lambda is ~2.8x Python and ~36x GMP).
+* unboxed product/sum ADT loop: Lambda ~1.06x C/C++/Rust; identical checksum,
+  zero allocations.
 
-The sieve gap is now mostly the Lambda-level 64-bit mask loop, bounds checks and
-per-task closure application. The implementation uses a flat `arrayi` of base
-primes, immortalises it so per-task captures do not contend on the refcount,
-counts 32-block chunks with `arrayi-pmap-chunk` into a flat result array, and
-materialises only the selected block. The earlier 5–9x gap came from list
-masks/counts and per-task RC traffic, not arithmetic. The bigint benchmark is a
-pure-Lambda base-1e9 Karatsuba/fast-doubling library; Python's built-in bigint
-is the available C-backed reference because GMP/Boost are not installed. A
-matrix benchmark is still omitted because Lambda has no 2D array/matrix
+The product/sum benchmark is separate:
+
+```powershell
+python bench/run_adt_bench.py
+```
+
+It builds [adt_bench.c](adt_bench.c), [adt_bench.cpp](adt_bench.cpp),
+[adt_bench.rs](adt_bench.rs) and [adt_bench.lambda](adt_bench.lambda), verifies
+the checksum, and writes `bench/adt_results.md` / `.json`.
+
+The sieve gap dropped sharply after adding the `p >= 64` fast path: such a
+prime can mark at most one bit in a 64-bit block, so Lambda no longer calls the
+recursive mark loop for the vast majority of base primes. The remaining
+single-thread gap is the Lambda-level mask loop and bounds checks; the parallel
+gap is mostly task dispatch/closure application across 32-block chunks. The
+implementation uses a flat `arrayi` of base primes, immortalises it so per-task
+captures do not contend on the refcount, counts 32-block chunks with
+`arrayi-pmap-chunk` into a flat result array, and materialises only the selected
+block. The earlier 5–9x gap came from list masks/counts and per-task RC traffic,
+not arithmetic. The bigint benchmark stays entirely in Lambda: the library
+uses the base-1e9 `arrayi` representation, fast doubling, streamed decimal
+output, direct `arrayi` limb operations and Karatsuba squaring.  The compiler
+contributes inline reference counts, borrowed call arguments, tail ownership
+moves, cached array metadata and lock-free pooling.
+`bench/bigint_compute_ref.py` measures Python and optional gmpy2 compute
+in-process; the Lambda compute-only executable is timed as a process.
+A matrix benchmark is still omitted because Lambda has no 2D array/matrix
 primitive; list-of-lists would measure representation overhead rather than
 elimination arithmetic.

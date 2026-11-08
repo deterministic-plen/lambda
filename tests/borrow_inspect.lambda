@@ -1,0 +1,7 @@
+a → (arrayi-set (arrayi-set (arrayi 4 0) 0 7) 1 35)
+
+read-first → (λ&x. (arrayi-get x 0))
+read-second → (λ&x. (arrayi-get x 1))
+
+; &x is an idempotent inspection: a stays owned and usable.
+[(read-first &a), (read-second &a), (read-first &a)]

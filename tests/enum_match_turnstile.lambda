@@ -1,0 +1,8 @@
+enum Turnstile (Locked, Unlocked)
+
+next → (λs: Turnstile.
+  match s with
+    Locked → Unlocked
+  | Unlocked → Locked)
+
+(next (next Locked))
