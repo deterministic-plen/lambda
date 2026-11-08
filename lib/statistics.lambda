@@ -16,24 +16,19 @@ varp → (λdata.
     (go 0 0.0 0.0)
 )
 ;minimum float
-minf → (λdata m.
-    go → (λiter data m.
-    if iter >= (arrayf-length data)
-    then m
-    else if m >= (arrayf-get data iter)    
-    then go (+ iter 1) data (arrayf-get data iter)
-    else go (+ iter 1) data m
-    )
+minf → (λ&data. 
+    go → (λiter &a m. if (>= iter (arrayf-length a)) then m else if (>= m (arrayf-get a iter)) then go (+ iter 1) a (arrayf-get a iter) else go (+ iter 1) a m)
+    (go 0 data (arrayf-get data 0))
 )
 
 ;maximum float
-maxf → (λdata m.
-    go → (λiter data m.
-    if iter >= (arrayf-length data)
+maxf → (λ&data.
+    go → (λiter &a m.
+    if (>= iter (arrayf-length a))
     then m
-    else if m <= (arrayf-get data iter)    
-    then go (+ iter 1) data (arrayf-get data iter)
-    else go (+ iter 1) data m
+    else if (<= m (arrayf-get a iter))    
+    then go (+ iter 1) a (arrayf-get a iter)
+    else go (+ iter 1) a m
     )
+    (go 0 data (arrayf-get data 0))
 )
-

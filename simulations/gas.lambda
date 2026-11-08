@@ -18,9 +18,6 @@ f → (λtime x y vx vy.
     if (>= time TMAX)
     then "" ;terminate the simulation after a set point.
     else
-
-
-
     xnew → (head (updatepos 0 dT x y vx vy))
     ynew → (head (tail (updatepos 0 dT x y vx vy)))
     a → (println (var vx))

@@ -1,0 +1,13 @@
+{
+  "iconDefinitions": {
+    "lambda_logo": {
+      "iconPath": "./lambda.svg"
+    }
+  },
+  "languageIds": {
+    "lambda": "lambda_logo"
+  },
+  "fileExtensions": {
+    "lambda": "lambda_logo"
+  }
+}

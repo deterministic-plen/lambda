@@ -3,22 +3,54 @@
   "name": "Lambda",
   "scopeName": "source.lambda",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#lambda" },
-    { "include": "#arrows" },
-    { "include": "#numbers" },
-    { "include": "#keywords" },
-    { "include": "#constants" },
-    { "include": "#types" },
-    { "include": "#definition" },
-    { "include": "#primitives" },
-    { "include": "#qualified" },
-    { "include": "#constructors" },
-    { "include": "#borrow" },
-    { "include": "#operators" },
-    { "include": "#punctuation" },
-    { "include": "#identifiers" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#lambda"
+    },
+    {
+      "include": "#arrows"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#definition"
+    },
+    {
+      "include": "#primitives"
+    },
+    {
+      "include": "#qualified"
+    },
+    {
+      "include": "#constructors"
+    },
+    {
+      "include": "#borrow"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#identifiers"
+    }
   ],
   "repository": {
     "comments": {
@@ -53,8 +85,12 @@
         {
           "match": "(λp|\\\\p|λ|\\\\)(\\s*)(&)",
           "captures": {
-            "1": { "name": "storage.type.function.lambda" },
-            "3": { "name": "storage.modifier.borrow.lambda" }
+            "1": {
+              "name": "storage.type.function.lambda"
+            },
+            "3": {
+              "name": "storage.modifier.borrow.lambda"
+            }
           }
         },
         {
@@ -96,15 +132,23 @@
         {
           "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_?!<>-]*)",
           "captures": {
-            "1": { "name": "keyword.declaration.enum.lambda" },
-            "2": { "name": "entity.name.type.enum.lambda" }
+            "1": {
+              "name": "keyword.declaration.enum.lambda"
+            },
+            "2": {
+              "name": "entity.name.type.enum.lambda"
+            }
           }
         },
         {
           "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_?!<>-]*)",
           "captures": {
-            "1": { "name": "keyword.declaration.type.lambda" },
-            "2": { "name": "entity.name.type.record.lambda" }
+            "1": {
+              "name": "keyword.declaration.type.lambda"
+            },
+            "2": {
+              "name": "entity.name.type.record.lambda"
+            }
           }
         },
         {
@@ -142,7 +186,9 @@
         {
           "match": "(?<![A-Za-z0-9_?!<>-])((?:[A-Za-z_][A-Za-z0-9_?!<>-]*::)*[A-Za-z_][A-Za-z0-9_?!<>-]*)(?=\\s*(?:→|->))",
           "captures": {
-            "1": { "name": "entity.name.function.lambda" }
+            "1": {
+              "name": "entity.name.function.lambda"
+            }
           }
         }
       ]
@@ -150,7 +196,7 @@
     "primitives": {
       "patterns": [
         {
-          "match": "(?<![A-Za-z0-9_?!<>-])(?:abs|acos|arrayb|arrayb-clone|arrayb-get|arrayb-get-ro|arrayb-length|arrayb-set|arrayf|arrayf-clone|arrayf-get|arrayf-get-ro|arrayf-length|arrayf-set|arrayi|arrayi-clone|arrayi-get|arrayi-get-ro|arrayi-length|arrayi-pmap|arrayi-pmap-chunk|arrayi-set|asin|atan|atan2|bit-and|bit-not|bit-or|bit-xor|ceil|cons|cos|e|empty\\?|exp|fix|float->int|float->str|floor|freeze|head|immortalize|int->float|int->str|ln|log10|log2|map|not|pi|pmap|popcount|pow|print|println|product|range|read-file|read-float|read-int|read-line|round|shl|shr|sin|sqrt|str->float|str->int|str->list|str-append|str-len|sum|tail|tan|trunc|write-bytes|write-f64s|write-i64s|Y|π|∑|∏|√)(?![A-Za-z0-9_?!<>-])",
+          "match": "(?<![A-Za-z0-9_?!<>-])(?:abs|acos|and|arrayb|arrayb-clone|arrayb-get|arrayb-get-ro|arrayb-length|arrayb-set|arrayf|arrayf-clone|arrayf-get|arrayf-get-ro|arrayf-length|arrayf-set|arrayi|arrayi-clone|arrayi-get|arrayi-get-ro|arrayi-length|arrayi-pmap|arrayi-pmap-chunk|arrayi-set|asin|atan|atan2|bit-and|bit-not|bit-or|bit-xor|ceil|cons|cos|e|empty\\?|exp|fix|float->int|float->str|floor|freeze|head|immortalize|int->float|int->str|ln|log10|log2|map|not|or|pi|pmap|popcount|pow|print|println|product|range|read-file|read-float|read-int|read-line|round|shl|shr|sin|sqrt|str->float|str->int|str->list|str-append|str-len|sum|tail|tan|trunc|write-bytes|write-f64s|write-i64s|Y|π|∏|∑|√)(?![A-Za-z0-9_?!<>-])",
           "name": "support.function.lambda"
         }
       ]
@@ -158,8 +204,15 @@
     "qualified": {
       "patterns": [
         {
-          "match": "(?<![A-Za-z0-9_?!<>-])(?:[A-Za-z_][A-Za-z0-9_?!<>-]*::)+[A-Za-z_][A-Za-z0-9_?!<>-]*",
-          "name": "entity.name.namespace.lambda"
+          "match": "(?<![A-Za-z0-9_?!<>-])((?:[A-Za-z_][A-Za-z0-9_?!<>-]*::)+)([A-Za-z_][A-Za-z0-9_?!<>-]*)",
+          "captures": {
+            "1": {
+              "name": "entity.name.namespace.lambda"
+            },
+            "2": {
+              "name": "entity.name.function.member.lambda"
+            }
+          }
         }
       ]
     },

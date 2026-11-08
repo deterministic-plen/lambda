@@ -1,7 +1,7 @@
 {
   "name": "lambda-language",
   "displayName": "Lambda",
-  "description": "Syntax highlighting for the Lambda language",
+  "description": "Lambda language support: syntax highlighting, completion, qualified names",
   "version": "0.1.0",
   "publisher": "lambda",
   "main": "./extension.js",
@@ -38,6 +38,18 @@
         "scopeName": "source.lambda",
         "path": "./syntaxes/lambda.tmLanguage.json"
       }
+    ],
+    "configurationDefaults": {
+      "[lambda]": {
+        "editor.wordBasedSuggestions": "off"
+      }
+    }
+  },
+    "iconThemes": [
+      {
+        "id": "lambda-icons",
+        "label": "Lambda Theme",
+        "path": "./icons/lambda-icon-theme.json"
+      }
     ]
-  }
 }

@@ -24,22 +24,70 @@ The extension contributes:
   and definitions/types/fields/variants found in the current document
 - qualified names with `::` (`Complex::add`) and the `&x` borrow inspection
 
-### Install locally
+### Install locally (no build step)
 
-Copy the `vscode` directory into your extensions folder:
+**Option A - copy into the extensions folder (simplest):**
 
-```text
-%USERPROFILE%\.vscode\extensions\lambda-language-0.1.0
+```powershell
+# Windows PowerShell, from the Lambda project root
+$dst = "$env:USERPROFILE\.vscode\extensions\lambda-language-0.1.0"
+New-Item -ItemType Directory -Force $dst | Out-Null
+Copy-Item editors\vscode\* $dst -Recurse -Force
 ```
-
-On Linux/macOS:
 
 ```bash
-cp -r editors/vscode ~/.vscode/extensions/lambda-language-0.1.0
+# Linux / macOS
+mkdir -p ~/.vscode/extensions/lambda-language-0.1.0
+cp -r editors/vscode/* ~/.vscode/extensions/lambda-language-0.1.0/
 ```
 
-Restart VS Code and open a `.lambda` file.  To inspect token scopes, run
-**Developer: Inspect Editor Tokens and Scopes**.
+Then **fully restart VS Code** (not just "Reload Window" the first time - the
+extension host only scans the extensions directory at startup). Open a
+`.lambda` file: the status bar shows "Lambda".
+
+**Option B - package as a `.vsix`:**
+
+```powershell
+cd editors\vscode
+npx @vscode/vsce package          # produces lambda-language-0.1.0.vsix
+code --install-extension lambda-language-0.1.0.vsix
+```
+
+### Troubleshooting: nothing is highlighted
+
+1. Bottom-right status bar must read **Lambda**. If it says *Plain Text*,
+   click it and choose Lambda, or add to `settings.json`:
+   ```json
+   "files.associations": { "*.lambda": "lambda" }
+   ```
+2. Check the extension actually loaded: **Extensions** view -> search
+   "Lambda" -> it should be listed as installed (if not, re-check the folder
+   name is `lambda-language-0.1.0` and that `package.json` sits directly inside
+   it, not one level deeper).
+3. Inspect a token: **Ctrl+Shift+P** -> **Developer: Inspect Editor Tokens and
+   Scopes**. Hover `Complex::add`; you should see
+   `entity.name.namespace.lambda` (the `Complex::` part) and
+   `entity.name.function.member.lambda` (the `add` part), and hover `and` ->
+   `support.function.lambda`.
+4. If tokens are right but colors are dull, the theme does not color that scope.
+   Map it in `settings.json`:
+   ```json
+   "editor.tokenColorCustomizations": {
+     "textMateRules": [
+       { "scope": "entity.name.namespace.lambda", "settings": { "foreground": "#4EC9B0" } },
+       { "scope": "entity.name.function.member.lambda", "settings": { "foreground": "#DCDCAA" } },
+       { "scope": "support.function.lambda", "settings": { "foreground": "#C586C0" } },
+       { "scope": "storage.modifier.borrow.lambda", "settings": { "foreground": "#569CD6", "fontStyle": "italic" } }
+     ]
+   }
+   ```
+5. Cached grammar after an update: **Developer: Reload Window**, or restart.
+
+### Verify the grammar without VS Code
+
+```powershell
+python editors/test_highlight.py    # grammar regexes, data drift, Pygments
+```
 
 For packaging, install `vsce` and run `vsce package` inside `editors/vscode`.
 No `node_modules` or build step is required.

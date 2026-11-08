@@ -3,20 +3,24 @@ type PolarComplex (r:Float, arg:Float)
 
 Complex::add → (λa: Complex b: Complex.
   (Complex (+ a_re b_re) (+ a_im b_im)))
+
 Complex::scale → (λa: Complex k: Float.
   (Complex (* a_re k) (* a_im k)))
+
 Complex::sub → (λa: Complex b: Complex.
   (Complex (- a_re b_re) (- a_im b_im)))
+
 Complex::mul → (λa: Complex b: Complex.
   (Complex (- (* a_re b_re) (* a_im b_im)) (+ (* a_re b_im) (* a_im b_re))))
+
 Complex::arg → (λa: Complex.
-    if (> a_re 0.0)
-    then (atan (/ a_im a_re))
-    else if (< a_re 0.0)
+    atan2 a_im a_re
 )
-Complex::conj  → (λa: Complex.
+
+Complex::conj → (λa: Complex.
 (Complex a_re (- 0.0 b_im))
 )
+
 Complex::modulus →(λa: Complex.
 (sqrt (+  (* a_re a_re) (* a_im a_im)))
 )
@@ -24,6 +28,7 @@ Complex::modulus →(λa: Complex.
 Complex::toPolar → (λa: Complex.
     (Polar (Complex::modulus(a),Complex::arg(a)))
 )
-Complex::exp →(λa: Complex.
+
+Complex::exp → (λa: Complex.
 (Complex::scale (Complex (cos (Complex::arg a)) (sin (Complex::arg a))) (exp a_re))
 )

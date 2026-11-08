@@ -1,0 +1,17 @@
+﻿include "lib/stream.lambda"
+
+; Fill an n x n grid with |sin(x) * cos(y)| and emit it as a flat f64 array plus
+; its dimensions, so a 2D renderer can reshape it.
+n → 120
+
+build → (λi data.
+  if (>= i (* n n))
+  then data
+  else
+    x → (* (int->float (% i n)) (/ 24.0 (int->float n)))
+    y → (* (int->float (/ i n)) (/ 24.0 (int->float n)))
+    (build (+ i 1) (arrayf-set data i (abs (* (sin x) (cos y))))))
+
+grid → (build 0 (arrayf (* n n) 0.0))
+w1 → (emit-f64s 1 grid)
+(emit-i64s 2 (arrayi-set (arrayi-set (arrayi 2 0) 0 n) 1 n))

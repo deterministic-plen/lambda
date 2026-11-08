@@ -1,0 +1,21 @@
+include "lib/stream.lambda"
+
+; x/y samples of a damped sine: y = exp(-0.15 x) * sin(4 x)
+n → 400
+step → 0.05
+
+buildx → (λi data.
+  if (>= i n)
+  then data
+  else (buildx (+ i 1) (arrayf-set data i (* (int->float i) step))))
+buildy → (λi data.
+  if (>= i n)
+  then data
+  else
+    x → (* (int->float i) step)
+    (buildy (+ i 1) (arrayf-set data i (* (exp (* -0.15 x)) (sin (* 4.0 x))))))
+
+xs → (buildx 0 (arrayf n 0.0))
+ys → (buildy 0 (arrayf n 0.0))
+w1 → (emit-f64s 1 xs)
+(emit-f64s 2 ys)

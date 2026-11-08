@@ -1,5 +1,33 @@
 # Lambda
 
+**Lambda is an impure, eagerly evaluated, strictly typed (Hindley-Milner,
+let-polymorphic, monomorphic-at-codegen) functional language in the Lisp/ML
+tradition: untyped at runtime, statically typed where inference succeeds, with
+explicit reference-counted ownership for heap values and nominal, unboxed
+product and sum types -- a small lambda calculus that compiles to native
+machine code.**
+
+In one line: *a strict, impure, HM-typed lambda calculus with algebraic data
+types and reference-counted containers, compiled ahead-of-time through LLVM to
+unboxed native code, with optional shared-memory data parallelism.*
+
+Concretely, along each axis:
+
+| axis | Lambda |
+| --- | --- |
+| paradigm | functional (lambda calculus core), impure and effectful where primitives print/read |
+| evaluation | call-by-value, strict, eager; recursion is explicit (no implicit laziness or memoized thunks) |
+| typing | static Hindley-Milner with let-polymorphism; unannotated programs infer, and inference failure falls back to a dynamically typed boxed backend instead of rejecting |
+| types | structural function and list types; nominal monomorphic product (`type`) and sum/enum (`enum`) types; no type classes, no generics over data constructors, no row types |
+| data | persistent lists; three flat mutable array types (`ArrayF/I/B`) with an explicit consume-on-write discipline; arbitrary-precision integers only as a library |
+| memory | automatic reference counting (non-atomic, atomic under `pmap`), unboxed scalars/records, flat closures, explicit `&` borrows for read-only parameters, no GC |
+| effects | explicit, not tracked: `print`/`println`, terminal input, destructive array updates, file reads; purity is inferred for `pmap`/CSE but is not a type |
+| concurrency | data parallelism only: `pmap` and `arrayi-pmap` over provably pure `λp`/`λ` functions, sharing immutable input; no threads, no channels, no actor model |
+| metaprogramming | text-level `include` with cycle detection and include-once; no macros, no reflection |
+| compilation | whole-program ahead-of-time; LLVM IR then `clang -O3`; direct calls for known arity; `musttail` for self-recursion |
+| idioms | prefix application everywhere (RPN-like), currying, `name → value` definitions, optional annotations |
+
+
 A small, curried lambda-calculus language that compiles to native code through
 LLVM.  It aims to stay functional and minimal while producing fast machine
 code: type-directed unboxing, flat closures, reference counting, common
@@ -661,6 +689,36 @@ Two practical constraints:
   file, running through `cmd /c`, or using Python's `subprocess` with
   `stdout=PIPE`; those preserve the bytes.
 
+### Plotting
+
+Two readers ship with the compiler.  Neither needs a GUI to produce a file:
+
+| tool | output | needs |
+| --- | --- | --- |
+| `tools/plot_svg.py` | standalone `.svg` (axes, ticks, legend, log scales) | nothing (stdlib only) |
+| `tools/stream_plot.py` | matplotlib window, or CSV | matplotlib |
+
+```powershell
+python lambda.py examples/plot_damped_sine.lambda -o sine --data
+cmd /c "sine.exe > sine.bin"                 ; PowerShell's > is not byte-safe
+python tools/plot_svg.py sine.bin --x 1 --out sine.svg --title "damped sine"
+```
+
+`plot_svg.py` flags: `--x ID` (use stream `ID` as the x axis instead of the
+index), `--logx`, `--logy`, `--ymin/--ymax` (clip), `--points` (markers),
+`--list` (inspect streams without drawing).  Large series are decimated for
+the SVG, so a million points still renders.
+
+Two examples are included:
+
+- `examples/plot_damped_sine.lambda` -- `x` and `y = exp(-0.15x) sin(4x)` as
+  two streams, plotted against `--x 1`.
+- `examples/plot_surface.lambda` -- a 120x120 grid of `|sin x cos y|` as one
+  flat `f64` array plus its dimensions as an `i64` stream, for 2D renderers.
+
+`--data` programs do not print their result, so a program that both plots and
+prints should emit the arrays last.
+
 ## Fixed points
 
 Call-by-value cannot use the textbook `Y = λf. (λx. f (x x)) (λx. f (x x))`:
@@ -764,6 +822,7 @@ Rust file also allocates `Vec<Vec<f64>>` and clones rows per elimination, and it
 | `tools/stream_plot.py` | binary frame reader, CSV export, optional matplotlib |
 | `editors/` | VS Code TextMate grammar + completion data, Pygments lexer |
 | `docs/roadmap.md` | product/sum types, linearity, defunctionalization plan |
+| `docs/parallelism.md` | concurrency design: regions, work stealing, channels |
 | `docs/roadmap-checklist.md` | completed/pending checklist with evidence |
 | `run_tests.py` | 129 compile/run/leak regression cases |
 | `tests/`, `examples/` | test corpus and runnable examples |
