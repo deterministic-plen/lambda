@@ -1,12 +1,18 @@
-foobar → (λx. 
+fizzbuzz → (λx. 
 if == (% x 3) 0
-then "foo"
+then "fizz"
 else if == (% x 5) 0
-then "bar"
-else if == (% x 15) 0
-then "foobar"
-else "")
+then "buzz"
+else if (and (== (% x 5) 0) (== (% x 3) 0))
+then "fizzbuzz"
+else int->str x)
 ; Lambda supports the primitive ternary conditional.
 ; The syntax is always if (condition) then (statement) else (statement)
 
-(foobar 5) ;try changing this to different values
+go→(λiter.
+if >= iter 20 then ""
+else
+a→(println (fizzbuzz iter))
+go (+ iter 1)
+)
+go 0

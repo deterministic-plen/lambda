@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from ast import (
+from lambda_ast import (
     App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, Match, Node, PRIM,
     RecordField, RecordLit, SumLit, Var, walk,
 )

@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
-from ast import (
+from lambda_ast import (
     App, Binding, Block, Borrow, Def, If, Lam, Lit, LOCAL_DEF, Match, Node,
     PARAM, PRIM, RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
 )

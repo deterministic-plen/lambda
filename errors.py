@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ast import Loc
+from lambda_ast import Loc
 
 
 class LambdaError(Exception):

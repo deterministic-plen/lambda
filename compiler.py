@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Set, Tuple
 
-from ast import (
+from lambda_ast import (
     App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, Match, Node, PARAM, PRIM,
     RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
 )

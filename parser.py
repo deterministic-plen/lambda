@@ -25,7 +25,7 @@ from __future__ import annotations
 import sys
 from typing import List, Optional, Tuple
 
-from ast import (
+from lambda_ast import (
     App, Block, Borrow, Def, EnumLit, If, Lam, Lit, Loc, Match, Node,
     RecordField, RecordLit, SumLit, Var,
 )

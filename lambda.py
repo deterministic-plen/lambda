@@ -17,7 +17,7 @@ from analysis import (
 )
 from compiler import Compiler
 from errors import CompileError, LambdaError, TypeError_
-from ast import Lam, walk
+from lambda_ast import Lam, walk
 from loader import load_program
 from resolve import Resolver
 from runtime import RUNTIME_C
@@ -72,14 +72,12 @@ def build(input_file: str, output: str, *, strict: bool = False,
     program = Resolver().resolve_program(program)
 
     is_dynamic = dynamic
-    inference_error = None
     if not is_dynamic:
         try:
             result_type = typecheck.infer_program(program)
             if debug:
                 print(f"type of program: {show_type(result_type)}", file=sys.stderr)
         except TypeError_ as exc:
-            inference_error = exc
             if strict:
                 raise
             is_dynamic = True
@@ -129,7 +127,7 @@ def build(input_file: str, output: str, *, strict: bool = False,
         raise CompileError("clang was not found on PATH")
 
     runtime_obj = _runtime_object(workdir, clang, compiler.atomic_rc)
-    cmd = [clang, "-O3", "-Wno-override-module", ir_file, runtime_obj, "-o", exe]
+    cmd = [clang, "-O3","-fuse-ld=lld", "-Wno-override-module", ir_file, runtime_obj, "-o", exe]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise CompileError(

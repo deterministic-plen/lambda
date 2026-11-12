@@ -16,10 +16,8 @@ from __future__ import annotations
 
 from typing import List
 
-from ast import Loc
+from lambda_ast import Loc
 from errors import SyntaxErr
-
-UNICODE_OPS = set("⊕⊖⊗⊘⊙≺≡")
 
 PUNCT = set("()[],.:")
 LAMBDA_CHARS = set("λ\\")
@@ -283,11 +281,6 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
             i += 1
             continue
 
-        if ch in UNICODE_OPS:
-            tokens.append(Token("op", ch, loc()))
-            advance(ch)
-            i += 1
-            continue
 
         # Numbers (integers and floats).
         if ch.isdigit() or (ch == "-" and i + 1 < n and source[i + 1].isdigit()):
@@ -314,8 +307,7 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
                     continue
                 break
             if (c.isspace() or c in '()[],.:;"#' or c in LAMBDA_CHARS
-                    or c in (ARROW, LARROW, "|", "∥")
-                    or c in UNICODE_OPS):
+                    or c in (ARROW, LARROW, "|", "∥")):
                 break
             j += 1
         text = source[i:j]

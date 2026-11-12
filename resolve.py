@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from ast import (
+from lambda_ast import (
     App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, LOCAL_DEF, Match,
     Node, PARAM, PRIM, RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
 )

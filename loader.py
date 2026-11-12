@@ -13,7 +13,7 @@ import os
 import sys
 from typing import List, Optional, Set
 
-from ast import Block, Def, Loc, Node
+from lambda_ast import Block, Def, Loc, Node
 from errors import SyntaxErr
 from lexer import tokenize
 from parser import Parser

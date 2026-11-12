@@ -1,0 +1,28 @@
+partition \to (\lambda data lo hi.
+piv \to (arrayi-get data hi)
+go \to (\lambda data i j.
+if (>= (- j 1) (arrayi-length data)) then data
+else
+if (<= (arrayi-get data j) pivot) then
+a \to (arrayi-get data i)
+b \to (arrayi-get data j)
+data \to (arrayi-set data j a)
+data \to (arrayi-set data i b)
+go data (+ i 1) (+ j 1)
+else
+go data i (+ j 1)
+)
+go data (- lo 1) lo
+a \to (arrayi-get data (- lo 1))
+b \to (arrayi-get data hi)
+data \to (arrayi-set data hi a)
+data \to (arrayi-set data (- lo 1) b)
+data
+)
+
+quicksort \to (\lambda data lo hi.
+ if (or (>= lo hi) (< lo 0)) then
+ data
+ 
+)
+
