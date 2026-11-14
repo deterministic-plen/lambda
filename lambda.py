@@ -41,6 +41,8 @@ def _runtime_object(workdir: str, clang: str, atomic_rc: bool = False) -> str:
     cmd = [clang, "-O3", "-Wno-override-module"]
     if atomic_rc:
         cmd.append("-DLAMBDA_ATOMIC_RC=1")
+    if os.name != "nt":
+        cmd.append("-pthread")
     cmd.extend(["-c", src, "-o", obj])
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -149,6 +151,13 @@ def build(input_file: str, output: str, *, strict: bool = False,
         runtime_obj = _runtime_object(workdir, clang, compiler.atomic_rc)
         cmd = [clang, "-O3", "-fuse-ld=lld", "-Wno-override-module", ir_file,
                runtime_obj, "-o", exe]
+        if os.name != "nt":
+            # The C runtime uses libm; glibc keeps it outside libc.
+            cmd.append("-lm")
+            cmd.append("-pthread")
+        if sys.platform.startswith("linux"):
+            # Older glibc releases require libdl for dlopen/dlsym.
+            cmd.append("-ldl")
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise CompileError(
