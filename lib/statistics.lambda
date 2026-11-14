@@ -1,5 +1,5 @@
 ;variance
-varp → (λdata.
+varp → (λ&data.
   N → (arrayf-length data)
   if (<= N 1)
   then 0.0
@@ -32,3 +32,5 @@ maxf → (λ&data.
     )
     (go 0 data (arrayf-get data 0))
 )
+
+sort

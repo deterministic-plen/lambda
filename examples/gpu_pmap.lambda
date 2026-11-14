@@ -1,0 +1,7 @@
+; gpu_pmap.lambda : the GPU-shaped arrayf-pmap path.
+; Build normally, then run with LAMBDA_GPU=1 on a CUDA machine.
+; The compiler embeds a kernel only if the lambda is a simple expression;
+; otherwise the runtime uses the CPU thread pool.
+n → 2000000
+xs → (arrayf-pmap (λ i: Int. (sin (* 0.000001 (int->float i)))) n)
+(* 1000.0 (arrayf-get xs 1000000))

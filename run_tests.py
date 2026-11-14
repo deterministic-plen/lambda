@@ -31,6 +31,7 @@ STREAM_F64 = stream_frame(1, 1, struct.pack("<2d", 1.0, -2.0))
 CASES = [
     # core / syntax / closures
     ("hello", "3\n", [], None, None),
+    ("array_of", "[3.0, 2.5, 3.0, 255.0, 0.0]\n", [], None, None),
     ("fib", "75025\n", [], None, None),
     ("map", "[2, 3, 4, 5]\n", [], None, None),
     ("partial", "42\n", [], None, None),
@@ -122,6 +123,18 @@ CASES = [
     ("include_basic", "42\n", [], None, None),
     ("include_nested", "40\n", [], None, None),
     ("include_once", "42\n", [], None, None),
+    ("include_stdlib", "1024\n", [], None, None),
+    ("complex_safe_div", "[1.0, 2.0, 1.0]\n", [], None, None),
+    ("adt_tree", "3\n", [], None, None),
+    ("adt_boxed", "hi\n", [], None, None),
+    ("adt_listfield", "[1, 2, 3]\n", [], None, None),
+    ("adt_generic", "1\n", [], None, None),
+    ("ast_interp", "14\n", [], None, None),
+    ("ast_compiler", "10\n", [], None, None),
+    ("adt_color", "2\n", [], None, None),
+    ("adt_float", "4.0\n", [], None, None),
+    ("adt_five", "15\n", [], None, None),
+    ("adt_rose", "4\n", [], None, None),
     ("list_lib", "[3, 3, 2, 6]\n", [], None, None),
     # parallel
     ("pmap_basic", "[2, 3, 4, 5]\n", [], None, None),
@@ -132,7 +145,6 @@ CASES = [
     ("comp_par", "[2, 3, 4]\n", [], None, None),
     ("lambda_p", "42\n", [], None, None),
     ("nth_prime", "10086767\n", [], None, None),
-    ("legacy_nth_prime", "10086767\n", [], None, None),
     ("nth_prime_parallel", "10086767\n", [], None, None),
     ("nth_prime_sieve", "10086767\n", [], None, None),
     ("nth_prime_sieve_100k", "1299709\n", [], None, None),
@@ -145,6 +157,7 @@ CASES = [
     ("input_line", "5\n", ["--input"], None, "hello\n"),
     ("input_float", "3.0\n", ["--input"], None, "1.5\n"),
     # expected failures
+    ("arrayf_pmap", "[1000, 295, 700]\n", [], None, None),
     ("typeerror", None, ["--strict"], "type error", None),
     ("float_strict", None, ["--strict"], "type error", None),
     ("unbound", None, [], "unbound variable", None),

@@ -19,21 +19,24 @@ from lambda_ast import (
     PARAM, PRIM, RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
 )
 from errors import CompileError
-from parser import ARITH_OPS, COMPARE_OPS, OP_CANON, PRIMITIVES
+from parser import OP_CANON, PRIMITIVES
 
 IMPURE_PRIMITIVES = {
-    "print", "println", "read-file", "read_line", "read_int", "read_float",
+    "print", "println", "read_file", "read_line", "read_int", "read_float",
+    "fix", "immortalize",
     "map", "pmap",
     # Arrays are a controlled low-level effect: a set consumes and mutates its
     # buffer.  Keep all array operations out of CSE and λp/pmap.
     "arrayf", "arrayi", "arrayb",
-    "arrayf_get", "arrayf_set", "arrayf_length", "arrayf_clone",
-    "arrayi_get", "arrayi_set", "arrayi_length", "arrayi_clone",
-    "arrayb_get", "arrayb_set", "arrayb_length", "arrayb_clone",
+    "arrayf_of", "arrayi_of", "arrayb_of",
+    "arrayf_set", "arrayf_clone",
+    "arrayi_set", "arrayi_clone",
+    "arrayb_set", "arrayb_clone",
     "arrayi_sum", "arrayf_sum",
     "arrayi_pmap",
     "arrayi_pmap_chunk",
-    "write_bytes", "write_f64s", "write_i64s",
+    "write_bytes", "write_f64s", "write_i64s", "write_file",
+    "arrayf_pmap", "gray_scott", "gray_stripe",
 }
 
 PRIM_ARITY = {
@@ -52,12 +55,15 @@ PRIM_ARITY = {
     "shl": 2, "shr": 2, "popcount": 1,
     "range": 2, "map": 2, "pmap": 2, "immortalize": 1,
     "arrayf": 2, "arrayi": 2, "arrayb": 2,
+    "arrayf_of": 1, "arrayi_of": 1, "arrayb_of": 1,
     "arrayf_get": 2, "arrayf_set": 3, "arrayf_length": 1, "arrayf_clone": 1,
+    "gray_scott": 8, "gray_stripe": 10,
     "arrayi_get": 2, "arrayi_set": 3, "arrayi_length": 1, "arrayi_clone": 1,
     "arrayb_get": 2, "arrayb_set": 3, "arrayb_length": 1, "arrayb_clone": 1,
     "arrayi_sum": 1, "arrayf_sum": 1,
     "arrayf_get_ro": 2, "arrayi_get_ro": 2, "arrayb_get_ro": 2,
-    "arrayi_pmap": 2, "arrayi_pmap_chunk": 3,
+    "arrayi_pmap": 2, "arrayi_pmap_chunk": 3, "arrayf_pmap": 2,
+    "write_file": 2,
     "write_bytes": 1, "write_f64s": 1, "write_i64s": 1,
     "read_line": 1, "read_int": 1, "read_float": 1,
 }
@@ -233,7 +239,6 @@ def compute_captures(program: Node) -> None:
         selected = [all_bindings[u] for u in caps[id(lam)] if u in all_bindings]
         selected.sort(key=lambda b: b.uid)
         lam.captures = selected
-        lam.capture_set = {b.uid for b in selected}
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +699,45 @@ def top_level_order(block: Block) -> List[Def]:
 
     for d in value_defs:
         scan(d.value, deps[d.binding.uid])
+
+    # A value initializer may call a top-level function; that function can
+    # read other top-level values.  Add those dependencies only to initializers
+    # that actually contain a call, so enum variants and constants stay acyclic.
+    fn_refs: List[int] = []
+    for d in block.defs:
+        if d.binding is not None and d.is_function:
+            scan(d.value.body, fn_refs)
+
+    function_uids = {d.binding.uid for d in block.defs
+                     if d.binding is not None and d.is_function}
+
+    def contains_app(n: Node) -> bool:
+        if isinstance(n, App):
+            return (isinstance(n.func, Var) and n.func.binding is not None
+                    and n.func.binding.uid in function_uids)
+        if isinstance(n, Lam):
+            return False
+        if isinstance(n, Block):
+            return any(contains_app(d.value) for d in n.defs) or contains_app(n.body)
+        if isinstance(n, If):
+            return contains_app(n.cond) or contains_app(n.then) or contains_app(n.else_)
+        if isinstance(n, Match):
+            return contains_app(n.subject) or any(contains_app(a) for _, a in n.arms)
+        if isinstance(n, (RecordLit, SumLit)):
+            return any(contains_app(a) for a in n.args)
+        if isinstance(n, RecordField):
+            return contains_app(n.value)
+        if isinstance(n, Borrow):
+            return contains_app(n.value)
+        return False
+
+    for d in value_defs:
+        if not contains_app(d.value):
+            continue
+        uid = d.binding.uid
+        for dep in fn_refs:
+            if dep != uid and dep not in deps[uid]:
+                deps[uid].append(dep)
 
     ordered: List[Def] = []
     state: Dict[int, int] = {}  # 0 = visiting, 2 = done

@@ -1,0 +1,23 @@
+data Tree = Leaf | Node (value: Int, left: Tree, right: Tree)
+
+N → 1048576
+
+build → (λn: Int.
+  if (<= n 0)
+  then Leaf
+  else
+    l → (/ (- n 1) 2)
+    r → (- (- n 1) l)
+    (Node n (build l) (build r)))
+
+sum → (λt: Tree.
+  match t with
+    Leaf: 0,
+    Node v l r: (+ v (+ (sum l) (sum r))))
+
+tree → (build N)
+
+run → (λk: Int acc: Int.
+  if (>= k 10) then acc else (run (+ k 1) (+ acc (sum tree))))
+
+(run 0 0)

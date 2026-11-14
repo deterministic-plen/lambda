@@ -1,0 +1,3 @@
+﻿b → (arrayb-set (arrayb 3 65) 1 66)
+n → (write-file "lambda_write_test.tmp" b)
+[n, (str-len (read-file "lambda_write_test.tmp"))]

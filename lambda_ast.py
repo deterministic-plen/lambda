@@ -55,12 +55,14 @@ class Block(Node):
     tail expression; they are therefore mutually recursive.
     """
 
-    __slots__ = ("defs", "body")
+    __slots__ = ("defs", "body", "data_decls")
 
-    def __init__(self, defs: List["Def"], body: Node, loc: Optional[Loc] = None) -> None:
+    def __init__(self, defs: List["Def"], body: Node, loc: Optional[Loc] = None,
+                 data_decls: Optional[List["DataDecl"]] = None) -> None:
         super().__init__(loc)
         self.defs = defs
         self.body = body
+        self.data_decls = data_decls or []
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"Block({self.defs!r}, {self.body!r})"
@@ -103,9 +105,7 @@ class Lam(Node):
         self.param_annotations: List[Optional[str]] = [None] * len(params)
         self.param_borrows: List[bool] = [False] * len(params)
         self.is_parallel = False
-        self.info: Any = None
         self.captures: List["Binding"] = []
-        self.capture_set: set = set()
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"Lam({self.params!r}, {self.body!r})"
@@ -278,6 +278,67 @@ class Borrow(Node):
         return f"Borrow({self.value!r})"
 
 
+class DataField(Node):
+    """A named field in a recursive ``data`` declaration."""
+    __slots__ = ("name", "type_text")
+
+    def __init__(self, name: str, type_text: str, loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.name = name
+        self.type_text = type_text
+
+    def __repr__(self) -> str:
+        return f"DataField({self.name!r}, {self.type_text!r})"
+
+
+class DataVariant(Node):
+    __slots__ = ("name", "fields")
+
+    def __init__(self, name: str, fields: List[DataField],
+                 loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.name = name
+        self.fields = fields
+
+    def __repr__(self) -> str:
+        return f"DataVariant({self.name!r}, {self.fields!r})"
+
+
+class DataDecl(Node):
+    """A monomorphic/generic recursive data declaration.
+
+    The syntax layer keeps the declaration intact; type algebra/layout and
+    code generation consume it in later compiler stages.
+    """
+    __slots__ = ("name", "params", "variants")
+
+    def __init__(self, name: str, params: List[str], variants: List[DataVariant],
+                 loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.name = name
+        self.params = params
+        self.variants = variants
+
+    def __repr__(self) -> str:
+        return f"DataDecl({self.name!r}, {self.params!r}, {self.variants!r})"
+
+
+class DataCtor(Node):
+    """A constructor value for a recursive ``data`` declaration."""
+    __slots__ = ("data_name", "variant", "tag", "args")
+
+    def __init__(self, data_name: str, variant: str, tag: int,
+                 args: List[Node], loc: Optional[Loc] = None) -> None:
+        super().__init__(loc)
+        self.data_name = data_name
+        self.variant = variant
+        self.tag = tag
+        self.args = args
+
+    def __repr__(self) -> str:
+        return f"DataCtor({self.data_name}.{self.variant}, {self.args!r})"
+
+
 # Binding kinds -------------------------------------------------------------
 PARAM = "param"
 LOCAL_DEF = "local_def"
@@ -313,10 +374,6 @@ class Binding:
         self.borrowed = False
 
     @property
-    def is_local(self) -> bool:
-        return self.kind in (PARAM, LOCAL_DEF)
-
-    @property
     def is_function(self) -> bool:
         return self.kind in (LOCAL_DEF, TOP_DEF) and self.lam is not None
 
@@ -331,9 +388,14 @@ def walk(node: Node):
     if isinstance(node, Block):
         for d in node.defs:
             yield from walk(d.value)
+        for d in getattr(node, "data_decls", ()):
+            yield from walk(d)
         yield from walk(node.body)
     elif isinstance(node, Def):
         yield from walk(node.value)
+    elif isinstance(node, DataCtor):
+        for a in node.args:
+            yield from walk(a)
     elif isinstance(node, Lam):
         yield from walk(node.body)
     elif isinstance(node, App):

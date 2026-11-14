@@ -1,0 +1,2 @@
+﻿xs → (arrayf-pmap (λ i: Int. (* (sin (int->float i)) (sin (int->float i)))) 1000)
+[(arrayf-length xs), (float->int (* 1000.0 (arrayf-get xs 10))), (float->int (* 1000000.0 (arrayf-get xs 999)))]

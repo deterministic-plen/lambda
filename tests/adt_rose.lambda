@@ -1,0 +1,12 @@
+﻿data Rose = Rose (value: Int, children: [Rose])
+
+sum-list → (λcs: [Rose].
+  if (empty? cs) then 0 else (+ (sum (head cs)) (sum-list (tail cs))))
+
+sum → (λr: Rose.
+  match r with
+    Rose v cs: (+ v (sum-list cs)))
+
+leaf → (Rose 1 nil)
+r → (Rose 2 (cons leaf (cons leaf nil)))
+(sum r)

@@ -54,8 +54,15 @@ See [results.md](results.md) for the latest table. Headline:
   bigint ~512 ms; output exactly 208,988 digits and matches.
 * Bigint compute-only: Lambda ~100 ms, Python ~36 ms, gmpy2/GMP ~2.8 ms
   (Lambda is ~2.8x Python and ~36x GMP).
-* unboxed product/sum ADT loop: Lambda ~1.06x C/C++/Rust; identical checksum,
-  zero allocations.
+* unboxed product/sum ADT loop: Lambda ~1.11x C; identical checksum, zero
+  allocations.
+* generated recursive ADT arena (1,048,576-node tree, 10 traversals):
+  Lambda ~1.9–2.4x C, ~1.2–2.0x C++, ~1.6x Rust across runs. The <=2x-C
+  target is marginal and not consistently met. It is generated code from
+  `data Tree = Leaf | Node (...)`, not the old explicit-stack prototype; see
+  `adt_recursive_results.md`.
+* old explicit-stack arena prototype: ~6x C. Kept only as a historical
+  baseline; it is superseded by the generated arena benchmark.
 
 The product/sum benchmark is separate:
 
@@ -66,6 +73,35 @@ python bench/run_adt_bench.py
 It builds [adt_bench.c](adt_bench.c), [adt_bench.cpp](adt_bench.cpp),
 [adt_bench.rs](adt_bench.rs) and [adt_bench.lambda](adt_bench.lambda), verifies
 the checksum, and writes `bench/adt_results.md` / `.json`.
+
+The generated recursive-ADT arena benchmark is separate:
+
+```powershell
+python bench/run_adt_tree_bench.py
+```
+
+```powershell
+python bench/run_adt_recursive_bench.py
+```
+
+It builds a 1,048,576-node recursive `data` tree through the generated arena
+backend and traverses it ten times. The Lambda program is
+`bench/adt_recursive_bench.lambda`; the native implementations use equivalent
+node arrays. Results are in `bench/adt_recursive_results.md` / `.json`.
+
+The older explicit-stack prototype (`adt_tree_bench.*`, `run_adt_tree_bench.py`)
+is retained as a historical baseline only; it measures ~6x C. The generated
+arena path is the performance gate.
+
+The type-algebra prototype is compile-time-only:
+
+```powershell
+python bench/type_algebra_bench.py
+```
+
+Current rate is roughly 3.3 microseconds per parse+normalize+layout iteration
+on the reference machine; this has no runtime cost and is tracked separately
+from generated ADT code.
 
 The sieve gap dropped sharply after adding the `p >= 64` fast path: such a
 prime can mark at most one bit in a 64-bit block, so Lambda no longer calls the

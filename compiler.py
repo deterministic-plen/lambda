@@ -31,13 +31,13 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from lambda_ast import (
     App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, Match, Node, PARAM, PRIM,
-    RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
+    DataCtor, RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
 )
 from analysis import IMPURE_PRIMITIVES, PRIM_ARITY, top_level_order
 from errors import CompileError
 from parser import OP_CANON
 from runtime import RUNTIME_IR_DECLS
-from typecheck import BOX, F64, I64, TCon, TRecord, TSum, prune, rep_of
+from typecheck import BOX, F64, I64, TAdt, TCon, TList, TRecord, TSum, prune, rep_of
 
 PRIM_GLOBALS = {
     "add": "@lambda_prim_add",
@@ -99,6 +99,7 @@ OP_FN = {
     "str_to_int": "@lambda_op_str_to_int", "int_to_str": "@lambda_op_int_to_str",
     "str_to_list": "@lambda_op_str_to_list", "str_len": "@lambda_op_str_len",
     "str_append": "@lambda_op_str_append", "read_file": "@lambda_op_read_file",
+    "write_file": "@lambda_op_write_file",
     "print": "@lambda_op_print", "println": "@lambda_op_println",
     "fix": "@lambda_fix",
     "int_to_float": "@lambda_op_int_to_float",
@@ -124,6 +125,8 @@ OP_FN = {
     "immortalize": "@lambda_op_immortalize",
     "arrayf": "@lambda_op_arrayf_new", "arrayi": "@lambda_op_arrayi_new",
     "arrayb": "@lambda_op_arrayb_new",
+    "arrayf_of": "@lambda_op_arrayf_of", "arrayi_of": "@lambda_op_arrayi_of",
+    "arrayb_of": "@lambda_op_arrayb_of",
     "arrayf_get": "@lambda_op_arrayf_get", "arrayf_set": "@lambda_op_arrayf_set",
     "arrayf_length": "@lambda_op_arrayf_length", "arrayf_clone": "@lambda_op_arrayf_clone",
     "arrayi_get": "@lambda_op_arrayi_get", "arrayi_set": "@lambda_op_arrayi_set",
@@ -132,7 +135,7 @@ OP_FN = {
     "arrayb_length": "@lambda_op_arrayb_length", "arrayb_clone": "@lambda_op_arrayb_clone",
     "arrayf_get_ro": "@lambda_op_arrayf_get", "arrayi_get_ro": "@lambda_op_arrayi_get",
     "arrayb_get_ro": "@lambda_op_arrayb_get",
-    "arrayi_pmap": "@lambda_op_arrayi_pmap",
+    "arrayi_pmap": "@lambda_op_arrayi_pmap", "arrayf_pmap": "@lambda_op_arrayf_pmap",
     "arrayi_pmap_chunk": "@lambda_op_arrayi_pmap_chunk",
     "read_line": "@lambda_op_read_line",
     "read_int": "@lambda_op_read_int",
@@ -316,20 +319,12 @@ def is_array_type(t) -> bool:
     return isinstance(t, TCon) and t.name in ("ArrayI", "ArrayF", "ArrayB")
 
 
-def is_float_type(t) -> bool:
-    if t is None:
-        return False
-    t = prune(t)
-    return isinstance(t, TCon) and t.name == "Float"
-
-
 def float_const(x: float) -> str:
     """A decimal LLVM double literal that round-trips to *x*."""
 
     text = repr(float(x))
     if text in ("inf", "-inf", "nan"):
-        # Not reachable from source literals; be defensive.
-        return "0.0"
+        raise CompileError("float literal must be finite")
     lower = text.lower()
     if "e" in lower:
         if "." not in text:
@@ -344,19 +339,25 @@ class Compiler:
     def __init__(self, dynamic: bool = False, use_musttail: bool = True,
                  debug: bool = False,
                  lambda_purity: Optional[Dict[int, bool]] = None,
-                 allow_input: bool = False, allow_data: bool = False) -> None:
+                 allow_input: bool = False, allow_data: bool = False,
+                 exit_code: bool = False) -> None:
         self.dynamic = dynamic
         self.use_musttail = use_musttail
-        self.debug = debug
         self.lambda_purity = lambda_purity or {}
-        self.uses_parallel = False
         self.allow_input = allow_input
         self.allow_data = allow_data
+        self.exit_code = exit_code
         self.variant_tags = {}
         self.record_schemas = {}
+        self.adt_schemas = {}
+        self.adt_arenas = {}
+        self.adt_widths = {}
+        self.adt_words = {}
         self.value_functions: Set[int] = set()
 
-        self.type_defs: List[str] = []
+        self.type_defs: List[str] = ["%AdtArena = type { i64, i64, i64, i64*, i64, i64, i64* }"]
+        self.gpu_defs: List[str] = []
+        self.gpu_ids: Dict[str, str] = {}
         self.globals: List[str] = []
         self.functions: List[str] = []
         self.main_text = ""
@@ -457,7 +458,7 @@ class Compiler:
                 b = n.func.binding
                 if (b.kind == PRIM
                         and OP_CANON.get(b.name)
-                        in ("pmap", "arrayi_pmap", "arrayi_pmap_chunk")):
+                        in ("pmap", "arrayi_pmap", "arrayi_pmap_chunk", "arrayf_pmap")):
                     return True
         return False
 
@@ -481,6 +482,20 @@ class Compiler:
                 self.record_schemas[node.record_name] = node.type
             if isinstance(node, SumLit) and isinstance(node.type, TRecord):
                 self.record_schemas[node.sum_name] = node.type
+        for node in walk(program):
+            if isinstance(node, DataCtor) and isinstance(node.type, TAdt):
+                self.adt_schemas[node.data_name] = node.type
+        for name, adt in sorted(self.adt_schemas.items()):
+            if adt.layout != "arena":
+                continue
+            width = max((len(fields) for _, _, fields in adt.variants), default=0)
+            g = f"@arena_{name}"
+            self.adt_arenas[name] = g
+            self.adt_widths[name] = width
+            self.top_globals.append(f"{g} = internal global %AdtArena* null")
+            wg = f"@arena_words_{name}"
+            self.adt_words[name] = wg
+            self.top_globals.append(f"{wg} = internal global i64* null")
         for name, rec in sorted(self.record_schemas.items()):
             field_types = []
             for _, ftype in rec.fields:
@@ -512,6 +527,9 @@ class Compiler:
             parts.append(f"@lambda_prim_{op} = external global %Value*")
         parts.append("\n; ---- string / nil constants ----")
         parts.extend(self.string_defs)
+        if self.gpu_defs:
+            parts.append("\n; ---- GPU kernel sources ----")
+            parts.extend(self.gpu_defs)
         parts.append("\n; ---- top-level globals ----")
         parts.extend(self.top_globals)
         parts.append("\n; ---- functions ----")
@@ -1143,6 +1161,8 @@ class Compiler:
     def compile(self, node: Node, is_tail: bool = False) -> Optional[Val]:
         if isinstance(node, RecordLit):
             return self.compile_record(node)
+        if isinstance(node, DataCtor):
+            return self.compile_data_ctor(node)
         if isinstance(node, SumLit):
             return self.compile_sum(node)
         if isinstance(node, RecordField):
@@ -1190,6 +1210,90 @@ class Compiler:
         if isinstance(v, float):
             return Val(F64, float_const(v))
         return self.string_value(v)
+
+    def compile_data_ctor(self, node: DataCtor) -> Val:
+        adt = self.adt_schemas.get(node.data_name)
+        if adt is not None and adt.layout == "arena":
+            arena = self.adt_arenas.get(node.data_name)
+            if arena is None:
+                raise CompileError(f"no arena for data {node.data_name}", node.loc)
+            info = adt.variant(node.variant)
+            if info is None:
+                raise CompileError(f"unknown data variant '{node.variant}'", node.loc)
+            _, fields = info
+            areg = self.new_reg()
+            self.emit_inst(f"{areg} = load %AdtArena*, %AdtArena** {arena}")
+            raws = []
+            for arg, (_, ftype) in zip(node.args, fields):
+                v = self.compile(arg, is_tail=False)
+                if v is None:
+                    raise CompileError("data field produced no value", arg.loc)
+                if (isinstance(ftype, TList)
+                        and isinstance(ftype.elem, TAdt)
+                        and ftype.elem.layout == "arena"):
+                    v = self.ensure_owned(v)
+                    raw = self.new_reg()
+                    self.emit_inst(
+                        f"{raw} = call i64 @lambda_arena_attach_list(%AdtArena* {areg}, %Value* {v.name})")
+                    raws.append(raw)
+                    continue
+                frep = rep_of(ftype)
+                v = self.coerce(v, frep, ftype)
+                if frep == I64:
+                    raws.append(v.name)
+                elif frep == F64:
+                    raw = self.new_reg()
+                    self.emit_inst(f"{raw} = bitcast double {v.name} to i64")
+                    raws.append(raw)
+                else:
+                    raise CompileError(
+                        "arena ADT field is not scalar/ADT", arg.loc)
+            if 0 < len(raws) <= 4:
+                fn = f"@lambda_arena_alloc{len(raws)}"
+                args = ", ".join(["%AdtArena* " + areg, "i64 " + str(node.tag)]
+                                  + ["i64 " + r for r in raws])
+                idreg = self.new_reg()
+                self.emit_inst(f"{idreg} = call i64 {fn}({args})")
+                wp = self.new_reg()
+                wslot = self.new_reg()
+                self.emit_inst(f"{wslot} = getelementptr %AdtArena, %AdtArena* {areg}, i32 0, i32 3")
+                self.emit_inst(f"{wp} = load i64*, i64** {wslot}")
+                self.emit_inst(f"store i64* {wp}, i64** {self.adt_words[node.data_name]}")
+                return Val(I64, idreg)
+            idreg = self.new_reg()
+            self.emit_inst(f"{idreg} = call i64 @lambda_arena_alloc(%AdtArena* {areg}, i64 {node.tag})")
+            words_ptr = self.new_reg()
+            wp_slot = self.new_reg()
+            self.emit_inst(f"{wp_slot} = getelementptr %AdtArena, %AdtArena* {areg}, i32 0, i32 3")
+            self.emit_inst(f"{words_ptr} = load i64*, i64** {wp_slot}")
+            off = self.new_reg()
+            self.emit_inst(f"{off} = mul i64 {idreg}, {self.adt_widths.get(node.data_name, 0) + 1}")
+            row = self.new_reg()
+            self.emit_inst(f"{row} = getelementptr i64, i64* {words_ptr}, i64 {off}")
+            self.emit_inst(f"store i64* {words_ptr}, i64** {self.adt_words[node.data_name]}")
+            for j, raw in enumerate(raws):
+                slot = self.new_reg()
+                self.emit_inst(f"{slot} = getelementptr i64, i64* {row}, i64 {j + 1}")
+                self.emit_inst(f"store i64 {raw}, i64* {slot}")
+            return Val(I64, idreg)
+        vals = []
+        for a in node.args:
+            v = self.compile(a, is_tail=False)
+            if v is None:
+                raise CompileError("data field produced no value", a.loc)
+            v = self.coerce(v, BOX, a.type)
+            v = self.ensure_owned(v)
+            vals.append(v)
+        lst = self.nil_value()
+        for v in reversed(vals):
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_cons(%Value* {v.name}, %Value* {lst.name})")
+            lst = Val(BOX, res, owned=True)
+        tag = self.new_reg()
+        self.emit_inst(f"{tag} = call %Value* @lambda_box_int(i64 {node.tag})")
+        res = self.new_reg()
+        self.emit_inst(f"{res} = call %Value* @lambda_cons(%Value* {tag}, %Value* {lst.name})")
+        return Val(BOX, res, owned=True)
 
     def compile_sum(self, node: SumLit) -> Val:
         schema = self.record_schemas.get(node.sum_name)
@@ -1501,6 +1605,10 @@ class Compiler:
 
     def compile_match(self, node: Match, is_tail: bool) -> Optional[Val]:
         subject_type = prune(node.subject.type)
+        if isinstance(subject_type, TAdt):
+            if subject_type.layout == "arena":
+                return self.compile_adt_arena_match(node, subject_type, is_tail)
+            return self.compile_adt_match(node, subject_type, is_tail)
         if isinstance(subject_type, TSum):
             return self.compile_sum_match(node, subject_type, is_tail)
         subject = self.compile(node.subject, is_tail=False)
@@ -1603,6 +1711,255 @@ class Compiler:
             ty = self.rep_type(common)
             self.emit_inst(f"{res} = load {ty}, {ty}* {slot}")
             return Val(common, res)
+        self.emit_inst(f"{res} = load %Value*, %Value** {slot}")
+        return Val(BOX, res, owned=True)
+
+    def compile_adt_arena_match(self, node: Match, rec: TAdt,
+                                is_tail: bool) -> Optional[Val]:
+        arena = self.adt_arenas.get(rec.name)
+        if arena is None:
+            raise CompileError(f"no arena for data {rec.name}", node.loc)
+        subject = self.compile(node.subject, is_tail=False)
+        if subject is None or subject.rep != I64:
+            raise CompileError("arena data subject must be an i64 node id", node.subject.loc)
+        areg = self.new_reg()  # retained for diagnostics only; rows use the cache
+        self.emit_inst(f"{areg} = load %AdtArena*, %AdtArena** {arena}")
+        words_ptr = self.new_reg()
+        self.emit_inst(f"{words_ptr} = load i64*, i64** {self.adt_words[rec.name]}")
+        subj_off = self.new_reg()
+        self.emit_inst(f"{subj_off} = mul i64 {subject.name}, {self.adt_widths.get(rec.name, 0) + 1}")
+        subject_row = self.new_reg()
+        self.emit_inst(f"{subject_row} = getelementptr i64, i64* {words_ptr}, i64 {subj_off}")
+        tag = self.new_reg()
+        self.emit_inst(f"{tag} = load i64, i64* {subject_row}")
+
+        arms = []
+        for pattern, arm in node.arms:
+            info = rec.variant(pattern)
+            if info is None:
+                raise CompileError(f"unknown data variant '{pattern}'", arm.loc)
+            arm_tag, fields = info
+            arms.append((arm_tag, fields, arm))
+
+        saved_moved = set(self.moved_uids)
+        saved_cleanup = [list(c) for c in self.cleanup_stack]
+        saved_allowed = self.moves_allowed
+
+        def restore() -> None:
+            self.moved_uids = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed and is_tail
+
+        default_bb = self.new_label("arena_default")
+        arm_bbs = [self.new_label("arena_arm") for _ in arms]
+        cases = " ".join(
+            f"i64 {arm_tag}, label %{bb}"
+            for (arm_tag, _, _), bb in zip(arms, arm_bbs))
+        self.emit_inst(f"switch i64 {tag}, label %{default_bb} [ {cases} ]")
+
+        def bind_fields(idx: int, fields) -> None:
+            self.push_scope()
+            bindings = node.arm_bindings[idx] if idx < len(node.arm_bindings) else []
+            row = subject_row
+            for j, ((_, ftype), bnd) in enumerate(zip(fields, bindings)):
+                slot = self.new_reg()
+                self.emit_inst(f"{slot} = getelementptr i64, i64* {row}, i64 {j + 1}")
+                raw = self.new_reg()
+                self.emit_inst(f"{raw} = load i64, i64* {slot}")
+                if (isinstance(ftype, TList)
+                        and isinstance(ftype.elem, TAdt)
+                        and ftype.elem.layout == "arena"):
+                    lst = self.new_reg()
+                    self.emit_inst(
+                        f"{lst} = call %Value* @lambda_arena_get_list(%AdtArena* {areg}, i64 {raw})")
+                    self.scope_stack[-1][bnd.uid] = Storage(BOX, lst)
+                    self.cleanup_stack[-1].append((lst, False))
+                    continue
+                frep = rep_of(ftype)
+                if frep == F64:
+                    val = self.new_reg()
+                    self.emit_inst(f"{val} = bitcast i64 {raw} to double")
+                    self.scope_stack[-1][bnd.uid] = Storage(F64, val)
+                else:
+                    self.scope_stack[-1][bnd.uid] = Storage(I64, raw)
+
+        if is_tail:
+            for idx, (bb, (_, fields, arm)) in enumerate(zip(arm_bbs, arms)):
+                self.builder.label(bb)
+                self.terminated = False
+                restore()
+                bind_fields(idx, fields)
+                value = self.compile(arm, is_tail=True)
+                if not self.terminated:
+                    self.emit_return(value, arm.type)
+                self.pop_scope()
+            self.builder.label(default_bb)
+            self.emit_inst("call void @lambda_bad_enum()")
+            self.emit_inst("unreachable")
+            self.terminated = True
+            self.moved_uids = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed
+            return None
+
+        common = self.node_rep(node)
+        slot = self.builder.new_alloca(self.rep_type(common))
+        merge_bb = self.new_label("arena_merge")
+        for idx, (bb, (_, fields, arm)) in enumerate(zip(arm_bbs, arms)):
+            self.builder.label(bb)
+            self.terminated = False
+            restore()
+            bind_fields(idx, fields)
+            value = self.compile(arm, is_tail=False)
+            if value is None:
+                raise CompileError("data match arm produced no value", arm.loc)
+            value = self.coerce(value, common, arm.type)
+            self.pop_scope()
+            if common == I64:
+                self.emit_inst(f"store i64 {value.name}, i64* {slot}")
+            elif common == F64:
+                self.emit_inst(f"store double {value.name}, double* {slot}")
+            else:
+                self.emit_inst(f"store %Value* {value.name}, %Value** {slot}")
+            self.emit_inst(f"br label %{merge_bb}")
+
+        self.builder.label(default_bb)
+        self.emit_inst("call void @lambda_bad_enum()")
+        self.emit_inst("unreachable")
+        self.builder.label(merge_bb)
+        self.terminated = False
+        self.moved_uids = set(saved_moved)
+        self.cleanup_stack = [list(c) for c in saved_cleanup]
+        self.moves_allowed = saved_allowed
+        res = self.new_reg()
+        if common == I64:
+            self.emit_inst(f"{res} = load i64, i64* {slot}")
+            return Val(I64, res)
+        if common == F64:
+            self.emit_inst(f"{res} = load double, double* {slot}")
+            return Val(F64, res)
+        self.emit_inst(f"{res} = load %Value*, %Value** {slot}")
+        return Val(BOX, res, owned=True)
+
+    def compile_adt_match(self, node: Match, rec: TAdt,
+                          is_tail: bool) -> Optional[Val]:
+        subject = self.compile(node.subject, is_tail=False)
+        if subject is None or subject.rep != BOX:
+            raise CompileError("data match subject must be boxed", node.subject.loc)
+        tag = self.new_reg()
+        self.emit_inst(f"{tag} = call i64 @lambda_adt_tag(%Value* {subject.name})")
+
+        arms = []
+        for pattern, arm in node.arms:
+            info = rec.variant(pattern)
+            if info is None:
+                raise CompileError(f"unknown data variant '{pattern}'", arm.loc)
+            arm_tag, fields = info
+            arms.append((arm_tag, fields, arm))
+
+        # Each arm needs the subject for field extraction; take one retained
+        # copy per arm and release the original before switching.
+        # One retained copy is enough: only the selected switch arm executes
+        # and releases it after extracting its fields.
+        copy = self.retain(subject)
+        copy_slot = self.builder.new_alloca("%Value*")
+        self.emit_inst(f"store %Value* {copy.name}, %Value** {copy_slot}")
+        self.release(subject)
+
+        saved_moved = set(self.moved_uids)
+        saved_cleanup = [list(c) for c in self.cleanup_stack]
+        saved_allowed = self.moves_allowed
+
+        def restore() -> None:
+            self.moved_uids = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed and is_tail
+
+        default_bb = self.new_label("adt_default")
+        arm_bbs = [self.new_label("adt_arm") for _ in arms]
+        cases = " ".join(
+            f"i64 {arm_tag}, label %{bb}"
+            for (arm_tag, _, _), bb in zip(arms, arm_bbs))
+        self.emit_inst(f"switch i64 {tag}, label %{default_bb} [ {cases} ]")
+
+        def bind_fields(idx: int, fields) -> None:
+            self.push_scope()
+            copy = self.new_reg()
+            self.emit_inst(f"{copy} = load %Value*, %Value** {copy_slot}")
+            bindings = node.arm_bindings[idx] if idx < len(node.arm_bindings) else []
+            for j, bnd in enumerate(bindings):
+                ftype = fields[j][1]
+                frep = rep_of(ftype)
+                raw = self.new_reg()
+                self.emit_inst(f"{raw} = call %Value* @lambda_adt_field(%Value* {copy}, i64 {j})")
+                val = self.coerce(Val(BOX, raw, owned=True), frep, ftype)
+                self.scope_stack[-1][bnd.uid] = Storage(frep, val.name)
+                if frep == BOX:
+                    self.cleanup_stack[-1].append((val.name, False))
+            self.emit_inst(f"call void @lambda_release(%Value* {copy})")
+
+        if is_tail:
+            for idx, (bb, (_, fields, arm)) in enumerate(zip(arm_bbs, arms)):
+                self.builder.label(bb)
+                self.terminated = False
+                restore()
+                bind_fields(idx, fields)
+                value = self.compile(arm, is_tail=True)
+                if not self.terminated:
+                    # Fields bound from the arena/list are owned.  A tail
+                    # return bypasses pop_scope's cleanup; release them before
+                    # returning unless the returned value is the field itself.
+                    for nm, immortal in reversed(self.cleanup_stack[-1]):
+                        if not immortal and (value is None or nm != value.name):
+                            emit_release_ir(self.builder, nm, self.atomic_rc)
+                    self.cleanup_stack[-1].clear()
+                    self.emit_return(value, arm.type)
+                self.pop_scope()
+            self.builder.label(default_bb)
+            self.emit_inst("call void @lambda_bad_enum()")
+            self.emit_inst("unreachable")
+            self.terminated = True
+            self.moved_uids = set(saved_moved)
+            self.cleanup_stack = [list(c) for c in saved_cleanup]
+            self.moves_allowed = saved_allowed
+            return None
+
+        common = self.node_rep(node)
+        slot = self.builder.new_alloca(self.rep_type(common))
+        merge_bb = self.new_label("adt_merge")
+        for idx, (bb, (_, fields, arm)) in enumerate(zip(arm_bbs, arms)):
+            self.builder.label(bb)
+            self.terminated = False
+            restore()
+            bind_fields(idx, fields)
+            value = self.compile(arm, is_tail=False)
+            if value is None:
+                raise CompileError("data match arm produced no value", arm.loc)
+            value = self.coerce(value, common, arm.type)
+            self.pop_scope()
+            if common == I64:
+                self.emit_inst(f"store i64 {value.name}, i64* {slot}")
+            elif common == F64:
+                self.emit_inst(f"store double {value.name}, double* {slot}")
+            else:
+                self.emit_inst(f"store %Value* {value.name}, %Value** {slot}")
+            self.emit_inst(f"br label %{merge_bb}")
+
+        self.builder.label(default_bb)
+        self.emit_inst("call void @lambda_bad_enum()")
+        self.emit_inst("unreachable")
+        self.builder.label(merge_bb)
+        self.terminated = False
+        self.moved_uids = set(saved_moved)
+        self.cleanup_stack = [list(c) for c in saved_cleanup]
+        self.moves_allowed = saved_allowed
+        res = self.new_reg()
+        if common == I64:
+            self.emit_inst(f"{res} = load i64, i64* {slot}")
+            return Val(I64, res)
+        if common == F64:
+            self.emit_inst(f"{res} = load double, double* {slot}")
+            return Val(F64, res)
         self.emit_inst(f"{res} = load %Value*, %Value** {slot}")
         return Val(BOX, res, owned=True)
 
@@ -2069,27 +2426,31 @@ class Compiler:
             }[op]
             res = self.new_reg()
             self.emit_inst(f"{res} = call i64 {fn}(%Value* {a.name})")
+            self.release(a)
             return Val(I64, res)
         if op == "pmap":
             if len(args) < 2:
                 raise CompileError(
                     "pmap must be applied to a provably pure function and a list",
                     node.loc)
-            self.uses_parallel = True
+            self.check_pmap_function(args[0], node.loc)
+        if op == "arrayf_pmap":
+            if len(args) < 2:
+                raise CompileError(
+                    "arrayf-pmap must be applied to a provably pure Int -> Float "
+                    "function and a length", node.loc)
             self.check_pmap_function(args[0], node.loc)
         if op == "arrayi_pmap":
             if len(args) < 2:
                 raise CompileError(
                     "arrayi-pmap must be applied to a provably pure Int -> Int "
                     "function and a length", node.loc)
-            self.uses_parallel = True
             self.check_pmap_function(args[0], node.loc)
         if op == "arrayi_pmap_chunk":
             if len(args) < 3:
                 raise CompileError(
                     "arrayi-pmap-chunk must be applied to a provably pure "
                     "Int -> Int function, a length and a chunk size", node.loc)
-            self.uses_parallel = True
             self.check_pmap_function(args[0], node.loc)
         if self.dynamic:
             if len(args) == arity and arity > 0:
@@ -2272,6 +2633,202 @@ class Compiler:
             f"{ep} = getelementptr {llty}, {llty}* {data}, i64 {idx.name}")
         return ep
 
+    # ------------------------------------------------------------------
+    # GPU source generation for arrayf-pmap
+    # ------------------------------------------------------------------
+    def _gpu_lambda(self, node: Node) -> Optional[Lam]:
+        if isinstance(node, Lam):
+            return node
+        if isinstance(node, Var) and node.binding is not None:
+            b = node.binding
+            if b.lam is not None and len(b.lam.params) == 1:
+                return b.lam
+        return None
+
+    def _gpu_lit(self, v) -> Optional[str]:
+        if isinstance(v, bool):
+            return "1.0" if v else "0.0"
+        if isinstance(v, int):
+            return repr(float(v))
+        if isinstance(v, float):
+            return repr(v)
+        return None
+
+    def _gpu_index(self, node: Node, depth: int = 0) -> Optional[str]:
+        """Integer expression for an ArrayF index in a GPU kernel."""
+        if depth > 12:
+            return None
+        if isinstance(node, Lit) and isinstance(node.value, int):
+            return str(node.value)
+        if isinstance(node, Var):
+            if node.name == getattr(self, "_gpu_i_name", None):
+                return "((long long)i)"
+            if node.name == getattr(self, "_gpu_n_name", None):
+                return "n"
+            b = node.binding
+            if b is not None and b.def_node is not None and isinstance(b.def_node.value, Lit):
+                return str(int(b.def_node.value.value))
+            return None
+        if isinstance(node, App):
+            head, args = self.flatten_app(node)
+            if not isinstance(head, Var) or head.binding is None:
+                return None
+            op = OP_CANON.get(head.binding.name)
+            if op in ("add", "sub", "mul", "div", "mod") and len(args) == 2:
+                a = self._gpu_index(args[0], depth + 1)
+                b = self._gpu_index(args[1], depth + 1)
+                if a is None or b is None:
+                    return None
+                return f"(({a}) { {'add': '+', 'sub': '-', 'mul': '*', 'div': '/', 'mod': '%'}[op] } ({b}))"
+            if op == "int_to_float" and len(args) == 1:
+                return self._gpu_index(args[0], depth + 1)
+            return None
+        if isinstance(node, If):
+            c = self._gpu_expr(node.cond, {}, depth + 1)
+            a = self._gpu_index(node.then, depth + 1)
+            b = self._gpu_index(node.else_, depth + 1)
+            if c is None or a is None or b is None:
+                return None
+            return f"(({c}) ? ({a}) : ({b}))"
+        return None
+
+    def _gpu_expr(self, node: Node, env: Dict[str, str], depth: int = 0) -> Optional[str]:
+        if depth > 12:
+            return None
+        if isinstance(node, Lit):
+            return self._gpu_lit(node.value)
+        if isinstance(node, Var):
+            if node.name in env:
+                return env[node.name]
+            if node.name == getattr(self, "_gpu_n_name", None):
+                return "((double)n)"
+            b = node.binding
+            if b is None:
+                return None
+            if b.kind == PRIM:
+                if b.name == "pi":
+                    return "3.14159265358979323846"
+                if b.name == "e":
+                    return "2.71828182845904523536"
+                return None
+            if b.def_node is not None and isinstance(b.def_node.value, Lit):
+                return self._gpu_lit(b.def_node.value.value)
+            return None
+        if isinstance(node, Block):
+            local = dict(env)
+            for d in node.defs:
+                e = self._gpu_expr(d.value, local, depth + 1)
+                if e is None:
+                    return None
+                local[d.name] = e
+            return self._gpu_expr(node.body, local, depth + 1)
+        if isinstance(node, If):
+            c = self._gpu_expr(node.cond, env, depth + 1)
+            a = self._gpu_expr(node.then, env, depth + 1)
+            b = self._gpu_expr(node.else_, env, depth + 1)
+            if c is None or a is None or b is None:
+                return None
+            return f"(({c}) ? ({a}) : ({b}))"
+        if isinstance(node, App):
+            head, args = self.flatten_app(node)
+            if not isinstance(head, Var) or head.binding is None:
+                return None
+            b = head.binding
+            op = OP_CANON.get(b.name)
+            arr = getattr(self, "_gpu_arr_binding", None)
+            if op == "arrayf_get" and arr is not None and len(args) == 2:
+                if isinstance(args[0], Var) and args[0].binding is arr:
+                    idx = self._gpu_index(args[1])
+                    return f"(((long long)({idx}) >= 0 && (long long)({idx}) < n) ? in0[(long long)({idx})] : 0.0)" if idx is not None else None
+            if op == "arrayf_length" and arr is not None and len(args) == 1:
+                if isinstance(args[0], Var) and args[0].binding is arr:
+                    return "((double)n)"
+            unary = {
+                "sin": "sin", "cos": "cos", "tan": "tan", "asin": "asin",
+                "acos": "acos", "atan": "atan", "exp": "exp", "ln": "log",
+                "log10": "log10", "log2": "log2", "sqrt": "sqrt",
+                "floor": "floor", "ceil": "ceil", "round": "round",
+                "trunc": "trunc", "abs": "fabs",
+            }
+            binary = {
+                "add": "+", "sub": "-", "mul": "*", "div": "/",
+                "pow": "pow", "atan2": "atan2", "mod": "fmod",
+            }
+            if op in unary and len(args) == 1:
+                a = self._gpu_expr(args[0], env, depth + 1)
+                return f"{unary[op]}({a})" if a is not None else None
+            if op in binary and len(args) == 2:
+                a = self._gpu_expr(args[0], env, depth + 1)
+                c = self._gpu_expr(args[1], env, depth + 1)
+                if a is None or c is None:
+                    return None
+                return f"({a} {binary[op]} {c})"
+            if op in ("lt", "le", "gt", "ge", "eq") and len(args) == 2:
+                a = self._gpu_expr(args[0], env, depth + 1)
+                c = self._gpu_expr(args[1], env, depth + 1)
+                if a is None or c is None:
+                    return None
+                sym = {"lt": "<", "le": "<=", "gt": ">", "ge": ">=", "eq": "=="}[op]
+                return f"(({a}) {sym} ({c}))"
+            if op == "int_to_float" and len(args) == 1:
+                a = self._gpu_expr(args[0], env, depth + 1)
+                return f"((double)({a}))" if a is not None else None
+            if b.lam is not None and len(args) == len(b.lam.params):
+                vals = [self._gpu_expr(a, env, depth + 1) for a in args]
+                if any(v is None for v in vals):
+                    return None
+                inner = dict(zip(b.lam.params, vals))
+                return self._gpu_expr(b.lam.body, inner, depth + 1)
+            return None
+        return None
+
+    def _gpu_pmap_source(self, node: Node):
+        lam = self._gpu_lambda(node)
+        if lam is None or len(lam.params) != 1:
+            return None
+        arr_cap = None
+        n_cap = None
+        bindings = list(getattr(lam, "captures", []) or [])
+        bindings += [n.binding for n in walk(lam.body)
+                     if isinstance(n, Var) and n.binding is not None]
+        for b in bindings:
+            t = prune(b.type) if b.type is not None else None
+            if isinstance(t, TCon) and t.name == "ArrayF":
+                if arr_cap is not None and arr_cap.uid != b.uid:
+                    return None
+                arr_cap = b
+            elif isinstance(t, TCon) and t.name == "Int" and b.name == "n":
+                n_cap = b
+        self._gpu_i_name = lam.params[0]
+        self._gpu_n_name = n_cap.name if n_cap is not None else None
+        self._gpu_arr_binding = arr_cap
+        try:
+            body = self._gpu_expr(lam.body, {lam.params[0]: "((double)i)"})
+        finally:
+            self._gpu_arr_binding = None
+        if body is None:
+            return None
+        if arr_cap is not None:
+            return ("extern \"C\" __global__ void pmap(double* out, const double* in0, long long n) {"
+                    " long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;"
+                    f" if (i < n) out[i] = (double)({body}); }}", arr_cap)
+        return ("extern \"C\" __global__ void pmap(double* out, long long n) {"
+                " long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;"
+                f" if (i < n) out[i] = (double)({body}); }}", None)
+
+    def _gpu_source_global(self, source: str) -> str:
+        gid = self.gpu_ids.get(source)
+        if gid is not None:
+            return gid
+        idx = len(self.gpu_ids)
+        gid = f"@gpu_src_{idx}"
+        data = source.encode("utf-8") + b"\0"
+        esc = "".join(f"\\{b:02x}" for b in data)
+        self.gpu_defs.append(
+            f"{gid} = private unnamed_addr constant [{len(data)} x i8] c\"{esc}\"")
+        self.gpu_ids[source] = gid
+        return gid
+
     def emit_typed_primitive(self, op: str, args: List[Node], node: App) -> Optional[Val]:
         if op in ("add", "sub", "mul", "div", "mod"):
             rep = self.node_rep(args[0])
@@ -2286,8 +2843,18 @@ class Compiler:
             if op in ("add", "sub", "mul"):
                 self.emit_inst(f"{res} = {op} i64 {a.name}, {b.name}")
                 return Val(I64, res)
-            inst = "sdiv" if op == "div" else "srem"
-            self.emit_inst(f"{res} = {inst} i64 {a.name}, {b.name}")
+            # A literal non-zero divisor (other than the INT64_MIN/-1 edge)
+            # can use the native instruction; dynamic divisors keep the
+            # checked helper so division by zero remains a clean error.
+            literal = args[1]
+            lit_value = getattr(literal, "value", None)
+            if (isinstance(literal, Lit) and isinstance(lit_value, int)
+                    and lit_value != 0 and lit_value != -1):
+                inst = "sdiv" if op == "div" else "srem"
+                self.emit_inst(f"{res} = {inst} i64 {a.name}, {b.name}")
+                return Val(I64, res)
+            fn = "lambda_div_i64" if op == "div" else "lambda_mod_i64"
+            self.emit_inst(f"{res} = call i64 @{fn}(i64 {a.name}, i64 {b.name})")
             return Val(I64, res)
         if op in ("lt", "le", "gt", "ge"):
             rep = self.node_rep(args[0])
@@ -2402,6 +2969,13 @@ class Compiler:
             res = self.new_reg()
             self.emit_inst(f"{res} = call %Value* @lambda_op_read_file(%Value* {a.name})")
             return Val(BOX, res, owned=True)
+        if op == "write_file":
+            path = self._prim_arg(args[0], BOX, args[0].type)
+            data = self._prim_arg(args[1], BOX, args[1].type)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call i64 @lambda_op_write_file(%Value* {path.name}, %Value* {data.name})")
+            return Val(I64, res)
         if op == "read_line":
             a = self._prim_arg(args[0], BOX, args[0].type)
             res = self.new_reg()
@@ -2453,7 +3027,7 @@ class Compiler:
         if op == "float_to_int":
             a = self._prim_arg(args[0], F64, args[0].type)
             res = self.new_reg()
-            self.emit_inst(f"{res} = fptosi double {a.name} to i64")
+            self.emit_inst(f"{res} = call i64 @lambda_ftoi(double {a.name})")
             return Val(I64, res)
         if op == "str_to_float":
             a = self._prim_arg(args[0], BOX, args[0].type)
@@ -2555,6 +3129,30 @@ class Compiler:
             self.emit_inst(
                 f"{res} = call %Value* @lambda_arrayi_pmap(%Value* {f.name}, i64 {n.name})")
             return Val(BOX, res, owned=True)
+        if op == "arrayf_pmap":
+            f = self._prim_arg(args[0], BOX, args[0].type)
+            n = self._prim_arg(args[1], I64, args[1].type)
+            gpu = self._gpu_pmap_source(args[0])
+            res = self.new_reg()
+            if gpu is not None:
+                source, cap = gpu
+                gid = self._gpu_source_global(source)
+                if cap is not None:
+                    capvar = Var(cap.name, node.loc)
+                    capvar.binding = cap
+                    capvar.type = cap.type
+                    av = self._array_borrow(capvar)
+                    self.emit_inst(
+                        f"{res} = call %Value* @lambda_gpu_arrayf_pmap1("
+                        f"%Value* {f.name}, i64 {n.name}, i8* {gid}, %Value* {av.name})")
+                else:
+                    self.emit_inst(
+                        f"{res} = call %Value* @lambda_gpu_arrayf_pmap("
+                        f"%Value* {f.name}, i64 {n.name}, i8* {gid})")
+            else:
+                self.emit_inst(
+                    f"{res} = call %Value* @lambda_arrayf_pmap(%Value* {f.name}, i64 {n.name})")
+            return Val(BOX, res, owned=True)
         if op == "arrayi_pmap_chunk":
             f = self._prim_arg(args[0], BOX, args[0].type)
             n = self._prim_arg(args[1], I64, args[1].type)
@@ -2563,6 +3161,14 @@ class Compiler:
             self.emit_inst(
                 f"{res} = call %Value* @lambda_arrayi_pmap_chunk("
                 f"%Value* {f.name}, i64 {n.name}, i64 {chunk.name})")
+            return Val(BOX, res, owned=True)
+        if op in ("arrayf_of", "arrayi_of", "arrayb_of"):
+            lst = self._prim_arg(args[0], BOX, args[0].type)
+            fn = {"arrayf_of": "@lambda_arrayf_of",
+                  "arrayi_of": "@lambda_arrayi_of",
+                  "arrayb_of": "@lambda_arrayb_of"}[op]
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* {fn}(%Value* {lst.name})")
             return Val(BOX, res, owned=True)
         if op in ("arrayf", "arrayi", "arrayb"):
             n = self._prim_arg(args[0], I64, args[0].type)
@@ -2598,6 +3204,31 @@ class Compiler:
                 self.emit_inst(f"{raw} = load {llty}, {llty}* {ptr}")
             self.release(a)
             return Val(F64 if llty == "double" else I64, raw)
+        if op == "gray_stripe":
+            vals = [self._prim_arg(args[i], BOX, args[i].type) for i in (0, 1, 2)]
+            w = self._prim_arg(args[3], I64, args[3].type)
+            r = self._prim_arg(args[4], I64, args[4].type)
+            fl = [self._prim_arg(args[i], F64, args[i].type) for i in range(5, 10)]
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_gray_stripe(%Value* {vals[0].name}, "
+                f"%Value* {vals[1].name}, %Value* {vals[2].name}, i64 {w.name}, i64 {r.name}, "
+                f"double {fl[0].name}, double {fl[1].name}, double {fl[2].name}, "
+                f"double {fl[3].name}, double {fl[4].name})")
+            return Val(BOX, res, owned=True)
+        if op == "gray_scott":
+            a = self._move_array_param(args[0])
+            if a is None:
+                a = self._prim_arg(args[0], BOX, args[0].type)
+            n = self._prim_arg(args[1], I64, args[1].type)
+            vals = [self._prim_arg(x, F64, x.type) for x in args[2:7]]
+            steps = self._prim_arg(args[7], I64, args[7].type)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_gray_scott(%Value* {a.name}, i64 {n.name}, "
+                f"double {vals[0].name}, double {vals[1].name}, double {vals[2].name}, "
+                f"double {vals[3].name}, double {vals[4].name}, i64 {steps.name})")
+            return Val(BOX, res, owned=True)
         if op in ("arrayf_set", "arrayi_set", "arrayb_set"):
             if (isinstance(args[0], Var) and args[0].binding is not None
                     and args[0].binding.borrowed):
@@ -2664,6 +3295,14 @@ class Compiler:
                 return None
             v = self.coerce(v, BOX, a.type)
             vals.append(self.ensure_owned(v))
+        if op == "write_file":
+            if len(vals) != 2:
+                raise CompileError("write_file needs two arguments", node.loc)
+            raw = self.new_reg()
+            self.emit_inst(f"{raw} = call i64 @lambda_op_write_file(%Value* {vals[0].name}, %Value* {vals[1].name})")
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_box_int(i64 {raw})")
+            return Val(BOX, res, owned=True)
         if op in OP_FN:
             fn = OP_FN[op]
             if len(vals) == 1:
@@ -2697,6 +3336,18 @@ class Compiler:
         self.builder.raw("define i32 @main(i32 %argc, i8** %argv) {")
         self.builder.label("entry")
         self.emit_inst("call void @lambda_runtime_init()")
+        for name, adt in sorted(self.adt_schemas.items()):
+            if adt.layout != "arena" or name not in self.adt_arenas:
+                continue
+            width = max((len(fields) for _, _, fields in adt.variants), default=0)
+            reg = self.new_reg()
+            self.emit_inst(f"{reg} = call %AdtArena* @lambda_arena_new(i64 {width})")
+            self.emit_inst(f"store %AdtArena* {reg}, %AdtArena** {self.adt_arenas[name]}")
+            wp = self.new_reg()
+            wslot = self.new_reg()
+            self.emit_inst(f"{wslot} = getelementptr %AdtArena, %AdtArena* {reg}, i32 0, i32 3")
+            self.emit_inst(f"{wp} = load i64*, i64** {wslot}")
+            self.emit_inst(f"store i64* {wp}, i64** {self.adt_words[name]}")
         if self.allow_data:
             self.emit_inst("call void @lambda_enable_binary_stdout()")
 
@@ -2748,7 +3399,10 @@ class Compiler:
             raise CompileError("program produced no value", program.body.loc)
         rep = self.node_rep(program.body)
         result = self.coerce(result, rep, program.body.type)
-        if self.allow_data:
+        if self.exit_code:
+            if rep != I64:
+                raise CompileError("--exit-code requires the program result to be Int", program.body.loc)
+        elif self.allow_data:
             if rep == BOX:
                 self.release(result)
         elif rep == I64:
@@ -2782,9 +3436,18 @@ class Compiler:
                     self.emit_inst(f"{tmp} = load %Value*, %Value** {gname}")
                     emit_release_ir(self.builder, tmp, self.atomic_rc)
 
+        for name, g in sorted(self.adt_arenas.items()):
+            reg = self.new_reg()
+            self.emit_inst(f"{reg} = load %AdtArena*, %AdtArena** {g}")
+            self.emit_inst(f"call void @lambda_arena_free(%AdtArena* {reg})")
         self.emit_inst("call void @lambda_flush()")
         self.emit_inst("call void @lambda_stats()")
-        self.emit_inst("ret i32 0")
+        if self.exit_code:
+            status = self.new_reg()
+            self.emit_inst(f"{status} = trunc i64 {result.name} to i32")
+            self.emit_inst(f"ret i32 {status}")
+        else:
+            self.emit_inst("ret i32 0")
         self.builder.raw("}")
         self.main_text = self.builder.render()
 

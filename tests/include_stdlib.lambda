@@ -1,0 +1,4 @@
+; Standard library is addressable by bare name through the compiler's lib/ path.
+include "numerics"
+
+(iexp 2 10)

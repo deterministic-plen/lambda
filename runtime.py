@@ -412,11 +412,13 @@ int64_t lambda_get_int(Value *v) {
 int64_t lambda_truthy(Value *v);
 
 Value *lambda_op_and(Value *a, Value *b) {
-    return lambda_truthy(a) ? b : a;
+    if (lambda_truthy(a)) { lambda_release(a); return b; }
+    lambda_release(b); return a;
 }
 
 Value *lambda_op_or(Value *a, Value *b) {
-    return lambda_truthy(a) ? a : b;
+    if (lambda_truthy(a)) { lambda_release(b); return a; }
+    lambda_release(a); return b;
 }
 
 int64_t lambda_get_bool(Value *v) {
@@ -448,6 +450,13 @@ int64_t lambda_div_i64(int64_t a, int64_t b) {
     if (b == 0) fail("division by zero");
     if (b == -1 && a == INT64_MIN) return INT64_MIN;
     return a / b;
+}
+
+int64_t lambda_ftoi(double x) {
+    if (isnan(x)) return 0;
+    if (x >= 9223372036854775807.0) return INT64_MAX;
+    if (x <= -9223372036854775808.0) return INT64_MIN;
+    return (int64_t)x;
 }
 
 int64_t lambda_mod_i64(int64_t a, int64_t b) {
@@ -611,7 +620,6 @@ static void print_value_inner(Value *v, int nested) {
     }
 }
 
-void lambda_print_value(Value *v) { print_value_inner(v, 0); }
 void lambda_print_ln(Value *v) { print_value_inner(v, 0); out_ch('\n'); }
 void lambda_print_i64(int64_t x) { print_int(x); out_ch('\n'); }
 void lambda_print_bool(int64_t x) { out_puts(x ? "true\n" : "false\n"); }
@@ -698,12 +706,19 @@ void lambda_array_bounds_fail(void) {
     fail("array index out of bounds");
 }
 
-Value *lambda_arrayf_new(int64_t n, double init) {
+static size_t checked_array_bytes(int64_t n, size_t elem) {
     if (n < 0) fail("array size must be non-negative");
+    if ((uint64_t)n > (uint64_t)(SIZE_MAX / elem))
+        fail("array size is too large");
+    size_t bytes = (size_t)n * elem;
+    return bytes ? bytes : 1;
+}
+
+Value *lambda_arrayf_new(int64_t n, double init) {
     Value *a = value_alloc(TAG_ARRAYF);
     a->i = n;
     size_t cap = 0;
-    a->p = pool_take(sizeof(double) * (size_t)(n > 0 ? n : 1), &cap);
+    a->p = pool_take(checked_array_bytes(n, sizeof(double)), &cap);
     double *d = (double *)a->p;
     for (int64_t i = 0; i < n; ++i) d[i] = init;
     return a;
@@ -732,11 +747,10 @@ Value *lambda_arrayf_clone(Value *a) {
 }
 
 Value *lambda_arrayi_new(int64_t n, int64_t init) {
-    if (n < 0) fail("array size must be non-negative");
     Value *a = value_alloc(TAG_ARRAYI);
     a->i = n;
     size_t cap = 0;
-    a->p = pool_take(sizeof(int64_t) * (size_t)(n > 0 ? n : 1), &cap);
+    a->p = pool_take(checked_array_bytes(n, sizeof(int64_t)), &cap);
     int64_t *d = (int64_t *)a->p;
     for (int64_t i = 0; i < n; ++i) d[i] = init;
     return a;
@@ -770,11 +784,10 @@ static int64_t byte_value(int64_t x) {
 }
 
 Value *lambda_arrayb_new(int64_t n, int64_t init) {
-    if (n < 0) fail("array size must be non-negative");
     Value *a = value_alloc(TAG_ARRAYB);
     a->i = n;
     size_t cap = 0;
-    a->p = pool_take((size_t)(n > 0 ? n : 1), &cap);
+    a->p = pool_take(checked_array_bytes(n, 1), &cap);
     uint8_t *d = (uint8_t *)a->p;
     uint8_t b = (uint8_t)byte_value(init);
     for (int64_t i = 0; i < n; ++i) d[i] = b;
@@ -806,10 +819,11 @@ Value *lambda_arrayb_clone(Value *a) {
 int64_t lambda_arrayi_sum(Value *a) {
     if (!a || a->tag != TAG_ARRAYI) fail_type("ArrayI", a);
     const int64_t *restrict p = (const int64_t *)a->p;
-    int64_t n = a->i, s = 0;
+    int64_t n = a->i;
+    uint64_t s = 0;
 #pragma clang loop vectorize(enable) interleave(enable)
-    for (int64_t i = 0; i < n; ++i) s += p[i];
-    return s;
+    for (int64_t i = 0; i < n; ++i) s += (uint64_t)p[i];
+    return (int64_t)s;
 }
 
 double lambda_arrayf_sum(Value *a) {
@@ -821,6 +835,67 @@ double lambda_arrayf_sum(Value *a) {
     for (int64_t i = 0; i < n; ++i) s += p[i];
     return s;
 }
+
+/* Convenience constructors from lists.  They consume the list; the list
+   elements are copied while the list is still owned, then the whole spine is
+   released once. */
+static int64_t list_length(Value *list) {
+    int64_t n = 0;
+    Value *cur = list;
+    while (cur && cur->tag == TAG_CONS) { n++; cur = (Value *)cur->p; }
+    if (!cur || cur->tag != TAG_NIL) fail_type("List", list);
+    return n;
+}
+
+Value *lambda_arrayf_of(Value *list) {
+    int64_t n = list_length(list);
+    Value *a = lambda_arrayf_new(n, 0.0);
+    double *d = (double *)a->p;
+    Value *cur = list;
+    for (int64_t i = 0; i < n; ++i) {
+        Value *head = (Value *)(intptr_t)cur->i;
+        if (!head || head->tag != TAG_FLOAT) fail_type("Float", head);
+        double x; memcpy(&x, &head->i, sizeof(double));
+        d[i] = x;
+        cur = (Value *)cur->p;
+    }
+    lambda_release(list);
+    return a;
+}
+
+Value *lambda_arrayi_of(Value *list) {
+    int64_t n = list_length(list);
+    Value *a = lambda_arrayi_new(n, 0);
+    int64_t *d = (int64_t *)a->p;
+    Value *cur = list;
+    for (int64_t i = 0; i < n; ++i) {
+        Value *head = (Value *)(intptr_t)cur->i;
+        if (!head || head->tag != TAG_INT) fail_type("Int", head);
+        d[i] = head->i;
+        cur = (Value *)cur->p;
+    }
+    lambda_release(list);
+    return a;
+}
+
+Value *lambda_arrayb_of(Value *list) {
+    int64_t n = list_length(list);
+    Value *a = lambda_arrayb_new(n, 0);
+    uint8_t *d = (uint8_t *)a->p;
+    Value *cur = list;
+    for (int64_t i = 0; i < n; ++i) {
+        Value *head = (Value *)(intptr_t)cur->i;
+        if (!head || head->tag != TAG_INT) fail_type("Int", head);
+        d[i] = (uint8_t)byte_value(head->i);
+        cur = (Value *)cur->p;
+    }
+    lambda_release(list);
+    return a;
+}
+
+Value *lambda_op_arrayf_of(Value *list) { return lambda_arrayf_of(list); }
+Value *lambda_op_arrayi_of(Value *list) { return lambda_arrayi_of(list); }
+Value *lambda_op_arrayb_of(Value *list) { return lambda_arrayb_of(list); }
 
 /* Boxed entry points for the dynamic backend.  Arguments are consumed; the
    array returned by `set` is the same buffer, so its ownership passes on. */
@@ -1037,6 +1112,174 @@ CMP_OP(le, <=)
 CMP_OP(gt, >)
 CMP_OP(ge, >=)
 
+typedef struct AdtArena {
+    int64_t cap;
+    int64_t count;
+    int64_t width;
+    uint64_t *words;
+    int64_t edge_cap;
+    int64_t edge_count;
+    uint64_t *edges;
+} AdtArena;
+
+AdtArena *lambda_arena_new(int64_t width) {
+    if (width < 0 || width > 64) fail("ADT arena width out of range");
+    AdtArena *a = (AdtArena *)xmalloc(sizeof(AdtArena));
+    a->cap = 2097152;
+    a->count = 0;
+    a->width = width;
+    a->words = (uint64_t *)xmalloc((size_t)a->cap * (size_t)(width + 1) * sizeof(uint64_t));
+    a->edge_cap = 65536;
+    a->edge_count = 0;
+    a->edges = (uint64_t *)xmalloc((size_t)a->edge_cap * sizeof(uint64_t));
+    return a;
+}
+
+static void arena_grow(AdtArena *a) {
+    int64_t cap = a->cap * 2;
+    a->words = (uint64_t *)realloc(a->words, (size_t)cap * (size_t)(a->width + 1) * sizeof(uint64_t));
+    if (!a->words) fail("out of memory growing ADT arena");
+    a->cap = cap;
+}
+
+static inline int64_t arena_reserve(AdtArena *a, int64_t tag) {
+    if (!a) fail("null ADT arena");
+    if (a->count >= a->cap) arena_grow(a);
+    int64_t id = a->count++;
+    uint64_t *row = a->words + (size_t)id * (size_t)(a->width + 1);
+    row[0] = (uint64_t)tag;
+    return id;
+}
+
+int64_t lambda_arena_alloc(AdtArena *a, int64_t tag) {
+    return arena_reserve(a, tag);
+}
+
+void lambda_arena_set(AdtArena *a, int64_t id, int64_t slot, uint64_t value);
+
+int64_t lambda_arena_alloc1(AdtArena *a, int64_t tag, uint64_t v0) {
+    int64_t id = arena_reserve(a, tag);
+    uint64_t *row = a->words + (size_t)id * (size_t)(a->width + 1);
+    row[1] = v0;
+    return id;
+}
+int64_t lambda_arena_alloc2(AdtArena *a, int64_t tag, uint64_t v0, uint64_t v1) {
+    int64_t id = arena_reserve(a, tag);
+    uint64_t *row = a->words + (size_t)id * (size_t)(a->width + 1);
+    row[1] = v0; row[2] = v1;
+    return id;
+}
+int64_t lambda_arena_alloc3(AdtArena *a, int64_t tag, uint64_t v0, uint64_t v1, uint64_t v2) {
+    int64_t id = arena_reserve(a, tag);
+    uint64_t *row = a->words + (size_t)id * (size_t)(a->width + 1);
+    row[1] = v0; row[2] = v1; row[3] = v2;
+    return id;
+}
+int64_t lambda_arena_alloc4(AdtArena *a, int64_t tag, uint64_t v0, uint64_t v1, uint64_t v2, uint64_t v3) {
+    int64_t id = arena_reserve(a, tag);
+    uint64_t *row = a->words + (size_t)id * (size_t)(a->width + 1);
+    row[1] = v0; row[2] = v1; row[3] = v2; row[4] = v3;
+    return id;
+}
+
+
+void lambda_arena_set(AdtArena *a, int64_t id, int64_t slot, uint64_t value) {
+    if (!a || id < 0 || id >= a->count || slot < 0 || slot >= a->width) fail("ADT arena set out of bounds");
+    a->words[(size_t)id * (size_t)(a->width + 1) + (size_t)slot + 1] = value;
+}
+
+uint64_t lambda_arena_get(AdtArena *a, int64_t id, int64_t slot) {
+    if (!a || id < 0 || id >= a->count || slot < 0 || slot >= a->width) fail("ADT arena get out of bounds");
+    return a->words[(size_t)id * (size_t)(a->width + 1) + (size_t)slot + 1];
+}
+
+uint64_t *lambda_arena_row(AdtArena *a, int64_t id) {
+    if (!a || id < 0 || id >= a->count) fail("ADT arena row out of bounds");
+    return a->words + (size_t)id * (size_t)(a->width + 1) + 1;
+}
+
+int64_t lambda_arena_tag(AdtArena *a, int64_t id) {
+    if (!a || id < 0 || id >= a->count) fail("ADT arena tag out of bounds");
+    return (int64_t)a->words[(size_t)id * (size_t)(a->width + 1)];
+}
+
+static void arena_edge_grow(AdtArena *a) {
+    int64_t cap = a->edge_cap * 2;
+    a->edges = (uint64_t *)realloc(a->edges, (size_t)cap * sizeof(uint64_t));
+    if (!a->edges) fail("out of memory growing ADT edge arena");
+    a->edge_cap = cap;
+}
+
+int64_t lambda_arena_attach_list(AdtArena *a, Value *list) {
+    if (!a) fail("null ADT arena");
+    int64_t count = 0;
+    Value *cur = list;
+    while (cur && cur->tag == TAG_CONS) {
+        count++;
+        cur = (Value *)cur->p;
+    }
+    if (cur && cur->tag != TAG_NIL) fail("ADT child list is not a proper list");
+    if (a->edge_count + count + 1 > a->edge_cap) {
+        while (a->edge_count + count + 1 > a->edge_cap) arena_edge_grow(a);
+    }
+    int64_t start = a->edge_count;
+    a->edges[start] = (uint64_t)count;
+    a->edge_count += count + 1;
+    cur = list;
+    for (int64_t i = 0; i < count; i++) {
+        if (!cur || cur->tag != TAG_CONS) fail("ADT child list changed during attach");
+        Value *head = (Value *)(intptr_t)cur->i;
+        Value *tail = (Value *)cur->p;
+        a->edges[start + 1 + i] = (uint64_t)lambda_get_int(head);
+        cur = tail;
+    }
+    lambda_release(list);
+    return start;
+}
+
+Value *lambda_arena_get_list(AdtArena *a, int64_t start) {
+    if (!a || start < 0 || start >= a->edge_count) fail("ADT child list out of bounds");
+    int64_t count = (int64_t)a->edges[start];
+    Value *out = lambda_nil();
+    for (int64_t i = count - 1; i >= 0; i--) {
+        out = lambda_cons(lambda_box_int((int64_t)a->edges[start + 1 + i]), out);
+    }
+    return out;
+}
+
+void lambda_arena_free(AdtArena *a) {
+    if (!a) return;
+    free(a->words);
+    free(a->edges);
+    free(a);
+}
+
+int64_t lambda_adt_tag(Value *v) {
+    if (!v || v->tag != TAG_CONS) fail_type("ADT", v);
+    Value *tag = (Value *)(intptr_t)v->i;
+    return lambda_get_int(tag);
+}
+
+Value *lambda_adt_field(Value *v, int64_t index) {
+    if (index < 0) fail("ADT field index must be non-negative");
+    Value *cur = v;
+    lambda_retain(cur);
+    for (int64_t i = 0; i <= index; i++) {
+        if (!cur || cur->tag != TAG_CONS) {
+            lambda_release(cur);
+            fail("ADT field index out of bounds");
+        }
+        Value *tail = (Value *)cur->p;
+        lambda_retain(tail);
+        lambda_release(cur);
+        cur = tail;
+    }
+    Value *field = (Value *)(intptr_t)cur->i;
+    lambda_retain(field);
+    lambda_release(cur);
+    return field;
+}
+
 Value *lambda_op_cons(Value *a, Value *b) { return lambda_cons(a, b); }
 
 Value *lambda_op_head(Value *lst) {
@@ -1094,6 +1337,7 @@ Value *lambda_op_str_to_int(Value *v) {
 }
 
 Value *lambda_op_str_to_list(Value *v) {
+    if (!v || v->tag != TAG_STRING) fail_type("String", v);
     int64_t len = v->i;
     const unsigned char *s = (const unsigned char *)v->p;
     Value *list = lambda_nil();
@@ -1145,6 +1389,24 @@ Value *lambda_op_read_file(Value *pathv) {
     r->p = buf;
     lambda_release(pathv);
     return r;
+}
+
+/* Write the bytes of an ArrayB to a file.  Returns bytes written, or -1. */
+int64_t lambda_op_write_file(Value *pathv, Value *data) {
+    if (!pathv || pathv->tag != TAG_STRING) fail_type("String", pathv);
+    if (!data || data->tag != TAG_ARRAYB) fail_type("ArrayB", data);
+    FILE *f = fopen((const char *)pathv->p, "wb");
+    if (!f) {
+        lambda_release(pathv);
+        lambda_release(data);
+        return -1;
+    }
+    size_t n = fwrite(data->p, 1, (size_t)data->i, f);
+    int64_t ok = (n == (size_t)data->i) ? (int64_t)n : -1;
+    fclose(f);
+    lambda_release(pathv);
+    lambda_release(data);
+    return ok;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1266,6 +1528,7 @@ Value *lambda_op_abs(Value *v) {
     if (v->tag == TAG_INT) {
         int64_t x = v->i;
         lambda_release(v);
+        if (x == INT64_MIN) return lambda_box_int(INT64_MIN);
         return lambda_box_int(x < 0 ? -x : x);
     }
     if (v->tag == TAG_FLOAT) {
@@ -1455,12 +1718,12 @@ Value *lambda_op_range(Value *lo, Value *hi) {
    without atomic reference-count traffic.  It intentionally leaks the graph
    until process exit; use only for shared immutable constants. */
 static void immortalize_graph(Value *v) {
-    if (!v) return;
-    if (v->rc > 0) STAT_ADD(live_values, -1);
-    v->rc = -1;
-    if (v->tag == TAG_CONS) {
+    while (v) {
+        if (v->rc > 0) STAT_ADD(live_values, -1);
+        v->rc = -1;
+        if (v->tag != TAG_CONS) return;
         immortalize_graph((Value *)(intptr_t)v->i);
-        immortalize_graph((Value *)v->p);
+        v = (Value *)v->p;
     }
 }
 
@@ -1692,6 +1955,471 @@ Value *lambda_arrayi_pmap(Value *f, int64_t n) {
     return out;
 }
 
+/* Parallel Int -> Float map into a flat Float array. */
+typedef struct ArrayFPMapJob {
+    Value *f;
+    Value *out;
+    int64_t n;
+    int64_t next;
+} ArrayFPMapJob;
+
+static void arrayf_pmap_run(ArrayFPMapJob *job) {
+    double *data = (double *)job->out->p;
+    for (;;) {
+        int64_t i = __atomic_fetch_add(&job->next, 1, __ATOMIC_RELAXED);
+        if (i >= job->n) break;
+        Value *r = apply_owned(job->f, lambda_box_int(i));
+        data[i] = lambda_get_float(r);
+        lambda_release(r);
+    }
+}
+
+#ifdef _WIN32
+static DWORD WINAPI arrayf_pmap_thread_main(LPVOID p) {
+    arrayf_pmap_run((ArrayFPMapJob *)p);
+    return 0;
+}
+#else
+static void *arrayf_pmap_thread_main(void *p) {
+    arrayf_pmap_run((ArrayFPMapJob *)p);
+    return NULL;
+}
+#endif
+
+Value *lambda_arrayf_pmap(Value *f, int64_t n) {
+    if (n < 0) fail("array size must be non-negative");
+    Value *out = lambda_arrayf_new(n, 0.0);
+    int64_t threads = pmap_requested_threads();
+    if (threads > LAMBDA_MAX_THREADS) threads = LAMBDA_MAX_THREADS;
+    if (threads > n) threads = n;
+    if (threads <= 1 || n <= 1) {
+        double *data = (double *)out->p;
+        for (int64_t i = 0; i < n; i++) {
+            Value *r = apply_owned(f, lambda_box_int(i));
+            data[i] = lambda_get_float(r);
+            lambda_release(r);
+        }
+        lambda_release(f);
+        return out;
+    }
+    ArrayFPMapJob job;
+    job.f = f;
+    job.out = out;
+    job.n = n;
+    job.next = 0;
+#ifdef _WIN32
+    HANDLE handles[LAMBDA_MAX_THREADS];
+    int created = 0;
+    for (int64_t i = 1; i < threads; i++) {
+        HANDLE h = CreateThread(NULL, 0, arrayf_pmap_thread_main, &job, 0, NULL);
+        if (h) handles[created++] = h;
+    }
+    arrayf_pmap_run(&job);
+    if (created > 0) WaitForMultipleObjects((DWORD)created, handles, TRUE, INFINITE);
+    for (int i = 0; i < created; i++) CloseHandle(handles[i]);
+#else
+    pthread_t th[LAMBDA_MAX_THREADS];
+    int created = 0;
+    for (int64_t i = 1; i < threads; i++) {
+        if (pthread_create(&th[created], NULL, arrayf_pmap_thread_main, &job) == 0) created++;
+    }
+    arrayf_pmap_run(&job);
+    for (int i = 0; i < created; i++) pthread_join(th[i], NULL);
+#endif
+    lambda_release(f);
+    return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* optional CUDA backend for arrayf-pmap (NVRTC + CUDA Driver API)      */
+/*                                                                     */
+/* The compiler embeds one kernel source per translatable lambda.  The */
+/* runtime compiles it with NVRTC to compute_80 PTX, JITs it through   */
+/* the driver, and writes directly into the ArrayF.  Any failure (no   */
+/* GPU, no NVRTC, unsupported arch) falls back to the CPU thread pool. */
+/* Only one GPU is used; multi-GPU would need a device pool.           */
+/* ------------------------------------------------------------------ */
+
+#ifdef _WIN32
+#include <windows.h>
+#define GPU_LIB_HANDLE HMODULE
+#else
+#include <dlfcn.h>
+#define GPU_LIB_HANDLE void *
+#endif
+
+typedef int gpu_result;
+typedef void *gpu_program;
+typedef int gpu_device;
+typedef void *gpu_context;
+typedef void *gpu_module;
+typedef void *gpu_function;
+typedef unsigned long long gpu_ptr;
+
+typedef struct GpuKernel {
+    char *source;
+    char entry[32];
+    gpu_module module;
+    gpu_function fn;
+    struct GpuKernel *next;
+} GpuKernel;
+
+static struct {
+    int tried;
+    int ok;
+    gpu_context ctx;
+    GpuKernel *kernels;
+    gpu_result (*cuInit)(unsigned int);
+    gpu_result (*cuDeviceGet)(gpu_device *, int);
+    gpu_result (*cuCtxCreate)(gpu_context *, unsigned int, gpu_device);
+    gpu_result (*cuCtxSetCurrent)(gpu_context);
+    gpu_result (*cuModuleLoadData)(gpu_module *, const void *);
+    gpu_result (*cuModuleGetFunction)(gpu_function *, gpu_module, const char *);
+    gpu_result (*cuMemAlloc)(gpu_ptr *, size_t);
+    gpu_result (*cuMemFree)(gpu_ptr);
+    gpu_result (*cuMemcpyDtoH)(void *, gpu_ptr, size_t);
+    gpu_result (*cuMemcpyHtoD)(gpu_ptr, const void *, size_t);
+    gpu_result (*cuLaunchKernel)(gpu_function, unsigned, unsigned, unsigned,
+                                 unsigned, unsigned, unsigned, unsigned,
+                                 void *, void **, void **);
+    gpu_result (*cuCtxSynchronize)(void);
+} gpu;
+
+typedef gpu_result (*nvrtc_create)(gpu_program *, const char *, const char *,
+                                   int, const char **, const char **);
+typedef gpu_result (*nvrtc_compile)(gpu_program, int, const char **);
+typedef gpu_result (*nvrtc_ptx_size)(gpu_program, size_t *);
+typedef gpu_result (*nvrtc_ptx)(gpu_program, char *);
+typedef gpu_result (*nvrtc_log_size)(gpu_program, size_t *);
+typedef gpu_result (*nvrtc_log)(gpu_program, char *);
+typedef gpu_result (*nvrtc_destroy)(gpu_program);
+
+static void *gpu_symbol(GPU_LIB_HANDLE lib, const char *name) {
+#ifdef _WIN32
+    return (void *)GetProcAddress(lib, name);
+#else
+    return dlsym(lib, name);
+#endif
+}
+
+static GPU_LIB_HANDLE gpu_open(const char *name) {
+#ifdef _WIN32
+    return LoadLibraryA(name);
+#else
+    return dlopen(name, RTLD_NOW | RTLD_LOCAL);
+#endif
+}
+
+static int gpu_init(void) {
+    if (gpu.tried) return gpu.ok;
+    gpu.tried = 1;
+    const char *src = getenv("LAMBDA_GPU");
+    if (!src || strcmp(src, "1") != 0) return 0;
+    GPU_LIB_HANDLE nv = gpu_open("nvrtc64_112_0.dll");
+    if (!nv) nv = gpu_open("nvrtc64_120_0.dll");
+    if (!nv) nv = gpu_open("nvrtc64_130_0.dll");
+    if (!nv) nv = gpu_open("nvrtc64_140_0.dll");
+    if (!nv) nv = gpu_open("libnvrtc.so");
+    if (!nv) return 0;
+    GPU_LIB_HANDLE cu = gpu_open("nvcuda.dll");
+    if (!cu) cu = gpu_open("libcuda.so.1");
+    if (!cu) return 0;
+#define GPU_LOAD(field, lib, name) \
+    gpu.field = (void *)gpu_symbol(lib, name); if (!gpu.field) return 0
+    GPU_LOAD(cuInit, cu, "cuInit");
+    GPU_LOAD(cuDeviceGet, cu, "cuDeviceGet");
+    GPU_LOAD(cuCtxCreate, cu, "cuCtxCreate_v2");
+    if (!gpu.cuCtxCreate) gpu.cuCtxCreate = (void *)gpu_symbol(cu, "cuCtxCreate");
+    GPU_LOAD(cuCtxSetCurrent, cu, "cuCtxSetCurrent");
+    GPU_LOAD(cuModuleLoadData, cu, "cuModuleLoadData");
+    GPU_LOAD(cuModuleGetFunction, cu, "cuModuleGetFunction");
+    GPU_LOAD(cuMemAlloc, cu, "cuMemAlloc_v2");
+    GPU_LOAD(cuMemFree, cu, "cuMemFree_v2");
+    GPU_LOAD(cuMemcpyDtoH, cu, "cuMemcpyDtoH_v2");
+    GPU_LOAD(cuMemcpyHtoD, cu, "cuMemcpyHtoD_v2");
+    GPU_LOAD(cuLaunchKernel, cu, "cuLaunchKernel");
+    GPU_LOAD(cuCtxSynchronize, cu, "cuCtxSynchronize");
+#undef GPU_LOAD
+    if (!gpu.cuCtxCreate || !gpu.cuCtxSetCurrent) return 0;
+    gpu_device dev;
+    if (gpu.cuInit(0) != 0 || gpu.cuDeviceGet(&dev, 0) != 0) return 0;
+    if (gpu.cuCtxCreate(&gpu.ctx, 0, dev) != 0) return 0;
+    if (gpu.cuCtxSetCurrent(gpu.ctx) != 0) return 0;
+    gpu.ok = 1;
+    return 1;
+}
+
+static GpuKernel *gpu_kernel_named(const char *source, const char *entry) {
+    for (GpuKernel *k = gpu.kernels; k; k = k->next) {
+        if (strcmp(k->source, source) == 0 && strcmp(k->entry, entry) == 0) return k;
+    }
+    GPU_LIB_HANDLE nv = gpu_open("nvrtc64_112_0.dll");
+    if (!nv) nv = gpu_open("nvrtc64_120_0.dll");
+    if (!nv) nv = gpu_open("nvrtc64_130_0.dll");
+    if (!nv) nv = gpu_open("nvrtc64_140_0.dll");
+    if (!nv) nv = gpu_open("libnvrtc.so");
+    if (!nv) return NULL;
+    nvrtc_create create = (nvrtc_create)gpu_symbol(nv, "nvrtcCreateProgram");
+    nvrtc_compile compile = (nvrtc_compile)gpu_symbol(nv, "nvrtcCompileProgram");
+    nvrtc_ptx_size ptx_size = (nvrtc_ptx_size)gpu_symbol(nv, "nvrtcGetPTXSize");
+    nvrtc_ptx ptx_get = (nvrtc_ptx)gpu_symbol(nv, "nvrtcGetPTX");
+    if (!create || !compile || !ptx_size || !ptx_get) return NULL;
+    gpu_program prog = NULL;
+    if (create(&prog, source, "lambda_pmap.cu", 0, NULL, NULL) != 0) return NULL;
+    const char *opts[] = {"--gpu-architecture=compute_80", "--std=c++14"};
+    gpu_result rc = compile(prog, 2, opts);
+    if (rc != 0) return NULL;
+    size_t n = 0;
+    if (ptx_size(prog, &n) != 0 || n < 2) return NULL;
+    char *ptx = (char *)malloc(n);
+    if (!ptx) return NULL;
+    if (ptx_get(prog, ptx) != 0) { free(ptx); return NULL; }
+    GpuKernel *k = (GpuKernel *)xmalloc(sizeof(GpuKernel));
+    k->source = (char *)xmalloc(strlen(source) + 1);
+    memcpy(k->source, source, strlen(source) + 1);
+    strncpy(k->entry, entry, sizeof(k->entry) - 1);
+    k->entry[sizeof(k->entry) - 1] = 0;
+    k->module = NULL;
+    k->fn = NULL;
+    k->next = gpu.kernels;
+    gpu.kernels = k;
+    if (gpu.cuModuleLoadData(&k->module, ptx) != 0 ||
+        gpu.cuModuleGetFunction(&k->fn, k->module, entry) != 0) {
+        k->fn = NULL;
+    }
+    free(ptx);
+    return k->fn ? k : NULL;
+}
+
+Value *lambda_gpu_arrayf_pmap(Value *f, int64_t n, const char *source) {
+    if (n < 1000000 || !gpu_init()) return lambda_arrayf_pmap(f, n);
+    GpuKernel *k = gpu_kernel_named(source, "pmap");
+    if (!k || !k->fn) return lambda_arrayf_pmap(f, n);
+    Value *out = lambda_arrayf_new(n, 0.0);
+    gpu_ptr dout = 0;
+    if (gpu.cuMemAlloc(&dout, sizeof(double) * (size_t)n) != 0) {
+        lambda_release(out);
+        return lambda_arrayf_pmap(f, n);
+    }
+    long long nn = (long long)n;
+    void *args[] = {&dout, &nn};
+    unsigned threads = 256;
+    unsigned blocks = (unsigned)((n + threads - 1) / threads);
+    gpu_result rc = gpu.cuLaunchKernel(k->fn, blocks, 1, 1, threads, 1, 1,
+                                       0, NULL, args, NULL);
+    if (rc == 0) rc = gpu.cuCtxSynchronize();
+    if (rc == 0) rc = gpu.cuMemcpyDtoH(out->p, dout, sizeof(double) * (size_t)n);
+    gpu.cuMemFree(dout);
+    if (rc != 0) {
+        lambda_release(out);
+        return lambda_arrayf_pmap(f, n);
+    }
+    lambda_release(f);
+    return out;
+}
+
+static GpuKernel *gpu_kernel(const char *source) {
+    return gpu_kernel_named(source, "pmap");
+}
+
+Value *lambda_gpu_arrayf_pmap1(Value *f, int64_t n, const char *source,
+                                  Value *in0) {
+    if (n < 100000 || !gpu_init() || !in0 || in0->tag != TAG_ARRAYF ||
+        in0->i < n) {
+        return lambda_arrayf_pmap(f, n);
+    }
+    GpuKernel *k = gpu_kernel_named(source, "pmap");
+    if (!k || !k->fn) return lambda_arrayf_pmap(f, n);
+    gpu_ptr din = 0, dout = 0;
+    if (gpu.cuMemAlloc(&din, sizeof(double) * (size_t)n) != 0 ||
+        gpu.cuMemAlloc(&dout, sizeof(double) * (size_t)n) != 0) {
+        if (din) gpu.cuMemFree(din);
+        if (dout) gpu.cuMemFree(dout);
+        return lambda_arrayf_pmap(f, n);
+    }
+    gpu_result rc = gpu.cuMemcpyHtoD(din, in0->p, sizeof(double) * (size_t)n);
+    if (rc != 0) {
+        gpu.cuMemFree(din); gpu.cuMemFree(dout);
+        return lambda_arrayf_pmap(f, n);
+    }
+    Value *out = lambda_arrayf_new(n, 0.0);
+    long long nn = (long long)n;
+    void *args[] = {&dout, &din, &nn};
+    unsigned threads = 256;
+    unsigned blocks = (unsigned)((n + threads - 1) / threads);
+    if (rc == 0) rc = gpu.cuLaunchKernel(k->fn, blocks, 1, 1, threads, 1, 1,
+                                        0, NULL, args, NULL);
+    if (rc == 0) rc = gpu.cuCtxSynchronize();
+    if (rc == 0) rc = gpu.cuMemcpyDtoH(out->p, dout, sizeof(double) * (size_t)n);
+    gpu.cuMemFree(din); gpu.cuMemFree(dout);
+    if (rc != 0) {
+        lambda_release(out);
+        return lambda_arrayf_pmap(f, n);
+    }
+    lambda_release(f);
+    return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Gray-Scott reaction-diffusion step (combined U,V ArrayF, 2*n*n).    */
+/* CPU fallback plus an optional CUDA kernel; this is an experimental  */
+/* numerical primitive, not a general GPU language.                    */
+/* ------------------------------------------------------------------ */
+
+static void grayscott_cpu(double *out, const double *in, int n,
+                          double du, double dv, double feed, double kill,
+                          double dt) {
+    int n2 = n * n;
+    for (int y = 0; y < n; y++) {
+        for (int x = 0; x < n; x++) {
+            int p = y * n + x;
+            int xm = (x + n - 1) % n, xp = (x + 1) % n;
+            int ym = (y + n - 1) % n, yp = (y + 1) % n;
+            int pl = y * n + xm, pr = y * n + xp;
+            int pu = ym * n + x, pd = yp * n + x;
+            double u = in[p], v = in[n2 + p];
+            double uvv = u * v * v;
+            double lu = in[pl] + in[pr] + in[pu] + in[pd] - 4.0 * u;
+            double lv = in[n2 + pl] + in[n2 + pr] + in[n2 + pu] + in[n2 + pd] - 4.0 * v;
+            out[p] = u + dt * (du * lu - uvv + feed * (1.0 - u));
+            out[n2 + p] = v + dt * (dv * lv + uvv - (feed + kill) * v);
+        }
+    }
+}
+
+static const char *GRAYSCOTT_SRC =
+    "extern \"C\" __global__ void gs(double* out, const double* in, int n,"
+    " double du, double dv, double feed, double kill, double dt) {"
+    " int n2 = n*n; int p = (int)blockIdx.x*blockDim.x + threadIdx.x;"
+    " if (p >= n2) return; int x = p % n; int y = p / n;"
+    " int xm=(x+n-1)%n, xp=(x+1)%n, ym=(y+n-1)%n, yp=(y+1)%n;"
+    " int pl=y*n+xm, pr=y*n+xp, pu=ym*n+x, pd=yp*n+x;"
+    " double u=in[p], v=in[n2+p]; double uvv=u*v*v;"
+    " double lu=in[pl]+in[pr]+in[pu]+in[pd]-4.0*u;"
+    " double lv=in[n2+pl]+in[n2+pr]+in[n2+pu]+in[n2+pd]-4.0*v;"
+    " out[p]=u+dt*(du*lu-uvv+feed*(1.0-u));"
+    " out[n2+p]=v+dt*(dv*lv+uvv-(feed+kill)*v); }";
+
+/* One horizontal stripe of Gray-Scott with explicit top/bottom halo rows.
+   top/bot are 2*W ArrayF payloads: U row then V row. */
+static double stripe_at(const double *u, const double *v, const double *tu,
+                        const double *tv, const double *bu, const double *bv,
+                        int W, int R, int y, int x, int which) {
+    if (y < 0) return which ? tv[x] : tu[x];
+    if (y >= R) return which ? bv[x] : bu[x];
+    return which ? v[(int64_t)y * W + x] : u[(int64_t)y * W + x];
+}
+
+Value *lambda_gray_stripe(Value *uv, Value *top, Value *bot, int64_t W, int64_t R,
+                          double du, double dv, double feed, double kill, double dt) {
+    if (W <= 0 || R <= 0 || W > INT_MAX || R > INT_MAX ||
+        (uint64_t)W > (uint64_t)INT64_MAX / (uint64_t)R)
+        lambda_array_bounds_fail();
+    int64_t N = W * R;
+    if (N > INT64_MAX / 2 || 2 * W < 2) lambda_array_bounds_fail();
+    if (!uv || uv->tag != TAG_ARRAYF || uv->i < 2 * N ||
+        !top || top->tag != TAG_ARRAYF || top->i < 2 * W ||
+        !bot || bot->tag != TAG_ARRAYF || bot->i < 2 * W) {
+        lambda_array_bounds_fail();
+    }
+    Value *out = lambda_arrayf_new(2 * N, 0.0);
+    const double *u = (const double *)uv->p;
+    const double *v = u + N;
+    const double *tu = (const double *)top->p;
+    const double *tv = tu + W;
+    const double *bu = (const double *)bot->p;
+    const double *bv = bu + W;
+    double *ou = (double *)out->p;
+    double *ov = ou + N;
+    for (int64_t y = 0; y < R; y++) {
+        for (int64_t x = 0; x < W; x++) {
+            int64_t p = y * W + x;
+            int xm = (int)((x + W - 1) % W), xp = (int)((x + 1) % W);
+            double u0 = u[p], v0 = v[p];
+            double uvv = u0 * v0 * v0;
+            double lu = stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y - 1, x, 0)
+                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y, xm, 0)
+                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y, xp, 0)
+                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y + 1, x, 0)
+                      - 4.0 * u0;
+            double lv = stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y - 1, x, 1)
+                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y, xm, 1)
+                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y, xp, 1)
+                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y + 1, x, 1)
+                      - 4.0 * v0;
+            ou[p] = u0 + dt * (du * lu - uvv + feed * (1.0 - u0));
+            ov[p] = v0 + dt * (dv * lv + uvv - (feed + kill) * v0);
+        }
+    }
+    lambda_release(uv); lambda_release(top); lambda_release(bot);
+    return out;
+}
+
+Value *lambda_gray_scott(Value *uv, int64_t n, double du, double dv,
+                         double feed, double kill, double dt, int64_t steps) {
+    if (n <= 0 || n > INT_MAX || (uint64_t)n > (uint64_t)INT64_MAX / (uint64_t)n)
+        lambda_array_bounds_fail();
+    int64_t n2 = n * n;
+    if (n2 > INT64_MAX / 2 || !uv || uv->tag != TAG_ARRAYF || uv->i < 2 * n2) {
+        lambda_array_bounds_fail();
+    }
+    if (steps < 1) steps = 1;
+    Value *out = lambda_arrayf_new(2 * n2, 0.0);
+    if (getenv("LAMBDA_GPU") && strcmp(getenv("LAMBDA_GPU"), "1") == 0 &&
+        n2 >= 32768 && gpu_init()) {
+        GpuKernel *k = gpu_kernel_named(GRAYSCOTT_SRC, "gs");
+        if (k && k->fn) {
+            gpu_ptr d0 = 0, d1 = 0;
+            size_t bytes = sizeof(double) * (size_t)(2 * n2);
+            if (gpu.cuMemAlloc(&d0, bytes) == 0 && gpu.cuMemAlloc(&d1, bytes) == 0 &&
+                gpu.cuMemcpyHtoD(d0, uv->p, bytes) == 0) {
+                int nn = (int)n;
+                unsigned threads = 256;
+                unsigned blocks = (unsigned)((n2 + threads - 1) / threads);
+                gpu_ptr src = d0, dst = d1;
+                gpu_result rc = 0;
+                for (int64_t s = 0; s < steps && rc == 0; s++) {
+                    void *args[] = {&dst, &src, &nn, &du, &dv, &feed, &kill, &dt};
+                    rc = gpu.cuLaunchKernel(k->fn, blocks, 1, 1, threads, 1, 1,
+                                            0, NULL, args, NULL);
+                    gpu_ptr t = src; src = dst; dst = t;
+                }
+                if (rc == 0) rc = gpu.cuCtxSynchronize();
+                if (rc == 0) rc = gpu.cuMemcpyDtoH(out->p, src, bytes);
+                gpu.cuMemFree(d0); gpu.cuMemFree(d1);
+                if (rc == 0) {
+                    lambda_release(uv);
+                    return out;
+                }
+            } else {
+                if (d0) gpu.cuMemFree(d0);
+                if (d1) gpu.cuMemFree(d1);
+            }
+        }
+    }
+    double *tmp = (double *)xmalloc(sizeof(double) * (size_t)(2 * n2));
+    double *src = uv->p, *dst = out->p;
+    for (int64_t s = 0; s < steps; s++) {
+        grayscott_cpu(dst, src, (int)n, du, dv, feed, kill, dt);
+        if (s + 1 < steps) {
+            double *t = src == uv->p ? tmp : src;
+            (void)t;
+            double *next = (dst == out->p) ? tmp : out->p;
+            src = dst; dst = next;
+        }
+    }
+    if (dst != out->p) memcpy(out->p, dst, sizeof(double) * (size_t)(2 * n2));
+    free(tmp);
+    lambda_release(uv);
+    return out;
+}
+
+Value *lambda_op_arrayf_pmap(Value *f, Value *nv) {
+    int64_t n = as_int(nv);
+    lambda_release(nv);
+    return lambda_arrayf_pmap(f, n);
+}
+
 Value *lambda_op_arrayi_pmap(Value *f, Value *nv) {
     int64_t n = as_int(nv);
     lambda_release(nv);
@@ -1809,22 +2537,30 @@ typedef struct LogicRoot {
 } LogicRoot;
 
 typedef struct LogicHeld {
-    EnvHeader hdr; /* dtor = NULL */
+    EnvHeader hdr; /* dtor = logic_dtor */
     LogicBinFn fn;
     Value *a;
 } LogicHeld;
 
+static void logic_dtor(void *p) {
+    LogicHeld *held = (LogicHeld *)p;
+    lambda_release(held->a);
+    lambda_free_env(held);
+}
+
 static Value *logic_stage2(void *env, Value *b) {
     LogicHeld *held = (LogicHeld *)env;
-    return held->fn(held->a, b);
+    Value *a = held->a;
+    lambda_retain(a); /* the environment keeps its own reference */
+    return held->fn(a, b);
 }
 
 static Value *logic_stage1(void *env, Value *a) {
     LogicRoot *root = (LogicRoot *)env;
-    LogicHeld *held = (LogicHeld *)xmalloc(sizeof(LogicHeld));
-    held->hdr.dtor = NULL;
+    LogicHeld *held = (LogicHeld *)lambda_alloc_env(sizeof(LogicHeld));
+    held->hdr.dtor = logic_dtor;
     held->fn = root->fn;
-    held->a = a;
+    held->a = a; /* ownership moves into the partial closure */
     return lambda_make_closure((void *)logic_stage2, held);
 }
 
@@ -2089,6 +2825,7 @@ declare i64 @lambda_truthy(%Value*)
 
 declare i64 @lambda_div_i64(i64, i64)
 declare i64 @lambda_mod_i64(i64, i64)
+declare i64 @lambda_ftoi(double)
 
 declare %Value* @lambda_op_add(%Value*, %Value*)
 declare %Value* @lambda_op_sub(%Value*, %Value*)
@@ -2102,6 +2839,21 @@ declare %Value* @lambda_op_gt(%Value*, %Value*)
 declare %Value* @lambda_op_ge(%Value*, %Value*)
 declare %Value* @lambda_op_cons(%Value*, %Value*)
 declare %Value* @lambda_op_head(%Value*)
+declare %AdtArena* @lambda_arena_new(i64)
+declare i64 @lambda_arena_alloc(%AdtArena*, i64)
+declare i64 @lambda_arena_alloc1(%AdtArena*, i64, i64)
+declare i64 @lambda_arena_alloc2(%AdtArena*, i64, i64, i64)
+declare i64 @lambda_arena_alloc3(%AdtArena*, i64, i64, i64, i64)
+declare i64 @lambda_arena_alloc4(%AdtArena*, i64, i64, i64, i64, i64)
+declare void @lambda_arena_set(%AdtArena*, i64, i64, i64)
+declare i64 @lambda_arena_get(%AdtArena*, i64, i64)
+declare i64* @lambda_arena_row(%AdtArena*, i64)
+declare i64 @lambda_arena_tag(%AdtArena*, i64)
+declare i64 @lambda_arena_attach_list(%AdtArena*, %Value*)
+declare %Value* @lambda_arena_get_list(%AdtArena*, i64)
+declare void @lambda_arena_free(%AdtArena*)
+declare i64 @lambda_adt_tag(%Value*)
+declare %Value* @lambda_adt_field(%Value*, i64)
 declare %Value* @lambda_op_tail(%Value*)
 declare %Value* @lambda_op_empty(%Value*)
 declare %Value* @lambda_op_not(%Value*)
@@ -2123,6 +2875,9 @@ declare double @lambda_arrayf_get(%Value*, i64)
 declare void @lambda_arrayf_set(%Value*, i64, double)
 declare i64 @lambda_arrayf_length(%Value*)
 declare %Value* @lambda_arrayf_clone(%Value*)
+declare %Value* @lambda_arrayf_of(%Value*)
+declare %Value* @lambda_arrayi_of(%Value*)
+declare %Value* @lambda_arrayb_of(%Value*)
 declare %Value* @lambda_arrayi_new(i64, i64)
 declare i64 @lambda_arrayi_get(%Value*, i64)
 declare void @lambda_arrayi_set(%Value*, i64, i64)
@@ -2136,11 +2891,21 @@ declare double @lambda_arrayf_sum(%Value*)
 declare i64 @lambda_arrayb_length(%Value*)
 declare %Value* @lambda_arrayb_clone(%Value*)
 declare %Value* @lambda_arrayi_pmap(%Value*, i64)
+declare %Value* @lambda_arrayf_pmap(%Value*, i64)
+declare %Value* @lambda_gpu_arrayf_pmap(%Value*, i64, i8*)
+declare %Value* @lambda_gpu_arrayf_pmap1(%Value*, i64, i8*, %Value*)
+declare %Value* @lambda_gray_scott(%Value*, i64, double, double, double, double, double, i64)
+declare %Value* @lambda_gray_stripe(%Value*, %Value*, %Value*, i64, i64, double, double, double, double, double)
 declare %Value* @lambda_op_arrayi_pmap(%Value*, %Value*)
+declare %Value* @lambda_op_arrayf_pmap(%Value*, %Value*)
+declare i64 @lambda_op_write_file(%Value*, %Value*)
 declare %Value* @lambda_arrayi_pmap_chunk(%Value*, i64, i64)
 declare %Value* @lambda_op_arrayi_pmap_chunk(%Value*, %Value*, %Value*)
 
 declare %Value* @lambda_op_arrayf_new(%Value*, %Value*)
+declare %Value* @lambda_op_arrayf_of(%Value*)
+declare %Value* @lambda_op_arrayi_of(%Value*)
+declare %Value* @lambda_op_arrayb_of(%Value*)
 declare %Value* @lambda_op_arrayf_get(%Value*, %Value*)
 declare %Value* @lambda_op_arrayf_set(%Value*, %Value*, %Value*)
 declare %Value* @lambda_op_arrayf_length(%Value*)
@@ -2227,7 +2992,6 @@ declare double @round(double)
 declare double @trunc(double)
 declare double @fmod(double, double)
 
-declare void @lambda_print_value(%Value*)
 declare void @lambda_print_ln(%Value*)
 declare void @lambda_print_i64(i64)
 declare void @lambda_print_bool(i64)

@@ -1,0 +1,17 @@
+﻿data Expr =
+  Lit (value: Int)
+| Add (left: Expr, right: Expr)
+| Mul (left: Expr, right: Expr)
+| Neg (value: Expr)
+| If (cond: Expr, then_: Expr, else_: Expr)
+
+eval → (λe: Expr.
+  match e with
+    Lit v: v,
+    Add l r: (+ (eval l) (eval r)),
+    Mul l r: (* (eval l) (eval r)),
+    Neg v: (- 0 (eval v)),
+    If c t f: (if (== (eval c) 0) then (eval f) else (eval t)))
+
+expr → (Add (Lit 2) (Mul (Lit 3) (Lit 4)))
+(eval expr)

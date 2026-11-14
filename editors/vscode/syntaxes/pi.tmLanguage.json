@@ -1,0 +1,207 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Pi",
+  "scopeName": "source.pi",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#definition"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#constructors"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#identifiers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "match": "--.*$",
+          "name": "comment.line.double-dash.pi"
+        },
+        {
+          "begin": "\\{-",
+          "end": "-\\}",
+          "name": "comment.block.pi",
+          "patterns": [
+            {
+              "include": "#comments"
+            }
+          ]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.pi",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.pi"
+            }
+          ]
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "match": "@(rate|priority|deadline|periodic|sporadic|aperiodic)\\b",
+          "name": "storage.modifier.attribute.pi"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "match": "\\b[0-9]+(?:\\.[0-9]+)?(?:ns|us|ms|s|m|h)\\b",
+          "name": "constant.numeric.duration.pi"
+        },
+        {
+          "match": "\\b[0-9]+(?:\\.[0-9]+)?\\b",
+          "name": "constant.numeric.pi"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(protocol|elem|system|program|module)\\s+([A-Z][A-Za-z0-9_']*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.pi"
+            },
+            "2": {
+              "name": "entity.name.type.pi"
+            }
+          }
+        },
+        {
+          "match": "\\b(include|import)\\b",
+          "name": "keyword.other.import.pi"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "\\b(if|then|else|match|with|scope|par|serve|loop|iterate|for|in|select|call|await|cancel|send|recv|close|closed|after|fail|on_error|restart|escalate|stop|resume|slice|dims|drop|instances|couple|expose|ctrl|state|worker|op|purity|contract|main)\\b",
+          "name": "keyword.control.pi"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "match": "\\b(true|false)\\b",
+          "name": "constant.language.boolean.pi"
+        },
+        {
+          "match": "\\b(Ok|Err|WorkerDied|Deadline|Transport|Rejected|BadFrame|WorkerError|Cancelled|NoQuorum|Incomplete|Unsupported)\\b",
+          "name": "constant.language.error.pi"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "match": "\\b(Chan|Future|Worker|Pool|Tensor|Shard|Config|Err|Result|HaloRing)\\b",
+          "name": "support.type.handle.pi"
+        },
+        {
+          "match": "\\b(Float|Int|Bool|UInt8|UInt16|UInt32|UInt64|String|Unit)\\b",
+          "name": "support.type.primitive.pi"
+        }
+      ]
+    },
+    "definition": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_'])([a-z][A-Za-z0-9_']*)(?=\\s*(?:→|->|:=))",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.pi"
+            }
+          }
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "match": "\\b(emit|emit_animation_frame|scalar|emit_series|emit_grid|emit_text|payload|allreduce|split|zip|range|len|empty|record|Params|Pool|kill_worker)\\b",
+          "name": "support.function.pi"
+        }
+      ]
+    },
+    "constructors": {
+      "patterns": [
+        {
+          "match": "\\b[A-Z][A-Za-z0-9_']*\\b",
+          "name": "entity.name.type.pi"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "match": "(?:→|←|⇒|‖|≡|≤|≥|:=|->|=>|\\|\\||==|!=|<=|>=|\\.\\.|[+*/%<>=|&!?@])",
+          "name": "keyword.operator.pi"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "[(){}\\[\\],:;.⟨⟩]",
+          "name": "punctuation.pi"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "match": "[a-z][A-Za-z0-9_']*",
+          "name": "variable.other.pi"
+        }
+      ]
+    }
+  }
+}

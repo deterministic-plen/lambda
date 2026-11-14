@@ -1,0 +1,3 @@
+﻿data Color = Red | Green | Blue
+c → Green
+match c with Red: 1, Green: 2, Blue: 3

@@ -1,0 +1,3 @@
+﻿data Five = F (a: Int, b: Int, c: Int, d: Int, e: Int)
+f → (F 1 2 3 4 5)
+match f with F a b c d e: (+ a (+ b (+ c (+ d e))))

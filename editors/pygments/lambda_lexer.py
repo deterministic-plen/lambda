@@ -21,28 +21,28 @@ from pygments.token import (
 )
 
 KEYWORDS = (
-    "if", "then", "else", "let", "letrec", "letloop", "in", "include",
+    "if", "then", "else", "let", "in", "include",
     "enum", "type", "match", "with",
 )
 
 BUILTINS = (
-    "abs acos and arrayb arrayb-clone arrayb-get arrayb-get-ro arrayb-length "
+    "abs acos and arrayf-of arrayi-of arrayb-of arrayf-pmap arrayf-gray-scott arrayf-gray-stripe arrayb arrayb-clone arrayb-get arrayb-get-ro arrayb-length "
     "arrayb-set arrayf arrayf-clone arrayf-get arrayf-get-ro arrayf-length "
     "arrayf-set arrayf-sum arrayi arrayi-clone arrayi-get arrayi-get-ro "
     "arrayi-length arrayi-sum arrayi-pmap arrayi-pmap-chunk arrayi-set "
     "asin atan atan2 bit-and bit-not bit-or bit-xor ceil cons cos e empty? "
     "exp fix float->int or "
-    "float->str floor freeze head immortalize int->float int->str ln log10 "
+    "float->str floor head immortalize int->float int->str ln log10 "
     "log2 map not pi pmap popcount pow print println product range read-file "
     "read-float read-int read-line round shl shr sin sqrt str->float str->int "
-    "str->list str-append str-len sum tail tan trunc write-bytes write-f64s "
-    "write-i64s Y π ∑ ∏ √"
+    "str->list str-append str-len sum tail tan trunc write-bytes write-file write-f64s "
+    "write-i64s π ∑ ∏ √"
 )
 
 TYPES = ("Int", "Float", "Bool", "String", "ArrayF", "ArrayI", "ArrayB")
 
 OPERATORS = (
-    r"&&|\|\||==|<=|>=|\*\*|[-+*/%<>&|!^]|⊕|⊖|⊗|⊘|⊙|≡|≺|≼|≻|≽|∥|→|->|←|<-"
+    r"==|<=|>=|\*\*|[-+*/%<>&|!]|⊕|⊖|⊗|⊘|⊙|≡|≺|≼|≻|≽|∥|→|->|←|<-"
 )
 
 SEGMENT = r"[A-Za-z_][A-Za-z0-9_?!<>-]*"
@@ -67,7 +67,6 @@ class LambdaLexer(RegexLexer):
     tokens = {
         "root": [
             (r";.*$", Comment.Single),
-            (r"#.*$", Comment.Single),
             (r'"', String, "string"),
             (r"λp(?=\s)|\\p(?=\s)", Keyword.Reserved),
             (r"λ|\\", Keyword.Reserved),

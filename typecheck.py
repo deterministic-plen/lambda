@@ -18,7 +18,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from lambda_ast import (
     App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, Match, Node, PRIM,
-    RecordField, RecordLit, SumLit, Var, walk,
+    DataCtor, RecordField, RecordLit, SumLit, Var, walk,
 )
 from errors import TypeError_
 
@@ -121,6 +121,23 @@ class TSum(TRecord):
         self.variants = tuple(variants)
         self.max_words = max_words
         self.word_rep = word_rep
+
+    def variant(self, name: str):
+        for variant, tag, fields in self.variants:
+            if variant == name:
+                return tag, fields
+        return None
+
+
+class TAdt(TCon):
+    """A monomorphic recursive ADT.  ``layout`` is chosen from its fields."""
+    __slots__ = ("variants", "params", "layout")
+
+    def __init__(self, name: str, variants, params=()) -> None:
+        super().__init__(name)
+        self.variants = tuple(variants)
+        self.params = tuple(params)
+        self.layout = "boxed"
 
     def variant(self, name: str):
         for variant, tag, fields in self.variants:
@@ -270,21 +287,33 @@ def default_numeric(t: Type) -> None:
 
 def parse_type_annotation(text: str, loc=None,
                           known_enums: Optional[Set[str]] = None,
-                          known_records: Optional[Dict[str, "TRecord"]] = None) -> Type:
+                          known_records: Optional[Dict[str, "TRecord"]] = None,
+                          known_adts: Optional[Dict[str, "TAdt"]] = None,
+                          known_params: Optional[Set[str]] = None) -> Type:
     text = text.strip()
     if text.startswith("[") and text.endswith("]"):
         return TList(parse_type_annotation(text[1:-1], loc, known_enums,
-                                           known_records))
+                                           known_records, known_adts, known_params))
     simple = {
         "Int": TINT, "Float": TFLOAT, "Bool": TBOOL, "String": TSTR,
         "ArrayF": TARRAYF, "ArrayI": TARRAYI, "ArrayB": TARRAYB,
     }
+    if "<" in text:
+        base = text.split("<", 1)[0].strip()
+        if known_adts is not None and base in known_adts:
+            return known_adts[base]
+    if known_params is not None and text in known_params:
+        # Erased generic parameter: value is stored boxed and the argument
+        # position is unconstrained until proper monomorphization lands.
+        return TVar()
     if text in simple:
         return simple[text]
     if known_enums is not None and text in known_enums:
         return TEnum(text)
     if known_records is not None and text in known_records:
         return known_records[text]
+    if known_adts is not None and text in known_adts:
+        return known_adts[text]
     raise TypeError_(f"unknown type annotation '{text}'", loc)
 
 
@@ -371,6 +400,8 @@ def rep_of(t: Optional[Type]) -> str:
     t = prune(t)
     if isinstance(t, TEnum):
         return I64
+    if isinstance(t, TAdt):
+        return I64 if t.layout == "arena" else BOX
     if isinstance(t, TRecord):
         return "REC:" + t.name
     if isinstance(t, TCon) and t.name in ("Int", "Bool"):
@@ -380,20 +411,6 @@ def rep_of(t: Optional[Type]) -> str:
     return BOX
 
 
-def ret_and_params(t: Type) -> Tuple[List[Type], Type]:
-    """Split a curried function type into (argument types, result type)."""
-
-    args: List[Type] = []
-    t = prune(t)
-    while isinstance(t, TFun):
-        args.append(t.arg)
-        t = prune(t.ret)
-    return args, t
-
-
-def arity_of(t: Type) -> int:
-    args, _ = ret_and_params(t)
-    return len(args)
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +481,7 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TSTR], TFLOAT))
     if name in ("print", "println"):
         return _forall(lambda m: tfun([m["a"]], m["a"]))
-    if name in ("fix", "Y"):
+    if name in "fix":
         # ((a -> b) -> (a -> b)) -> (a -> b)
         return _forall(lambda m: tfun(
             [tfun([tfun([m["a"]], m["b"])], tfun([m["a"]], m["b"]))],
@@ -500,12 +517,18 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
             [tfun([m["a"]], m["b"]), TList(m["a"])], TList(m["b"])))
     if name == "range":
         return mono(tfun([TINT, TINT], TList(TINT)))
-    if name in ("immortalize", "freeze"):
+    if name in "immortalize":
         return _forall(lambda m: tfun([m["a"]], m["a"]))
     # Flat arrays: one RC buffer, no per-element wrappers.  `set` consumes the
     # array and returns the same buffer, so callers treat it linearly.
     if name == "arrayf":
         return mono(tfun([TINT, TFLOAT], TARRAYF))
+    if name == "arrayf-of":
+        return mono(tfun([TList(TFLOAT)], TARRAYF))
+    if name == "arrayi-of":
+        return mono(tfun([TList(TINT)], TARRAYI))
+    if name == "arrayb-of":
+        return mono(tfun([TList(TINT)], TARRAYB))
     if name == "arrayf-get":
         return mono(tfun([TARRAYF, TINT], TFLOAT))
     if name in ("arrayi-get", "arrayi-get-ro"):
@@ -514,6 +537,13 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TARRAYF, TINT], TFLOAT))
     if name in ("arrayb-get-ro",):
         return mono(tfun([TARRAYB, TINT], TINT))
+    if name == "arrayf-pmap":
+        return mono(tfun([tfun([TINT], TFLOAT), TINT], TARRAYF))
+    if name == "arrayf-gray-scott":
+        return mono(tfun([TARRAYF, TINT, TFLOAT, TFLOAT, TFLOAT, TFLOAT, TFLOAT, TINT], TARRAYF))
+    if name == "arrayf-gray-stripe":
+        return mono(tfun([TARRAYF, TARRAYF, TARRAYF, TINT, TINT,
+                          TFLOAT, TFLOAT, TFLOAT, TFLOAT, TFLOAT], TARRAYF))
     if name == "arrayi-pmap":
         return mono(tfun([tfun([TINT], TINT), TINT], TARRAYI))
     if name == "arrayi-pmap-chunk":
@@ -554,6 +584,8 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TARRAYF], TINT))
     if name == "write-i64s":
         return mono(tfun([TARRAYI], TINT))
+    if name == "write-file":
+        return mono(tfun([TSTR, TARRAYB], TINT))
     raise TypeError_(f"unknown primitive '{name}'")
 
 
@@ -567,6 +599,7 @@ class Inferencer:
         self.enum_names: Set[str] = set()
         self.enum_variants: Dict[str, Dict[str, int]] = {}
         self.record_schemas: Dict[str, TRecord] = {}
+        self.adt_schemas: Dict[str, TAdt] = {}
 
     def infer_program(self, program: Node) -> Type:
         self.enum_names = {
@@ -574,6 +607,43 @@ class Inferencer:
         }
         # Product fields are restricted to unboxed scalar/enum values for now.
         self.record_schemas = {}
+        self.adt_schemas = {}
+        data_decls = []
+        for block in walk(program):
+            if isinstance(block, Block):
+                data_decls.extend(getattr(block, "data_decls", ()))
+        self.data_params = set()
+        for d in data_decls:
+            self.data_params.update(d.params)
+            self.adt_schemas[d.name] = TAdt(d.name, (), tuple(d.params))
+        for d in data_decls:
+            variants = []
+            for tag, v in enumerate(d.variants):
+                fields = []
+                for f in v.fields:
+                    ft = parse_type_annotation(
+                        f.type_text, f.loc, self.enum_names, {},
+                        self.adt_schemas, self.data_params)
+                    fields.append((f.name, ft))
+                variants.append((v.name, tag, tuple(fields)))
+            adt = self.adt_schemas[d.name]
+            adt.variants = tuple(variants)
+            # Scalar and arena-ADT fields can use the flat node arena; any
+            # boxed field (String, list, function, etc.) keeps the boxed path.
+            arena_ok = not adt.params
+            for _, _, fields in adt.variants:
+                for _, ft in fields:
+                    if isinstance(ft, TAdt):
+                        if ft is not adt and ft.layout != "arena":
+                            arena_ok = False
+                    elif isinstance(ft, TList) and isinstance(ft.elem, TAdt):
+                        if ft.elem is not adt and ft.elem.layout != "arena":
+                            arena_ok = False
+                    elif isinstance(ft, TCon) and ft.name in ("Int", "Bool", "Float"):
+                        continue
+                    else:
+                        arena_ok = False
+            adt.layout = "arena" if arena_ok else "boxed"
         for node in walk(program):
             if not isinstance(node, RecordLit):
                 continue
@@ -653,6 +723,26 @@ class Inferencer:
         return t
 
     def _infer(self, node: Node, env: Dict[int, TScheme]) -> Type:
+        if isinstance(node, DataCtor):
+            adt = self.adt_schemas.get(node.data_name)
+            if adt is None:
+                raise TypeError_(f"unknown data type '{node.data_name}'", node.loc)
+            info = adt.variant(node.variant)
+            if info is None:
+                raise TypeError_(f"unknown data variant '{node.variant}'", node.loc)
+            _, fields = info
+            if len(fields) != len(node.args):
+                raise TypeError_(
+                    f"'{node.variant}' expects {len(fields)} fields, got {len(node.args)}",
+                    node.loc)
+            for arg, (_, ftype) in zip(node.args, fields):
+                arg_t = self.infer(arg, env)
+                try:
+                    unify(arg_t, ftype)
+                except UnifyError as exc:
+                    raise TypeError_(f"argument type mismatch in '{node.variant}': {exc}",
+                                     arg.loc) from None
+            return adt
         if isinstance(node, SumLit):
             rec = self.record_schemas.get(node.sum_name)
             if not isinstance(rec, TSum):
@@ -756,7 +846,8 @@ class Inferencer:
                        if i < len(node.param_annotations) else None)
                 if ann:
                     v = parse_type_annotation(
-                        ann, node.loc, self.enum_names, self.record_schemas)
+                        ann, node.loc, self.enum_names, self.record_schemas,
+                        self.adt_schemas, self.data_params)
                 else:
                     v = TVar()
                 b.type = v
@@ -790,6 +881,48 @@ class Inferencer:
         if isinstance(node, Match):
             subject_t = self.infer(node.subject, env)
             pr = prune(subject_t)
+            if isinstance(pr, TAdt):
+                by_name = {variant: (tag, fields)
+                           for variant, tag, fields in pr.variants}
+                seen = set()
+                tags = []
+                result_t = None
+                for arm_idx, ((pattern, arm), binders) in enumerate(
+                        zip(node.arms, node.arm_bindings)):
+                    info = by_name.get(pattern)
+                    if info is None:
+                        raise TypeError_(
+                            f"'{pattern}' is not a variant of data {pr.name}",
+                            arm.loc)
+                    tag, fields = info
+                    if tag in seen:
+                        raise TypeError_(f"duplicate match arm for '{pattern}'", arm.loc)
+                    if len(fields) != len(binders):
+                        raise TypeError_(
+                            f"'{pattern}' expects {len(fields)} binders, got {len(binders)}",
+                            arm.loc)
+                    seen.add(tag)
+                    tags.append(tag)
+                    env2 = dict(env)
+                    for (fname, ftype), bnd in zip(fields, binders):
+                        env2[bnd.uid] = mono(ftype)
+                    arm_t = self.infer(arm, env2)
+                    if result_t is None:
+                        result_t = arm_t
+                    else:
+                        try:
+                            unify(result_t, arm_t)
+                        except UnifyError as exc:
+                            raise TypeError_(
+                                f"match arms have different types: "
+                                f"{show_type(result_t)} vs {show_type(arm_t)}", arm.loc) from None
+                missing = [v for v, t, _ in pr.variants if t not in seen]
+                if missing:
+                    raise TypeError_(
+                        "non-exhaustive match; missing " + ", ".join(sorted(missing)),
+                        node.loc)
+                node.pattern_tags = tags
+                return result_t if result_t is not None else TUNIT
             if isinstance(pr, TSum):
                 by_name = {variant: (tag, fields)
                            for variant, tag, fields in pr.variants}

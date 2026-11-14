@@ -18,5 +18,3 @@ factor → (int->float (iexp 4 (- m 1)))
 ) 
 A 4 4
 )
-h → (λx. sin x)
-(derivative h) 2.0

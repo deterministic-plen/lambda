@@ -10,6 +10,7 @@ const fs = require("fs");
 const path = require("path");
 
 let DATA = null;
+let PI_DATA = null;
 
 const NAME =
   "[A-Za-z_][A-Za-z0-9_?!<>-]*(?:::[A-Za-z_][A-Za-z0-9_?!<>-]*)*";
@@ -23,6 +24,16 @@ function loadData(context) {
     return {
       keywords: [], types: [], constants: [], primitives: [], operators: [],
     };
+  }
+}
+
+function loadPiData(context) {
+  try {
+    const file = path.join(context.extensionPath, "pi-language-data.json");
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    console.warn("pi: could not load pi-language-data.json:", err.message);
+    return { keywords: [], types: [], constants: [], builtins: [], attributes: [] };
   }
 }
 
@@ -89,12 +100,50 @@ function provideCompletions(document) {
   return new vscode.CompletionList(items, false);
 }
 
+function providePiCompletions(document) {
+  const data = PI_DATA || {};
+  const text = document.getText();
+  const items = [];
+  const seen = new Set();
+  const nameRe = /(?:^|\n)\s*([a-z][A-Za-z0-9_']*)\s*(?:→|->|:=)/g;
+  for (const m of text.matchAll(nameRe)) {
+    add(items, seen, m[1], vscode.CompletionItemKind.Function,
+        "definition in this file", "0_");
+  }
+  for (const m of text.matchAll(/\b(?:protocol|elem|system|program)\s+([A-Z][A-Za-z0-9_']*)/g)) {
+    add(items, seen, m[1], vscode.CompletionItemKind.Class,
+        "Pi declaration", "1_");
+  }
+  for (const name of data.keywords || []) {
+    add(items, seen, name, vscode.CompletionItemKind.Keyword, "Pi keyword", "2_");
+  }
+  for (const name of data.builtins || []) {
+    add(items, seen, name, vscode.CompletionItemKind.Function, "Pi builtin", "3_");
+  }
+  for (const name of data.types || []) {
+    add(items, seen, name, vscode.CompletionItemKind.Class, "Pi type", "4_");
+  }
+  for (const name of data.constants || []) {
+    add(items, seen, name, vscode.CompletionItemKind.Constant, "Pi constant", "5_");
+  }
+  for (const name of data.attributes || []) {
+    add(items, seen, "@" + name, vscode.CompletionItemKind.Keyword, "scheduler attribute", "6_");
+  }
+  return new vscode.CompletionList(items, false);
+}
+
 function activate(context) {
   DATA = loadData(context);
+  PI_DATA = loadPiData(context);
   context.subscriptions.push(
     vscode.languages.registerCompletionItemProvider("lambda", {
       provideCompletionItems(document) {
         return provideCompletions(document);
+      },
+    }),
+    vscode.languages.registerCompletionItemProvider("pi", {
+      provideCompletionItems(document) {
+        return providePiCompletions(document);
       },
     })
   );

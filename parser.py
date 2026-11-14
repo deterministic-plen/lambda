@@ -15,19 +15,18 @@ Grammar (after desugaring ``let``)::
                | 'true' | 'false' | IDENT | 'λ' ... | 'if' ... | 'let' ...
 
 Every function binding uses the same ``name → value`` notation, whether or
-not it is recursive.  ``letrec``/``letloop`` are accepted as deprecated aliases
-for ``let`` so old programs keep running; they have identical (recursive)
-semantics now.
+not it is recursive.  ``let`` is the only recursive-binding form.
 """
 
 from __future__ import annotations
 
 import sys
+import math
 from typing import List, Optional, Tuple
 
 from lambda_ast import (
-    App, Block, Borrow, Def, EnumLit, If, Lam, Lit, Loc, Match, Node,
-    RecordField, RecordLit, SumLit, Var,
+    App, Block, Borrow, DataCtor, DataDecl, DataField, DataVariant, Def,
+    EnumLit, If, Lam, Lit, Loc, Match, Node, RecordField, RecordLit, SumLit, Var,
 )
 from errors import SyntaxErr
 from lexer import Token, tokenize
@@ -42,32 +41,33 @@ PRIMITIVES = {
     "cons", "head", "tail", "empty?", "nil",
     # flat arrays (consume-on-write)
     "arrayf", "arrayi", "arrayb",
+    "arrayf-of", "arrayi-of", "arrayb-of",
     "arrayf-get", "arrayf-set", "arrayf-length", "arrayf-clone",
     "arrayi-get", "arrayi-set", "arrayi-length", "arrayi-clone",
     "arrayb-get", "arrayb-set", "arrayb-length", "arrayb-clone",
     "arrayi-sum", "arrayf-sum",
     "arrayf-get-ro", "arrayi-get-ro", "arrayb-get-ro",
-    "arrayi-pmap", "arrayi-pmap-chunk",
+    "arrayi-pmap", "arrayi-pmap-chunk", "arrayf-pmap", "arrayf-gray-scott", "arrayf-gray-stripe",
     # binary data stream (requires --data)
     "write-bytes", "write-f64s", "write-i64s",
     # strings
     "str->int", "int->str", "str->list", "str-len", "str-append",
-    "read-file",
+    "read-file", "write-file",
     # io / misc
     "print", "println", "not", "and", "or",
     # fixed-point combinator (call-by-value)
-    "fix", "Y",
+    "fix",
     # float conversions and mathematics
     "int->float", "float->int", "str->float", "float->str",
     "√", "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "exp", "ln", "log10", "log2", "floor", "ceil", "round", "trunc",
-    "pow", "**", "^", "abs", "π", "pi", "e",
+    "pow", "**", "abs", "π", "pi", "e",
     "∑", "sum", "∏", "product",
     # bit-level integer operations
-    "&", "|", "&&", "!", "bit-and", "bit-or", "bit-xor", "bit-not",
+    "&", "|", "!", "bit-and", "bit-or", "bit-xor", "bit-not",
     "shl", "shr", "popcount",
     # lists and parallelism
-    "map", "pmap", "range", "immortalize", "freeze",
+    "map", "pmap", "range", "immortalize",
     # optional terminal input (requires --input)
     "read-line", "read-int", "read-float",
 }
@@ -88,6 +88,7 @@ OP_CANON = {
     "cons": "cons", "head": "head", "tail": "tail", "empty?": "empty",
     "nil": "nil",
     "arrayf": "arrayf", "arrayi": "arrayi", "arrayb": "arrayb",
+    "arrayf-of": "arrayf_of", "arrayi-of": "arrayi_of", "arrayb-of": "arrayb_of",
     "arrayf-get": "arrayf_get", "arrayf-set": "arrayf_set",
     "arrayf-length": "arrayf_length", "arrayf-clone": "arrayf_clone",
     "arrayi-get": "arrayi_get", "arrayi-set": "arrayi_set",
@@ -96,16 +97,17 @@ OP_CANON = {
     "arrayb-length": "arrayb_length", "arrayb-clone": "arrayb_clone",
     "arrayi-sum": "arrayi_sum", "arrayf-sum": "arrayf_sum",
     "arrayf-get-ro": "arrayf_get_ro", "arrayi-get-ro": "arrayi_get_ro",
-    "arrayb-get-ro": "arrayb_get_ro", "arrayi-pmap": "arrayi_pmap",
+    "arrayb-get-ro": "arrayb_get_ro", "arrayi-pmap": "arrayi_pmap", "arrayf-pmap": "arrayf_pmap",
+    "arrayf-gray-scott": "gray_scott", "arrayf-gray-stripe": "gray_stripe",
     "arrayi-pmap-chunk": "arrayi_pmap_chunk",
     "write-bytes": "write_bytes", "write-f64s": "write_f64s",
     "write-i64s": "write_i64s",
     "str->int": "str_to_int", "int->str": "int_to_str",
     "str->list": "str_to_list", "str-len": "str_len",
-    "str-append": "str_append", "read-file": "read_file",
+    "str-append": "str_append", "read-file": "read_file", "write-file": "write_file",
     "print": "print", "println": "println", "not": "not",
     "and": "and", "or": "or",
-    "fix": "fix", "Y": "fix",
+    "fix": "fix",
     "int->float": "int_to_float", "float->int": "float_to_int",
     "str->float": "str_to_float", "float->str": "float_to_str",
     "√": "sqrt", "sqrt": "sqrt",
@@ -113,40 +115,36 @@ OP_CANON = {
     "asin": "asin", "acos": "acos", "atan": "atan", "atan2": "atan2",
     "exp": "exp", "ln": "ln", "log10": "log10", "log2": "log2",
     "floor": "floor", "ceil": "ceil", "round": "round", "trunc": "trunc",
-    "pow": "pow", "**": "pow", "^": "pow",
+    "pow": "pow", "**": "pow",
     "abs": "abs", "π": "pi", "pi": "pi", "e": "e",
     "∑": "sum", "sum": "sum", "∏": "product", "product": "product",
-    "&": "bit_and", "&&": "bit_and", "bit-and": "bit_and",
+    "&": "bit_and", "bit-and": "bit_and",
     "|": "bit_or", "bit-or": "bit_or",
     "bit-xor": "bit_xor",
     "!": "bit_not", "bit-not": "bit_not",
     "shl": "shl", "shr": "shr", "popcount": "popcount",
     "map": "map", "pmap": "pmap", "range": "range",
-    "immortalize": "immortalize", "freeze": "immortalize",
+    "immortalize": "immortalize",
     "read-line": "read_line", "read-int": "read_int",
     "read-float": "read_float",
 }
-
-ARITH_OPS = {"add", "sub", "mul", "div", "mod"}
-COMPARE_OPS = {"eq", "lt", "le", "gt", "ge"}
 
 INFIX_NAMES = {
     "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
     "⊕", "⊖", "⊗", "⊘", "⊙", "≡", "≺", "≼", "≻", "≽",
 }
 
-STOP_KEYWORDS = {"then", "else", "in"}
-
 
 class Parser:
     def __init__(self, tokens: List[Token], warn_infix: bool = True) -> None:
         self.tokens = tokens
         self.pos = 0
-        self.legacy_used = False
         self.contexts: List[Tuple[str, Loc]] = []
         self.warn_infix = warn_infix
         self.enum_types: set[str] = set()
         self.record_types: set[str] = set()
+        self.data_decls: List[DataDecl] = []
+        self.block_depth = 0
 
     # -- token helpers ----------------------------------------------------
     def peek(self, offset: int = 0) -> Token:
@@ -202,6 +200,10 @@ class Parser:
         tok = self.peek()
         return tok.kind == "keyword" and tok.value == "type"
 
+    def at_data_start(self) -> bool:
+        return (self.peek().kind == "ident" and self.peek().value == "data"
+                and self.peek(1).kind == "ident")
+
     def at_include(self) -> bool:
         return (self.peek().kind == "keyword"
                 and self.peek().value == "include"
@@ -222,8 +224,11 @@ class Parser:
 
     def parse_definitions(self) -> List[Def]:
         defs: List[Def] = []
-        while self.at_enum_start() or self.at_type_start() or self.at_definition_start():
-            if self.at_enum_start():
+        while (self.at_enum_start() or self.at_type_start()
+               or self.at_data_start() or self.at_definition_start()):
+            if self.at_data_start():
+                defs.extend(self.parse_data_decl())
+            elif self.at_enum_start():
                 defs.extend(self.parse_enum())
             elif self.at_type_start():
                 defs.extend(self.parse_type_decl())
@@ -232,6 +237,54 @@ class Parser:
                 self.expect("arrow", what="'→'")
                 value = self.parse_definition_value()
                 defs.append(Def(name_tok.value, value, name_tok.loc))
+        return defs
+
+    def parse_data_decl(self) -> List[Def]:
+        start = self.pop().loc
+        if self.block_depth:
+            raise SyntaxErr("data declarations are only allowed at the top level", start)
+        name_tok = self.expect("ident", what="a data type name")
+        name = name_tok.value
+        params: List[str] = []
+        if "<" in name:
+            base, _, rest = name.partition("<")
+            name = base
+            params = [x.strip() for x in rest.rstrip(">").split(",") if x.strip()]
+        if self.peek().kind == "ident" and self.peek().value == "=":
+            self.pop()
+        else:
+            raise SyntaxErr("expected '=' after data name", self.peek().loc)
+        variants: List[DataVariant] = []
+        while True:
+            v = self.expect("ident", what="a data variant name")
+            fields: List[DataField] = []
+            if self.check("punct", "("):
+                self.pop()
+                while not self.check("punct", ")"):
+                    f = self.expect("ident", what="a field name")
+                    self.expect("punct", ":", "':'")
+                    fields.append(DataField(f.value, self.parse_type_annotation(), f.loc))
+                    if self.check("punct", ","):
+                        self.pop()
+                        continue
+                    break
+                self.expect("punct", ")", "')'")
+            variants.append(DataVariant(v.value, fields, v.loc))
+            if self.check("pipe"):
+                self.pop()
+                continue
+            break
+        self.data_decls.append(DataDecl(name, params, variants, start))
+        defs: List[Def] = []
+        for tag, variant in enumerate(variants):
+            args = [Var(f.name, f.loc) for f in variant.fields]
+            body = DataCtor(name, variant.name, tag, args, variant.loc)
+            if variant.fields:
+                ctor = Lam([f.name for f in variant.fields], body, variant.loc)
+                ctor.param_annotations = [f.type_text for f in variant.fields]
+                defs.append(Def(variant.name, ctor, variant.loc))
+            else:
+                defs.append(Def(variant.name, body, variant.loc))
         return defs
 
     def parse_type_decl(self) -> List[Def]:
@@ -398,7 +451,7 @@ class Parser:
                 raise SyntaxErr(
                     "included files must contain definitions only "
                     f"(found '{tok.value}')", tok.loc)
-            return Block(defs, None, start)
+            return Block(defs, None, start, data_decls=self.data_decls)
         if self.peek().kind == "eof":
             if defs:
                 raise SyntaxErr(
@@ -412,14 +465,12 @@ class Parser:
         if self.peek().kind != "eof":
             tok = self.peek()
             raise SyntaxErr(f"unexpected token '{tok.value}' after program", tok.loc)
-        return Block(defs, body, start)
-
-    def parse_program(self, loader=None) -> Node:
-        return self.parse_unit(loader, require_body=True)
+        return Block(defs, body, start, data_decls=self.data_decls)
 
     # -- blocks and definitions ------------------------------------------
     def parse_block(self) -> Block:
         start = self.peek().loc
+        self.block_depth += 1
         defs = self.parse_definitions()
         if self.peek().kind == "eof":
             where = self.context_suffix()
@@ -431,7 +482,7 @@ class Parser:
                 "expected an expression, but the file ended" + where,
                 self.peek().loc)
         body = self.parse_expr()
-        return Block(defs, body, start)
+        return Block(defs, body, start, data_decls=self.data_decls)
 
     def parse_definition_value(self) -> Node:
         """A definition value is one atom, so ``f → (λ...)`` is unambiguous."""
@@ -447,8 +498,8 @@ class Parser:
                 return self.parse_if()
             if tok.value == "match":
                 return self.parse_match()
-            if tok.value in ("let", "letrec", "letloop"):
-                return self.parse_let(tok.value)
+            if tok.value == "let":
+                return self.parse_let()
             if tok.value == "enum":
                 raise SyntaxErr(
                     "enum declarations must appear before the block's final "
@@ -562,11 +613,9 @@ class Parser:
         match.binders = binders
         return match
 
-    def parse_let(self, keyword: str) -> Block:
+    def parse_let(self) -> Block:
         start = self.pop().loc
         self.push_context("let expression", start)
-        if keyword != "let":
-            self.legacy_used = True
         name_tok = self.expect("ident", what="a definition name")
         # '=' is tokenised as an identifier atom.
         self.expect("ident", "=", "'='")
@@ -678,10 +727,16 @@ class Parser:
 
         if tok.kind == "int":
             self.pop()
-            return Lit(int(tok.value), tok.loc)
+            value = int(tok.value)
+            if value < -(1 << 63) or value >= (1 << 63):
+                raise SyntaxErr("integer literal is outside the 64-bit range", tok.loc)
+            return Lit(value, tok.loc)
         if tok.kind == "float":
             self.pop()
-            return Lit(float(tok.value), tok.loc)
+            value = float(tok.value)
+            if not math.isfinite(value):
+                raise SyntaxErr("float literal must be finite", tok.loc)
+            return Lit(value, tok.loc)
         if tok.kind == "string":
             self.pop()
             return Lit(tok.value, tok.loc)
@@ -691,8 +746,8 @@ class Parser:
             return self.parse_lambda(True)
         if tok.kind == "keyword" and tok.value == "if":
             return self.parse_if()
-        if tok.kind == "keyword" and tok.value in ("let", "letrec", "letloop"):
-            return self.parse_let(tok.value)
+        if tok.kind == "keyword" and tok.value == "let":
+            return self.parse_let()
         if tok.kind == "pipe":
             self.pop()
             return Var("|", tok.loc)

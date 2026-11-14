@@ -1,0 +1,53 @@
+﻿include "lib/list.lambda"
+
+data Expr =
+  Lit (value: Int)
+| Add (left: Expr, right: Expr)
+| Mul (left: Expr, right: Expr)
+| Neg (value: Expr)
+| If (cond: Expr, then_: Expr, else_: Expr)
+| Var (index: Int)
+| Let (index: Int, value: Expr, body: Expr)
+
+subst → (λn: Int replacement: Expr e: Expr.
+  match e with
+    Lit v: e,
+    Var i: (if (== i n) then replacement else e),
+    Add l r: (Add (subst n replacement l) (subst n replacement r)),
+    Mul l r: (Mul (subst n replacement l) (subst n replacement r)),
+    Neg v: (Neg (subst n replacement v)),
+    If c t f: (If (subst n replacement c) (subst n replacement t) (subst n replacement f)),
+    Let i v b:
+      (if (== i n)
+       then (Let i (subst n replacement v) b)
+       else (Let i (subst n replacement v) (subst n replacement b))))
+
+emit → (λe: Expr.
+  match e with
+    Lit v: (cons 0 (cons v nil)),
+    Add l r: (append (emit l) (append (emit r) (cons 1 nil))),
+    Mul l r: (append (emit l) (append (emit r) (cons 2 nil))),
+    Neg v: (append (emit v) (cons 3 nil)),
+    If c t f: (append (emit c) (append (emit t) (append (emit f) (cons 4 nil)))),
+    Var i: (cons 0 (cons 0 nil)),
+    Let i v b: (emit (subst i v b)))
+
+run → (λcode stack.
+  if (empty? code)
+  then (head stack)
+  else
+    op → (head code)
+    rest → (tail code)
+    if (== op 0)
+    then (run (tail rest) (cons (head rest) stack))
+    else if (== op 1)
+    then (run rest (cons (+ (head (tail stack)) (head stack)) (tail (tail stack))))
+    else if (== op 2)
+    then (run rest (cons (* (head (tail stack)) (head stack)) (tail (tail stack))))
+    else if (== op 3)
+    then (run rest (cons (- 0 (head stack)) (tail stack)))
+    else (run rest (cons (if (== (head (tail (tail stack))) 0) then (head stack) else (head (tail stack))) (tail (tail (tail stack))))))
+
+expr → (Let 0 (Lit 5) (Add (Var 0) (Var 0)))
+code → (emit expr)
+(run code nil)

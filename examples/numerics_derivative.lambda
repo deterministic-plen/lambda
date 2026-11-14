@@ -1,0 +1,5 @@
+; Numeric differentiation example; the library itself is definitions-only.
+include "numerics"
+
+h → (λx. sin x)
+(derivative h 2.0)

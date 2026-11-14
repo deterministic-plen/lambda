@@ -1,0 +1,9 @@
+﻿data Tree = Leaf | Node (value: Int, left: Tree, right: Tree)
+
+sum → (λt: Tree.
+  match t with
+    Leaf: 0,
+    Node v l r: (+ v (+ (sum l) (sum r))))
+
+t → (Node 1 (Node 2 Leaf Leaf) Leaf)
+(sum t)

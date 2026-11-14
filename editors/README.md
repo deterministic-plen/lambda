@@ -1,4 +1,4 @@
-# Lambda editor support
+# Lambda and Pi editor support
 
 Two highlighting implementations are provided:
 
@@ -15,14 +15,39 @@ diagnostics, and go-to-definition are not implemented.
 
 The extension contributes:
 
-- language id `lambda`
-- file extension `.lambda`
-- line comments `;` and `#`
-- bracket matching for `()` and `[]`
-- scope `source.lambda`
-- completion for primitives, keywords, built-in types, constants, operators,
-  and definitions/types/fields/variants found in the current document
-- qualified names with `::` (`Complex::add`) and the `&x` borrow inspection
+**Lambda** (`source.lambda`)
+- language id `lambda`, extension `.lambda`
+- comments `;` and `#`; brackets `()[]`
+- language icon fallback for `.lambda` files (VS Code 1.64+); the extension
+  does not contribute a global file-icon theme
+- completion for primitives, keywords, types, constants, operators, local
+  definitions/types/fields/variants
+- qualified names (`Complex::add`) and `&x` inspection
+
+**Pi** (`source.pi`)
+- language id `pi`, extension `.pi`
+- comments `--` and `{- ... -}`; brackets `()[]{}`
+- keywords, handle types (`Chan`, `Worker`, `Pool`, `Shard`, `Err`, …),
+  declarations (`protocol`, `elem`, `system`, `program`), builtins
+  (`emit_series`, `Pool`, `allreduce`, …), error constructors
+- scheduler attributes (`@rate`, `@deadline`, `@priority`, …)
+- local definitions (`name →`, `name :=`) and protocol/element names
+
+### One-command install
+
+From the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File editors\install_vscode.ps1
+```
+
+```bash
+sh editors/install_vscode.sh
+```
+
+The script copies both grammars and both completion providers into
+`~/.vscode/extensions/lambda-language-0.1.0`; restart VS Code afterwards.
+No `npm install`, build step, or language server is required.
 
 ### Install locally (no build step)
 
@@ -82,6 +107,11 @@ code --install-extension lambda-language-0.1.0.vsix
    }
    ```
 5. Cached grammar after an update: **Developer: Reload Window**, or restart.
+6. If every file icon became blank/generic after installing an older Lambda
+   extension build, the old `Lambda Theme` file-icon theme was selected
+   globally. The current extension no longer contributes an icon theme. Run
+   **Preferences: File Icon Theme** and select **Seti** (or your preferred
+   theme) once; the extension supplies only a `.lambda` language-icon fallback.
 
 ### Verify the grammar without VS Code
 
@@ -126,9 +156,16 @@ Validation:
 
 ```bash
 python editors/test_highlight.py
+python editors/test_pi_highlight.py
 ```
 
-This checks the extension manifest and completion provider, verifies that
+`test_pi_highlight.py` checks the Pi grammar, `pi-language-data.json`, the
+extension's Pi completion provider, and lexes every `.pi` file with
+`PiLexer` (no `Error` tokens).  The Pi lexer handles `--` and nested
+`{- ... -}` comments, durations (`5ms`, `1s`), attributes, handle/type names,
+protocol/element declarations, error constructors, and Unicode operators.
+
+`test_highlight.py` checks the Lambda manifest and completion provider, verifies that
 `language-data.json` matches `parser.PRIMITIVES`/`lexer.KEYWORDS`, compiles each
 TextMate regex under Python's engine, and lexes every `.lambda` file with no
 `Error` tokens.  It does not replace opening a file in VS Code, since TextMate
@@ -154,7 +191,7 @@ uses Oniguruma.
 | primitive name | `support.function.lambda` |
 | constructor / type / sum variant | `entity.name.type.lambda` |
 | `&x` inspection / `&` after `λ` | `storage.modifier.borrow.lambda` |
-| `&&` and `&` bitwise and | `keyword.operator.lambda` |
+| `&` and `bit-and` bitwise and | `keyword.operator.lambda` |
 | `→` / `->` / `←` / `<-` | `keyword.operator.arrow.lambda` |
 | `λ`, `λp`, `\`, `\p` | `storage.type.function*.lambda` |
 

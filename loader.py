@@ -3,7 +3,7 @@
 Included files contain definitions only.  Their definitions are spliced into
 the including program as ordinary mutually recursive top-level definitions;
 paths are resolved relative to the file that writes the directive, then in
-``LAMBDA_PATH`` and the compiler's ``lib/`` directory.  Cycles are errors and a
+``LAMBDA_PATH``/``LAMBDA_LIB`` and the compiler's ``lib/`` directory.  Cycles are errors and a
 file is included at most once per compilation.
 """
 
@@ -29,9 +29,21 @@ class ProgramLoader:
         env = os.environ.get("LAMBDA_PATH", "")
         if env:
             paths.extend(p for p in env.split(os.pathsep) if p)
+        lib_env = os.environ.get("LAMBDA_LIB", "")
+        if lib_env:
+            paths.extend(p for p in lib_env.split(os.pathsep) if p)
+        # The compiler checkout itself and its bundled standard library are
+        # always available, even when the source lives outside the checkout.
         paths.append(root)
         paths.append(default_lib)
-        self.search_paths = [os.path.abspath(p) for p in paths]
+        # Stable order, duplicates removed.  A caller-supplied or LAMBDA_PATH
+        # directory intentionally precedes the bundled standard library.
+        unique = []
+        for p in paths:
+            ap = os.path.abspath(p)
+            if ap not in unique:
+                unique.append(ap)
+        self.search_paths = unique
         self.loaded: Set[str] = set()
         self.active: List[str] = []
 

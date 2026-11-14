@@ -1,35 +1,43 @@
 {
   "name": "lambda-language",
-  "displayName": "Lambda",
-  "description": "Lambda language support: syntax highlighting, completion, qualified names",
+  "displayName": "Lambda + Pi",
+  "description": "Language support for Lambda and its Pi orchestrator",
   "version": "0.1.0",
   "publisher": "lambda",
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:lambda"
+    "onLanguage:lambda",
+    "onLanguage:pi"
   ],
   "engines": {
-    "vscode": "^1.60.0"
+    "vscode": "^1.64.0"
   },
   "categories": [
     "Programming Languages"
   ],
   "keywords": [
     "lambda",
-    "functional"
+    "pi",
+    "functional",
+    "orchestration"
   ],
   "contributes": {
     "languages": [
       {
         "id": "lambda",
-        "aliases": [
-          "Lambda",
-          "lambda"
-        ],
-        "extensions": [
-          ".lambda"
-        ],
-        "configuration": "./language-configuration.json"
+        "aliases": ["Lambda", "lambda"],
+        "extensions": [".lambda"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/lambda.svg",
+          "dark": "./icons/lambda.svg"
+        }
+      },
+      {
+        "id": "pi",
+        "aliases": ["Pi", "pi"],
+        "extensions": [".pi"],
+        "configuration": "./language-configuration-pi.json"
       }
     ],
     "grammars": [
@@ -37,19 +45,16 @@
         "language": "lambda",
         "scopeName": "source.lambda",
         "path": "./syntaxes/lambda.tmLanguage.json"
+      },
+      {
+        "language": "pi",
+        "scopeName": "source.pi",
+        "path": "./syntaxes/pi.tmLanguage.json"
       }
     ],
     "configurationDefaults": {
-      "[lambda]": {
-        "editor.wordBasedSuggestions": "off"
-      }
+      "[lambda]": { "editor.wordBasedSuggestions": "off" },
+      "[pi]": { "editor.wordBasedSuggestions": "off" }
     }
-  },
-    "iconThemes": [
-      {
-        "id": "lambda-icons",
-        "label": "Lambda Theme",
-        "path": "./icons/lambda-icon-theme.json"
-      }
-    ]
+  }
 }

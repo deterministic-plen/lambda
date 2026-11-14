@@ -1,0 +1,3 @@
+﻿data Point = P (x: Float, y: Float)
+p → (P 1.5 2.5)
+match p with P x y: (+ x y)

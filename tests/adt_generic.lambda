@@ -1,0 +1,5 @@
+﻿data List<X> = Nil | Cons (head: X, tail: List<X>)
+xs → (Cons 1 (Cons 2 Nil))
+match xs with
+  Nil: 0,
+  Cons h t: h

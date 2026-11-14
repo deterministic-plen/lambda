@@ -1,6 +1,7 @@
 type Complex (re: Float, im: Float) ;Rectangular form
 type PolarComplex (r:Float, arg:Float)
-
+max → (λa: Float b: Float. if (>= (abs a) (abs b)) then (abs a) else (abs b))
+min → (λa: Float b: Float. if (>= (abs a) (abs b)) then (abs b) else (abs a))
 Complex::add → (λa: Complex b: Complex.
   (Complex (+ a_re b_re) (+ a_im b_im)))
 
@@ -18,17 +19,45 @@ Complex::arg → (λa: Complex.
 )
 
 Complex::conj → (λa: Complex.
-(Complex a_re (- 0.0 b_im))
+(Complex a_re (- 0.0 a_im))
 )
 
 Complex::modulus →(λa: Complex.
-(sqrt (+  (* a_re a_re) (* a_im a_im)))
+  ratio → (/ (min a_re a_im) (max a_re a_im))
+  (* (max a_re a_im) (sqrt (+ 1.0 (* ratio ratio))))
 )
 
 Complex::toPolar → (λa: Complex.
-    (Polar (Complex::modulus(a),Complex::arg(a)))
+    (PolarComplex (Complex::modulus a) (Complex::arg a))
 )
 
 Complex::exp → (λa: Complex.
 (Complex::scale (Complex (cos (Complex::arg a)) (sin (Complex::arg a))) (exp a_re))
 )
+
+Complex::safe-div → (λa: Complex b: Complex.
+  if (and (== b_re 0.0) (== b_im 0.0))
+  then (Complex (/ 0.0 0.0) (/ 0.0 0.0))
+  else
+    if (>= (abs b_re) (abs b_im))
+    then
+      r → (/ b_im b_re)
+      d → (+ b_re (* b_im r))
+      (Complex (/ (+ a_re (* a_im r)) d)
+               (/ (- a_im (* a_re r)) d))
+    else
+      r → (/ b_re b_im)
+      d → (+ b_im (* b_re r))
+      (Complex (/ (+ (* a_re r) a_im) d)
+               (/ (- (* a_im r) a_re) d))
+)
+
+Complex::safe-recip → (λa: Complex. (Complex::safe-div (Complex 1.0 0.0) a))
+
+Complex::is-nan → (λa: Complex.
+  (or (not (== a_re a_re)) (not (== a_im a_im))))
+
+Complex::is-finite → (λa: Complex.
+  (and (and (== a_re a_re) (== a_im a_im))
+       (and (<= (abs a_re) 1.7976931348623157e308)
+            (<= (abs a_im) 1.7976931348623157e308))))

@@ -1,0 +1,4 @@
+﻿xs → (arrayf-of [1.0, 2.5, -3.0])
+is → (arrayi-of [1, 2, 3])
+bs → (arrayb-of [0, 255, 7])
+[int->float (arrayf-length xs), (arrayf-get xs 1), int->float (arrayi-get is 2), int->float (arrayb-get bs 1), int->float (arrayf-length (arrayf-of []))]

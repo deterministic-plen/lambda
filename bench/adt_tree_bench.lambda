@@ -1,0 +1,35 @@
+; Iterative complete-binary-tree traversal over an explicit node stack.
+; This is a prototype for the flat-arena layout: node ids are integers and
+; there is no per-node heap object.
+N → 1048576
+CAP → (+ N 1)
+
+walk → (λstack: ArrayI sp: Int acc: Int.
+  if (== sp 0)
+  then acc
+  else
+    node → (arrayi-get stack (- sp 1))
+    sp0 → (- sp 1)
+    acc2 → (+ acc node)
+    left → (+ (* 2 node) 1)
+    right → (+ left 1)
+    has-l → (< left N)
+    has-r → (< right N)
+    sp1 → (if (has-l) then (+ sp0 1) else sp0)
+    stack1 → (if (has-l) then (arrayi-set stack sp0 left) else stack)
+    sp2 → (if (has-r) then (+ sp1 1) else sp1)
+    stack2 → (if (has-r) then (arrayi-set stack1 sp1 right) else stack1)
+    (walk stack2 sp2 acc2)
+)
+
+walk-once → (λz: Int.
+  stack0 → (arrayi CAP 0)
+  stack1 → (arrayi-set stack0 0 0)
+  (walk stack1 1 0))
+
+run → (λr: Int acc: Int.
+  if (>= r 50)
+  then acc
+  else (run (+ r 1) (+ acc (walk-once 0))))
+
+(run 0 0)

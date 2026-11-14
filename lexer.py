@@ -9,7 +9,7 @@ New in this revision: f64 literals (``1.0``, ``1e-3``), type-annotation
 punctuation, list-comprehension/pipeline tokens (``|``, ``∥``, ``←``), range
 sugar (``..``) and the ``λp`` parallel-lambda marker.
 
-Comments run from ``;`` (or ``#``) to the end of the line.
+Comments run from ``;`` to the end of the line.
 """
 
 from __future__ import annotations
@@ -23,10 +23,9 @@ PUNCT = set("()[],.:")
 LAMBDA_CHARS = set("λ\\")
 ARROW = "→"
 LARROW = "←"
-RANGE = ".."
 
 KEYWORDS = {
-    "if", "then", "else", "let", "in", "letrec", "letloop", "include",
+    "if", "then", "else", "let", "in", "include",
     "enum", "type", "match", "with",
 }
 
@@ -158,7 +157,7 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
             i = j
             continue
 
-        if ch in ";#":
+        if ch == ";":
             j = source.find("\n", i)
             if j < 0:
                 j = n
@@ -306,7 +305,7 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
                     j = k
                     continue
                 break
-            if (c.isspace() or c in '()[],.:;"#' or c in LAMBDA_CHARS
+            if (c.isspace() or c in '()[],.:;"' or c in LAMBDA_CHARS
                     or c in (ARROW, LARROW, "|", "∥")):
                 break
             j += 1

@@ -10,8 +10,9 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from lambda_ast import (
-    App, Binding, Block, Borrow, Def, EnumLit, If, Lam, Lit, LOCAL_DEF, Match,
-    Node, PARAM, PRIM, RecordField, RecordLit, SumLit, TOP_DEF, Var, walk,
+    App, Binding, Block, Borrow, DataCtor, Def, EnumLit, If, Lam, Lit,
+    LOCAL_DEF, Match, Node, PARAM, PRIM, RecordField, RecordLit, SumLit,
+    TOP_DEF, Var, walk,
 )
 from errors import ResolveError
 from parser import PRIMITIVES
@@ -109,6 +110,11 @@ class Resolver:
 
         if isinstance(node, Borrow):
             self.resolve(node.value, scope)
+            return
+
+        if isinstance(node, DataCtor):
+            for a in node.args:
+                self.resolve(a, scope)
             return
 
         if isinstance(node, RecordField):

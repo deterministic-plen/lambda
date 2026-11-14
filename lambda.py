@@ -21,21 +21,21 @@ from lambda_ast import Lam, walk
 from loader import load_program
 from resolve import Resolver
 from runtime import RUNTIME_C
+import type_algebra
 import typecheck
 from typecheck import show_type
 
 
 def _runtime_object(workdir: str, clang: str, atomic_rc: bool = False) -> str:
-    """Compile (or reuse) the C runtime object."""
+    """Compile the C runtime into this build's private work directory.
 
-    digest = hashlib.sha256(RUNTIME_C.encode("utf-8")).hexdigest()[:16]
-    cache_dir = os.path.join(tempfile.gettempdir(), "lambda-runtime-cache")
-    os.makedirs(cache_dir, exist_ok=True)
+    The old predictable /tmp cache let another local user pre-place an object
+    that was later linked into generated executables.  Compiling per build costs
+    little and removes that trust boundary entirely.
+    """
     variant = "atomic" if atomic_rc else "plain"
-    obj = os.path.join(cache_dir, f"runtime-{digest}-{variant}.o")
-    if os.path.exists(obj) and os.path.getmtime(obj) >= _runtime_mtime():
-        return obj
-    src = os.path.join(workdir, "runtime.c")
+    obj = os.path.join(workdir, f"runtime-{variant}.o")
+    src = os.path.join(workdir, f"runtime-{variant}.c")
     with open(src, "w", encoding="utf-8") as f:
         f.write(RUNTIME_C)
     cmd = [clang, "-O3", "-Wno-override-module"]
@@ -49,22 +49,41 @@ def _runtime_object(workdir: str, clang: str, atomic_rc: bool = False) -> str:
     return obj
 
 
-def _runtime_mtime() -> float:
-    try:
-        return os.path.getmtime(__file__)
-    except OSError:
-        return 0.0
+def data_layouts(input_file: str) -> int:
+    program = load_program(input_file)
+    decls = getattr(program, "data_decls", [])
+    if not decls:
+        print("no data declarations")
+        return 0
+    for d in decls:
+        parts = []
+        for v in d.variants:
+            if v.fields:
+                fields = ", ".join(f"{f.name}: {f.type_text}" for f in v.fields)
+                parts.append(f"{v.name} ({fields})")
+            else:
+                parts.append(v.name)
+        params = "<" + ", ".join(d.params) + ">" if d.params else ""
+        text = f"data {d.name}{params} = " + " | ".join(parts)
+        alg = type_algebra.parse_data(text)
+        type_algebra.validate_decl(alg)
+        node = alg.body()
+        lay = type_algebra.layout(node)
+        print(f"{d.name}{params}: {type_algebra.pretty(type_algebra.normalize(node))} -> {lay.kind}")
+    return 0
 
 
 def build(input_file: str, output: str, *, strict: bool = False,
           dynamic: bool = False, keep_ir: bool = False,
           use_musttail: bool = True, debug: bool = False,
           dump_ir: bool = False, allow_input: bool = False,
-          warn_infix: bool = True, allow_data: bool = False) -> str:
+          warn_infix: bool = True, allow_data: bool = False,
+          search_paths=None, exit_code: bool = False) -> str:
     if not os.path.exists(input_file):
         raise CompileError(f"file '{input_file}' not found")
 
-    program = load_program(input_file, warn_infix=warn_infix)
+    program = load_program(input_file, search_paths=search_paths,
+                           warn_infix=warn_infix)
     program = Resolver().resolve_program(program)
 
     # Sharing needs resolved bindings (for purity/arity), but not types.
@@ -103,7 +122,7 @@ def build(input_file: str, output: str, *, strict: bool = False,
 
     compiler = Compiler(dynamic=is_dynamic, use_musttail=use_musttail, debug=debug,
                         lambda_purity=lambda_purity, allow_input=allow_input,
-                        allow_data=allow_data)
+                        allow_data=allow_data, exit_code=exit_code)
     ir = compiler.compile_program(program)
 
     exe = output
@@ -126,17 +145,26 @@ def build(input_file: str, output: str, *, strict: bool = False,
     if clang is None:
         raise CompileError("clang was not found on PATH")
 
-    runtime_obj = _runtime_object(workdir, clang, compiler.atomic_rc)
-    cmd = [clang, "-O3","-fuse-ld=lld", "-Wno-override-module", ir_file, runtime_obj, "-o", exe]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise CompileError(
-            "clang failed to build the program:\n"
-            + (proc.stderr.strip() or proc.stdout.strip()))
-    return exe
+    try:
+        runtime_obj = _runtime_object(workdir, clang, compiler.atomic_rc)
+        cmd = [clang, "-O3", "-fuse-ld=lld", "-Wno-override-module", ir_file,
+               runtime_obj, "-o", exe]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise CompileError(
+                "clang failed to build the program:\n"
+                + (proc.stderr.strip() or proc.stdout.strip()))
+        return exe
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def main(argv=None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(
         description="Compile Lambda Calculus to native executables via LLVM.")
     ap.add_argument("input_file", help="Path to the .lambda source file")
@@ -155,13 +183,25 @@ def main(argv=None) -> int:
                     help="Enable binary data output (write-bytes/write-f64s/write-i64s); suppress the final print")
     ap.add_argument("--input", action="store_true",
                     help="Enable terminal input primitives (read-line/read-int/read-float)")
+    ap.add_argument("-L", "--lib", action="append", default=[], metavar="DIR",
+                    help="add a library/include directory (repeatable)")
     ap.add_argument("--no-warn-infix", action="store_false",
                     dest="warn_infix", default=True,
                     help="Suppress the likely-infix warning for z == 1-style applications")
     ap.add_argument("--debug", action="store_true",
                     help="Print the inferred program type")
+    ap.add_argument("--exit-code", action="store_true", dest="exit_code",
+                    help="require an Int program result and use it as the process exit status (no final print)")
+    ap.add_argument("--layout", action="store_true",
+                    help="parse data declarations and print their type-algebra layouts; do not compile")
     args = ap.parse_args(argv)
 
+    if args.layout:
+        try:
+            return data_layouts(args.input_file)
+        except (LambdaError, ValueError, OSError) as exc:
+            print(f"lambda: layout: {exc}", file=sys.stderr)
+            return 1
     try:
         exe = build(
             args.input_file,
@@ -175,6 +215,8 @@ def main(argv=None) -> int:
             allow_input=args.input,
             warn_infix=args.warn_infix,
             allow_data=args.data,
+            search_paths=args.lib,
+            exit_code=args.exit_code,
         )
     except LambdaError as exc:
         if exc.loc and exc.loc.line:

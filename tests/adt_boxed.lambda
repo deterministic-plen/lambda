@@ -1,0 +1,3 @@
+﻿data Box = B (text: String)
+b → (B "hi")
+match b with B s: s
