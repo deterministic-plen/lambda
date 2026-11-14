@@ -7,5 +7,10 @@ data Node =
 | NMatch (subject: Node, arms: [Node])
 | NVar (sym: Int)
 | NInt (value: Int)
-| NLiteral (lit: Int)
-| NData (name: Int, params: [Int], variants: [Node])
+| NFloat  (value: Float)
+| NBool   (value: Bool)
+| NString (lit: Int)    
+| NEnum (id:Int, tag:Int)
+| NData (name: Int, params: [Int], variants: [Node]
+
+)
