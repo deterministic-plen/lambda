@@ -1,0 +1,6 @@
+-- report_demo.pi : result display is a Pi concern.
+program Main() = scope {
+  xs → payload(range(0, 128))
+  emit_series("index", xs)
+  emit_text("note", "y = index; replace with a worker payload for real data")
+}

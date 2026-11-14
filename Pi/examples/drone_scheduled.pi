@@ -1,0 +1,30 @@
+-- drone_scheduled.pi : the same drone under a periodic Pi task.
+--
+-- This is the shape a cyclic-executive / embedded build consumes: one periodic
+-- control task with an explicit rate, priority and deadline.  The Python-hosted
+-- interpreter is a soft-real-time prototype; run with --run-for for a bounded
+-- experiment and --out for the timing/report artifacts.
+--
+--   pi run examples/drone_scheduled.pi --run-for 1 --out out/drone_sched
+
+protocol Drone {
+  op init : (Float) → ()
+  op tick : () → Shard
+  op history_x : () → Shard
+  op history_p : () → Shard
+  op history_u : () → Shard
+  errors : { 10001: "unknown_op" }
+  purity : Pure
+}
+
+program Main() = scope {
+  w → Pool("workers/drone.lambda", 1, {cpus: 1, memory: "64MiB"}).recruit(1)
+  await call(w, "init", 0.0)
+
+  -- `tick` is not a channel binding: with @rate this is a periodic task.
+  serve(tick) @ rate(100ms) @ priority(10) @ deadline(80ms) {
+    _ ⇒
+      est → await call(w, "tick")
+      emit("estimate", est)
+  }
+}

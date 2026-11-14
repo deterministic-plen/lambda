@@ -1,0 +1,80 @@
+; gray_scott.lambda -- Pi worker for Gray-Scott reaction-diffusion.
+;
+; The whole local operation is here; Pi only schedules `step` and records the
+; V field as animation frames.  State is one ArrayF containing U then V:
+;   uv[0 .. N)      U
+;   uv[N .. 2N)     V
+;
+; op 0 init(x)       seed the field
+; op 1 step()        one Euler step, returns V
+; op 2 snapshot()    return the current V
+;
+; The `arrayf-gray-scott` primitive is the GPU-backed 5-point stencil
+; (CPU fallback).  It is the only domain-specific numerical kernel; the
+; protocol and Pi program do not change when the backend changes.
+
+include "pi_worker.lambda"
+include "pi_schema_GrayScott.lambda"
+
+size → 512
+N → (* size size)
+
+; U=1, V=0 everywhere, then a 32x32 seed in the centre.
+init-u → (λ i: Int uv: ArrayF.
+  if (>= i N)
+  then (seed 0 uv)
+  else (init-u (+ i 1) (arrayf-set uv i 1.0)))
+
+seed → (λ k: Int uv: ArrayF.
+  if (>= k 256)
+  then uv
+  else
+    x → (+ 248 (% k 16))
+    y → (+ 248 (/ k 16))
+    p → (+ (* y size) x)
+    uv1 → (arrayf-set uv p 0.5)
+    (seed (+ k 1) (arrayf-set uv1 (+ N p) 1.0)))
+
+init-uv → (init-u 0 (arrayf (* 2 N) 0.0))
+
+; Copy V out of the combined state without consuming it.
+slice-go → (λ i: Int out: ArrayF uv: ArrayF.
+  if (>= i N)
+  then out
+  else (slice-go (+ i 1) (arrayf-set out i (arrayf-get uv (+ N i))) uv))
+
+slice-v → (λ uv: ArrayF. (slice-go 0 (arrayf N 0.0) uv))
+
+step → (λ uv: ArrayF.
+  (arrayf-gray-scott uv size 0.16 0.08 0.055 0.062 1.0 50))
+
+gs-loop → (λz uv: ArrayF.
+  hd → (pi-next-call 0)
+  corr → (arrayi-get hd 0)
+  if (< corr 0)
+  then 0
+  else
+    op → (arrayi-get hd 1)
+    nargs → (arrayi-get hd 2)
+    a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
+    if (== op op-init)
+    then
+      w → (pi-reply-ok corr (arrayf 0 0.0))
+      (gs-loop 0 init-uv)
+    else if (== op op-step)
+    then
+      uv2 → (step uv)
+      v → (slice-v uv2)
+      w → (pi-reply-ok corr v)
+      (gs-loop 0 uv2)
+    else if (== op op-snapshot)
+    then
+      v → (slice-v uv)
+      w → (pi-reply-ok corr v)
+      (gs-loop 0 uv)
+    else
+      w → (pi-reply-err corr error-unknown_op 0 0 (- 0 1))
+      (gs-loop 0 uv))
+
+hello → (pi-hello schema-hi schema-lo 2)
+(gs-loop 0 init-uv)

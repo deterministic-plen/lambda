@@ -1,0 +1,147 @@
+; gray_stripe.lambda -- one horizontal stripe of a 512x512 Gray-Scott field.
+;
+; Four stripes form a ring.  Each worker owns 128 rows and exchanges its
+; top/bottom U+V halo rows with the two neighbours:
+;   top / bottom : Shard of 2*W floats (U row then V row)
+;   step         : consume the two incoming halos, update state
+;   snapshot     : V stripe (128*512 floats)
+;
+; Protocol GrayStripe:
+;   0 init(offset)     seed this stripe
+;   1 step(top,bottom) one Euler step
+;   2 top()            current top halo
+;   3 bottom()         current bottom halo
+;   4 snapshot()       V stripe
+
+include "pi_worker.lambda"
+include "pi_schema_GrayStripe.lambda"
+
+size → 512
+STRIPE → 128
+W → 512
+N → (* STRIPE W)
+DU → 0.16
+DV → 0.08
+FEED → 0.055
+KILL → 0.062
+DT → 1.0
+
+; u/v access; y is local, top/bottom carry 2W (U row then V row)
+u-at → (λ uv: ArrayF top: ArrayF bot: ArrayF y: Int x: Int.
+  if (== y 0) then (arrayf-get top x)
+  else (if (== y (- STRIPE 1)) then (arrayf-get bot x)
+  else (arrayf-get uv (+ (* y W) x))))
+
+v-at → (λ uv: ArrayF top: ArrayF bot: ArrayF y: Int x: Int.
+  if (== y 0) then (arrayf-get top (+ W x))
+  else (if (== y (- STRIPE 1)) then (arrayf-get bot (+ W x))
+  else (arrayf-get uv (+ (+ N (* y W)) x))))
+
+u-new → (λ uv: ArrayF top: ArrayF bot: ArrayF p: Int.
+  y → (/ p W)
+  x → (% p W)
+  xm → (if (== x 0) then (- W 1) else (- x 1))
+  xp → (if (== x (- W 1)) then 0 else (+ x 1))
+  ym → (if (== y 0) then (- STRIPE 1) else (- y 1))
+  yp → (if (== y (- STRIPE 1)) then 0 else (+ y 1))
+  u → (u-at uv top bot y x)
+  v → (v-at uv top bot y x)
+  uvv → (* u (* v v))
+  lap → (- (+ (+ (u-at uv top bot y xm) (u-at uv top bot y xp))
+              (+ (u-at uv top bot ym x) (u-at uv top bot yp x)))
+           (* 4.0 u))
+  (+ u (* DT (- (- (* DU lap) uvv) (* FEED (- 1.0 u))))))
+
+v-new → (λ uv: ArrayF top: ArrayF bot: ArrayF p: Int.
+  y → (/ p W)
+  x → (% p W)
+  xm → (if (== x 0) then (- W 1) else (- x 1))
+  xp → (if (== x (- W 1)) then 0 else (+ x 1))
+  ym → (if (== y 0) then (- STRIPE 1) else (- y 1))
+  yp → (if (== y (- STRIPE 1)) then 0 else (+ y 1))
+  u → (u-at uv top bot y x)
+  v → (v-at uv top bot y x)
+  uvv → (* u (* v v))
+  lap → (- (+ (+ (v-at uv top bot y xm) (v-at uv top bot y xp))
+              (+ (v-at uv top bot ym x) (v-at uv top bot yp x)))
+           (* 4.0 v))
+  (+ v (* DT (+ (+ (* DV lap) uvv) (* (- FEED KILL) v)))))
+
+compute → (λ uv: ArrayF top: ArrayF bot: ArrayF.
+  (arrayf-pmap (λ j: Int.
+    if (< j N) then (u-new uv top bot j) else (v-new uv top bot (- j N)))
+    (* 2 N)))
+
+halos-top → (λ uv: ArrayF.
+  (arrayf-pmap (λ j: Int.
+    if (< j W) then (arrayf-get uv j)
+    else (arrayf-get uv (+ N (- j W)))) (* 2 W)))
+
+halos-bottom → (λ uv: ArrayF.
+  (arrayf-pmap (λ j: Int.
+    if (< j W) then (arrayf-get uv (+ (* (- STRIPE 1) W) j))
+    else (arrayf-get uv (+ (+ N (* (- STRIPE 1) W)) (- j W)))) (* 2 W)))
+
+slice-v → (λ uv: ArrayF.
+  (arrayf-pmap (λ i: Int. (arrayf-get uv (+ N i))) N))
+
+seed-off → (λ offset: Int k: Int uv: ArrayF.
+  if (>= k 16384) then uv
+  else
+    gx → (+ 192 (% k 128))
+    gy → (+ 192 (/ k 128))
+    if (or (< gy offset) (>= gy (+ offset STRIPE))) then (seed-off offset (+ k 1) uv)
+    else
+      ly → (- gy offset)
+      p → (+ (* ly W) gx)
+      (seed-off offset (+ k 1) (arrayf-set (arrayf-set uv p 0.5) (+ N p) 1.0)))
+
+fill-u → (λ i: Int uv: ArrayF.
+  if (>= i N) then uv
+  else (fill-u (+ i 1) (arrayf-set uv i 1.0)))
+
+init-uv → (λ offset: Int.
+  (seed-off offset 0 (fill-u 0 (arrayf (* 2 N) 0.0))))
+
+
+gs-loop → (λ z: Int uv: ArrayF.
+  hd → (pi-next-call 0)
+  corr → (arrayi-get hd 0)
+  if (< corr 0)
+  then 0
+  else
+    op → (arrayi-get hd 1)
+    nargs → (arrayi-get hd 2)
+    a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
+    if (== op op-init)
+    then
+      w → (pi-reply-ok corr pi-empty)
+      (gs-loop 0 (init-uv (float->int (arrayf-get a 0))))
+    else if (== op op-step)
+    then
+      top → (arrayf-pmap (λ j: Int. (arrayf-get a (+ 1 j))) (* 2 W))
+      bot → (arrayf-pmap (λ j: Int. (arrayf-get a (+ (+ (* 2 W) 2) j))) (* 2 W))
+      uv2 → (arrayf-gray-stripe uv top bot W STRIPE DU DV FEED KILL DT)
+      w → (pi-reply-ok corr pi-empty)
+      (gs-loop 0 uv2)
+    else if (== op op-top)
+    then
+      h → (halos-top uv)
+      w → (pi-reply-ok corr h)
+      (gs-loop 0 uv)
+    else if (== op op-bottom)
+    then
+      h → (halos-bottom uv)
+      w → (pi-reply-ok corr h)
+      (gs-loop 0 uv)
+    else if (== op op-snapshot)
+    then
+      v → (slice-v uv)
+      w → (pi-reply-ok corr v)
+      (gs-loop 0 uv)
+    else
+      w → (pi-reply-err corr error-unknown_op 0 0 (- 0 1))
+      (gs-loop 0 uv))
+
+hello → (pi-hello schema-hi schema-lo 2)
+(gs-loop 0 (arrayf (* 2 N) 0.0))

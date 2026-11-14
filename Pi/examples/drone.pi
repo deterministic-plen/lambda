@@ -1,0 +1,37 @@
+-- drone.pi : closed-loop simulated drone.  Pi schedules the control task and
+-- records the estimated-vs-true trajectory; Lambda holds the plant, Kalman
+-- filter and controller.  Run with --out for an HTML/SVG report.
+--
+-- This is deliberately a *soft* real-time example: a Python-hosted Pi loop is
+-- not a hard-WCET platform.  The same program shape is the input to a cyclic
+-- executive build (fixed tick, static task table).
+
+protocol Drone {
+  op init      : (Float) → ()
+  op tick      : () → Shard
+  op history_x : () → Shard
+  op history_p : () → Shard
+  op history_u : () → Shard
+  errors : { 10001: "unknown_op" }
+  purity : Pure
+}
+
+program Main() = scope {
+  w → Pool("workers/drone.lambda", 1, {cpus: 1, memory: "64MiB"}).recruit(1)
+  await call(w, "init", 0.0)
+
+  -- 200 control periods at 5 ms = 1 simulated second.
+  iterate(200) {
+    await call(w, "tick")
+    after(5ms) { () }
+  }
+
+  xs → await call(w, "history_x")
+  ps → await call(w, "history_p")
+  us → await call(w, "history_u")
+  idx → payload(range(0, 200))
+  emit_series("true_position", idx, xs)
+  emit_series("kalman_estimate", idx, ps)
+  emit_series("control", idx, us)
+  emit_text("shape", "200 control steps at 5 ms; scalar Kalman + gravity feed-forward")
+}

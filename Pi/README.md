@@ -7,8 +7,8 @@ Lambda performs the numerics; Pi routes handles, schedules tasks, and records
 results.
 
 This repository is the reference implementation for [Pi Specification
-v2.0](pispec.md). It includes a native **AOT compiler for linear programs**
-(`pi aot`) and an interpreter for the full language (elements, systems,
+v2.0](../pispec.md). It includes a native **AOT compiler for linear programs**
+(`pi aot`) and a C++ AST runtime for the full language (elements, systems,
 scheduling, recovery).
 
 ```
@@ -61,11 +61,10 @@ On Linux/macOS use `./pi` (a thin `python -m pilang` wrapper).
 | --- | --- |
 | `pi check FILE` | parse and static checks |
 | `pi build FILE` | compile the Lambda workers a program names |
-| `pi run FILE [--out DIR]` | execute; optional CSV/SVG/JSON/HTML report |
+| `pi run FILE [--out DIR]` | execute through the C++ AST runtime |
 | `pi test PATHS` | run `.pi` test programs |
 | `pi analyze FILE` | schemas, recovery capability, static ops, scheduler table |
 | `pi aot FILE -o EXE` | compile the linear subset to a native C executable |
-| `pi cpp FILE` | run through the C++ AST interpreter (Python frontend only) |
 | `pi cpp FILE` | alias for the C++ runtime |
 
 ## Language
@@ -157,59 +156,6 @@ Implemented combinators: `couple_line`, `couple_ring_block`,
 `allreduce(sum|max)`, `split`, and `zip` are available; the rest of the §14
 catalog is planned, not shipped.
 
-## Writing a stencil: one local operation, one interaction
-
-A 2D heat cell should read like the equation, not like a distributed system.
-[`examples/heat2d_cells.pi`](pi/examples/heat2d_cells.pi) is the smallest
-multi-worker version:
-
-```kappa
-protocol HeatCell {
-  op init : (Float) → ()
-  op step : (Float, Float, Float, Float) → Shard   -- left, right, up, down
-  op snapshot : () → Shard
-  errors : { 10001: "unknown_op" }
-}
-
-elem Cell(p : Params) {
-  in tick : Chan[()]
-  in halos_in : Ring[4]
-  out halos_out : Ring[4]
-  worker gs : Worker⟨HeatCell⟩
-  ctrl loop =
-    await call(gs, "init", 0.5)
-    u0 → await call(gs, "snapshot")
-    for i in 0..4 { send(halos_out[i], u0[0]) }
-    serve(tick) { _ ⇒
-      halos → for i in 0..4 { recv(halos_in[i]) }
-      u → await call(gs, "step", scalar(halos[0]), scalar(halos[1]),
-                              scalar(halos[2]), scalar(halos[3]))
-      for i in 0..4 { send(halos_out[i], u[0]) }
-    }
-}
-
-system Grid(n, m, p : Params) {
-  instances { c[i,j] : Cell(p) for i in 0..n, j in 0..m
-              using { gs: "workers/heat_cell.lambda" } }
-  couple { couple_grid2d_block(n, m, periodic = true) }
-  expose step = <push () into every c's tick channel>
-}
-```
-
-The worker is just the local update:
-
-```lambda
-heat-next → (λ u: Float halo: ArrayF.
-  (+ u (* 0.2 (- (+ (+ (+ (arrayf-get halo 0) (arrayf-get halo 1))
-                          (arrayf-get halo 2)) (arrayf-get halo 3))
-                    (* 4.0 u)))))
-```
-
-The halo positions carry the neighbour values that Pi sent; the cell does not
-implement routing, restarts, or channel ownership.  The program then reads
-`g.step()` — no per-cell orchestration in the driver.  The Gray-Scott example
-below uses the same shape with one op and a much larger local stencil.
-
 ## The Lambda seam
 
 A worker is an ordinary Lambda program compiled with `--input --data`. Pi starts
@@ -224,26 +170,20 @@ it as an OS process:
   * `Err`: `[2, code, span_start, span_end, sym]`
 
 The transport unwraps the result: `Ok` yields values; `Err` raises
-`WorkerError(code)`. Full wire format, frame layout, argument flattening and timeout semantics: [`docs/protocol.md`](pi/docs/protocol.md). `pilang/lib/pi_worker.lambda` is the Lambda-side shim;
-workers include it and a generated `pi_schema_<Protocol>.lambda`.  That file now
-also exposes readable constants for every protocol member:
-
-```lambda
-if (== op op-step)
-then ... (pi-reply-err corr error-unknown_op 0 0 (- 0 1))
-```
-
-No magic op indices or error numbers are needed in a worker.  The schema hash
-still covers only the protocol signature, not these names.
+`WorkerError(code)`. Full wire format, frame layout, argument flattening and timeout semantics: [`docs/protocol.md`](docs/protocol.md). `pilang/lib/pi_worker.lambda` is the Lambda-side shim;
+workers include it and a generated `pi_schema_<Protocol>.lambda`.  The schema
+file also defines readable `op-<name>` and `error-<name>` constants, so worker
+dispatch says `(== op op-step)` and `error-unknown_op` instead of magic
+integers.
 
 `Pool` resources are `{cpus, memory}` plus optional `{gpus: 1}`. A GPU resource
 sets `LAMBDA_GPU=1` for that worker; only `arrayf-pmap` uses it. Multiple GPUs
 and explicit VRAM budgets are rejected as `Unsupported` (a one-GPU extension to
 the v2.0 core, which reserved GPU).
 
-* [AOT](pi/docs/aot.md) — native subset, generated code, limits.
-* [Wire protocol](pi/docs/protocol.md) — HELLO, requests, frames, Result/error encoding, timeouts.
-* [Writing a worker](pi/docs/worker.md) — the minimal `.lambda` protocol shape.
+* [AOT](docs/aot.md) — native subset, generated code, limits.
+* [Wire protocol](docs/protocol.md) — HELLO, requests, frames, Result/error encoding, timeouts.
+* [Writing a worker](docs/worker.md) — the minimal `.lambda` protocol shape.
 
 ## Results and plotting
 
@@ -252,7 +192,6 @@ Pi does not compute with payloads, but it can name them:
 ```kappa
 emit_series("temperature", xs, ys)
 emit_grid("field", values, 200, 200)
-emit_animation_frame("gray_scott", v, 256, 256)
 emit_text("status", "converged")
 ```
 
@@ -262,27 +201,18 @@ With `--out DIR`:
 DIR/results.json     artifact manifest (names and kinds)
 DIR/<name>.csv       series: x,y; grid: row,col,value
 DIR/<name>.svg       line plot or heatmap (standalone, no dependencies)
-DIR/<name>.animation.html  standalone canvas animation
-DIR/report.html      one self-contained page with the animation inline
+DIR/report.html      one self-contained page
 ```
-
-`emit_animation_frame` appends one frame to a named animation; the report
-downsamples to at most 128×128 for display and provides play/pause/scrub
-controls.  Full-resolution frames stay in the worker and are not written to
-`results.json`.  `scalar(payload)` extracts a one-value payload (used by halo
-cells when a channel carries one Float).
-
-![Gray-Scott, 4 Pi workers](pi/examples/gray_scott_multi_512.gif)
-
-Sixty frames of a 512×512 Gray-Scott field on **four Pi stripe workers**, 3000
-Euler steps sampled every 50.  Each worker owns 128 rows and exchanges two halo
-rows with its neighbours; the C++ Pi runtime runs the element/system plan, not a
-bespoke simulation.
 
 `emit` still prints small values; payloads above 32 values are abbreviated.
 Reporting is off unless `--out` is given, so the coordination path pays nothing
-for it. The report includes a **timing table** per `(worker, op)` (count, min,
-mean, p95, max); those are measurements, not WCET certificates.
+for it.
+
+![Gray-Scott, 4 Pi workers](examples/gray_scott_multi_512.gif)
+
+The four-worker Gray-Scott example runs 3000 Euler steps at 512×512 and emits
+one frame every 50 steps.  The GIF above was produced by `gray_scott_multi.pi`
+through the C++ runtime; `gray_scott.pi` is the single-worker GPU variant.
 
 ## Examples
 
@@ -301,7 +231,7 @@ mean, p95, max); those are measurements, not WCET certificates.
 ## C++ runtime
 
 `pi cpp FILE` parses/checks Pi and serializes a plan, then runs it in the C++
-AST interpreter at [`csrc/pi_runtime.cpp`](pi/csrc/pi_runtime.cpp).  The Python process is only
+AST interpreter at [`csrc/pi_runtime.cpp`](csrc/pi_runtime.cpp).  The Python process is only
 the frontend; worker calls, loops, and emit artifacts execute in C++.
 
 ```powershell
@@ -326,7 +256,7 @@ runtime.  The 512×512/60-frame GIF above is produced by
 worker protocol directly; no Python runs in the loop.  Worker paths are built
 first and embedded, and `{gpus: 1}` is honored.
 
-See [AOT details](pi/docs/aot.md) for the supported subset, generated code, and timings.
+See [AOT details](docs/aot.md) for the supported subset, generated code, and timings.
 Elements/systems, channels, `serve`, `select`, `par`, recovery, and program
 parameters are still interpreter-only.
 
@@ -337,11 +267,11 @@ parameters are still interpreter-only.
 `@rate` and `@periodic` without `@rate` are warned. `pi analyze` prints the
 static task table.
 
-The C++ runtime is **soft real-time only**. It allocates and has no bounded dispatch. `@rate` is a drift-compensated
-timer, `@deadline` is a per-iteration budget, and priorities are recorded, not
-enforced by an RTOS. Hard WCET requires an AOT cyclic executive with a static
+The runtime is **soft real-time only**. It allocates and has no bounded
+dispatch. `@rate` is a drift-compensated timer, `@deadline` is a per-iteration
+budget, and priorities are recorded, not enforced by an RTOS. Hard WCET requires an AOT cyclic executive with a static
 task table and generated dispatch. See
-[`docs/embedded.md`](pi/docs/embedded.md); `pi run --out` timing is empirical input,
+[`docs/embedded.md`](docs/embedded.md); `pi run --out` timing is empirical input,
 not a proof.
 
 ## Implementation status
@@ -360,6 +290,7 @@ not a proof.
 | result artifacts and HTML/SVG reports | ✅ |
 | animation artifacts (`emit_animation_frame`) | ✅ |
 | GPU-backed Gray-Scott primitive (one device) | ✅ experimental |
+| scheduler checks + task table | ✅ static `pi analyze` |
 | AOT linear subset (native C, no Python) | ✅ `pi aot` |
 | C++ AST interpreter (channels/par/serve/par-for/select, systems, collectives, reports) | ✅ `pi cpp` |
 | multi-worker Gray-Scott via Pi system | ✅ 4 stripe workers |
@@ -375,59 +306,58 @@ not a proof.
   process handles.
 * **No payload computation.** Pi routes `Payload`; payload arithmetic is a
   runtime fault. Coordination metadata arithmetic is allowed.
-* **One-GPU, two kernels.** GPU is an extension for `arrayf-pmap` and the
-  experimental Gray-Scott stencil, not a GPU language; multi-GPU is not
-  implemented.
+* **One-GPU, one primitive.** GPU is an extension for `arrayf-pmap`, not a GPU
+  language; multi-GPU is not implemented.
 * **No PING/PONG.** Liveness is process-level; a running call cannot be
   interrupted, only the worker can be killed at scope exit.
-* Python 3.10 is best-effort; target is ≥3.11.
+* Python 3.10 is best-effort; target is ≥3.11 (frontend only).
 
 ## Layout and tests
 
 ```
 pi                    launcher
-pilang/               lexer parser checker interp runtime worker report cli aot
+pilang/               lexer parser checker plan worker cpp aot cli
 pilang/lib/           pi_worker.lambda (Lambda side of the seam)
 examples/             heat, reduce, field, drone, gray_scott, heat2d
 tests/                static checker tests
-pi/docs/protocol.md   Lambda–Pi wire format
-pi/docs/worker.md     minimal worker guide
-pi/docs/aot.md        native AOT subset
-pi/docs/embedded.md   WCET/cyclic-executive plan
-pispec.md          Pi Specification v2.0
+docs/protocol.md      Lambda–Pi wire format
+docs/worker.md        minimal worker guide
+docs/aot.md           native AOT subset
+docs/embedded.md      WCET/cyclic-executive plan
+../pispec.md          Pi Specification v2.0
 ```
 
 ```sh
 python3 -m pytest tests        # 17 static checker tests
-python tools/check_cpp_examples.py   # all examples through C++
+python tools/check_cpp_examples.py   # C++ regression gate: all examples
 ```
 
 The static suite covers syntax, linearity, error/recovery laws, scope rules,
-and scheduling validation. The C++ gate covers real workers, systems, channels,
-recovery, reports, and Gray-Scott.
+and scheduling validation. The C++ gate covers real Lambda workers, schema
+checks, systems, channels, recovery, reports, and Gray-Scott.
 
 ## Editor support
 
-The shared extension at [`editors/vscode`](../editors/vscode)
+The shared extension at [`editors/vscode`](../../editors/vscode)
 contributes `.pi` (`source.pi`) alongside `.lambda`: comments `--` / `{- -}`,
 keywords, handle types, declarations, scheduler attributes, error constructors,
 and completion for Pi builtins and local definitions.  Install it from the
 Lambda checkout:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File ../editors/install_vscode.ps1
+powershell -ExecutionPolicy Bypass -File ../../editors/install_vscode.ps1
 ```
 
 ```bash
-sh ../editors/install_vscode.sh
+sh ../../editors/install_vscode.sh
 ```
 
 Fully restart VS Code, then open any `.pi` file.  No build step or language
 server is needed.  Pygments users can import `pi_lexer.PiLexer`; validate with
-`python ../editors/test_pi_highlight.py`.
+`python ../../editors/test_pi_highlight.py`.
 
 ## Documentation
 
-* [Pi Specification v2.0](pispec.md) — normative design.
-* [Embedded/WCET plan](pi/docs/embedded.md) — interpreter limits and AOT target.
-* [Lambda README](../README.md) — the compute language.
+* [Pi Specification v2.0](../pispec.md) — normative design.
+* [Embedded/WCET plan](docs/embedded.md) — interpreter limits and AOT target.
+* [Lambda README](../../README.md) — the compute language.

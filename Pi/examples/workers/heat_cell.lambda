@@ -1,0 +1,48 @@
+; heat_cell.lambda -- the local operation of a 2D heat cell.
+;
+; Protocol HeatCell:
+;   init(v)          set the cell
+;   step(halos)      halos = [left, right, up, down]; return the new value
+;   snapshot()       return the current value
+;
+; This worker is deliberately tiny: one Float of state and one local update.
+; Pi supplies the four neighbours and owns the halo channels.
+
+include "pi_worker.lambda"
+include "pi_schema_HeatCell.lambda"
+
+heat-next → (λ u: Float halo: ArrayF.
+  left → (arrayf-get halo 0)
+  right → (arrayf-get halo 1)
+  up → (arrayf-get halo 2)
+  down → (arrayf-get halo 3)
+  (+ u (* 0.2 (- (+ (+ (+ left right) up) down) (* 4.0 u)))))
+
+cell-loop → (λ z: Int u: Float.
+  hd → (pi-next-call 0)
+  corr → (arrayi-get hd 0)
+  if (< corr 0)
+  then 0
+  else
+    op → (arrayi-get hd 1)
+    nargs → (arrayi-get hd 2)
+    a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
+    if (== op op-init)
+    then
+      w → (pi-reply-ok corr (pi-empty))
+      (cell-loop 0 (arrayf-get a 0))
+    else if (== op op-step)
+    then
+      u2 → (heat-next u a)
+      w → (pi-reply-ok corr (pi-vals1 u2))
+      (cell-loop 0 u2)
+    else if (== op op-snapshot)
+    then
+      w → (pi-reply-ok corr (pi-vals1 u))
+      (cell-loop 0 u)
+    else
+      w → (pi-reply-err corr error-unknown_op 0 0 (- 0 1))
+      (cell-loop 0 u))
+
+hello → (pi-hello schema-hi schema-lo 2)
+(cell-loop 0 0.0)

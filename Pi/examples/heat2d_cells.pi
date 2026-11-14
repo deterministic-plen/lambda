@@ -1,0 +1,58 @@
+-- heat2d_cells.pi : a 2D heat grid where the local operation is one line.
+--
+-- Each instance is one cell.  The only interaction is the 4-neighbour halo:
+-- left, right, up, down.  `couple_grid2d_block` wires those Ring[4] ports;
+-- Pi pushes one tick and the cells exchange their new values.
+--
+-- This is intentionally the smallest multi-worker 2D stencil: the programmer
+-- writes the local update, then declares the grid and its coupling.  A
+-- performance version would put a block of cells (and larger halo vectors)
+-- in each worker; the structure is identical.
+
+protocol HeatCell {
+  op init : (Float) → ()
+  op step : (Float, Float, Float, Float) → Shard
+  op snapshot : () → Shard
+  errors : { 10001: "unknown_op" }
+  purity : Pure
+}
+
+elem HeatCellWorker(p : Params) {
+  in  tick      : Chan[()]
+  in  halos_in  : Ring[4]
+  out halos_out : Ring[4]
+  worker gs     : Worker⟨HeatCell⟩
+
+  ctrl loop =
+    await call(gs, "init", 0.5)
+    u0 → await call(gs, "snapshot")
+    for i in 0..4 { send(halos_out[i], u0[0]) }
+    serve(tick) { _ ⇒
+      halos → for i in 0..4 { recv(halos_in[i]) }
+      u → await call(gs, "step", scalar(halos[0]), scalar(halos[1]), scalar(halos[2]), scalar(halos[3]))
+      for i in 0..4 { send(halos_out[i], u[0]) }
+    }
+
+  on_failure {
+    | WorkerDied ⇒ restart(max = 2)
+    | _         ⇒ escalate
+  }
+
+  contract { terminates_on = close(tick) }
+}
+
+system HeatGrid(n, m, p : Params) {
+  instances {
+    c[i, j] : HeatCellWorker(p) for i in 0..n, j in 0..m using { gs: "workers/heat_cell.lambda" }
+  }
+  couple { couple_grid2d_block(n, m, periodic = true) }
+  expose step = <push () into every c's tick channel>
+}
+
+program Main() = scope {
+  g → HeatGrid(4, 4, Params())
+  iterate(8) { g.step() }
+  s → await call(g.c[1, 1].gs, "snapshot")
+  emit("cell(1,1) after 8 ticks =", s[0])
+  g.close()
+}

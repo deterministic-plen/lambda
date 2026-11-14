@@ -1,0 +1,42 @@
+; field.lambda -- Pi worker: renders a 2D field with Lambda's parallel arrayf-pmap.
+;
+; op 0 render(n) -> Ok [n*n values, row-major]
+; Any other op -> Err(10001, "unknown_op").
+;
+; This is the practical GPU-shaped seam: the computation is a pure index ->
+; Float map over a flat output array.  Lambda lowers it to parallel CPU workers
+; today; a GPU backend can replace arrayf-pmap without changing Pi or the
+; protocol.
+
+include "pi_worker.lambda"
+include "pi_schema_Field.lambda"
+
+size → 200
+
+field → (λ i: Int.
+  x → (* 6.283185307179586 (/ (int->float (% i size)) (int->float size)))
+  y → (* 6.283185307179586 (/ (int->float (/ i size)) (int->float size)))
+  (* (sin x) (cos y)))
+
+render → (λ n: Int.
+  (arrayf-pmap (λ i: Int. (field i)) (* size size)))
+
+field-loop → (λz.
+  hd → (pi-next-call 0)
+  corr → (arrayi-get hd 0)
+  if (< corr 0)
+  then 0
+  else
+    nargs → (arrayi-get hd 2)
+    a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
+    if (== (arrayi-get hd 1) op-render)
+    then
+      n → (float->int (arrayf-get a 0))
+      w → (pi-reply-ok corr (render n))
+      (field-loop 0)
+    else
+      w → (pi-reply-err corr error-unknown_op 0 0 (- 0 1))
+      (field-loop 0))
+
+hello → (pi-hello schema-hi schema-lo 2)
+(field-loop 0)

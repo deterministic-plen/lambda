@@ -1,0 +1,25 @@
+include "pi_worker.lambda"
+include "pi_schema_Fault.lambda"
+
+fault-loop → (λ z: Int count: Int.
+  hd → (pi-next-call 0)
+  corr → (arrayi-get hd 0)
+  if (< corr 0) then 0
+  else
+    op → (arrayi-get hd 1)
+    nargs → (arrayi-get hd 2)
+    a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
+    if (== op op-ping)
+    then
+      w → (pi-reply-ok corr (pi-vals1 (int->float count)))
+      (fault-loop 0 (+ count 1))
+    else if (== op op-boom)
+    then
+      w → (pi-reply-err corr 5001 0 0 (- 0 1))
+      (fault-loop 0 count)
+    else
+      w → (pi-reply-err corr error-unknown_op 0 0 (- 0 1))
+      (fault-loop 0 count))
+
+hello → (pi-hello schema-hi schema-lo 2)
+(fault-loop 0 0)

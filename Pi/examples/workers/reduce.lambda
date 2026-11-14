@@ -1,0 +1,28 @@
+; reduce.lambda -- a stateless Pi worker.  op 0: sumsq(Shard) -> Ok [sum of squares]
+; Any other op index is answered with Err(10001, "unknown_op").
+include "pi_worker.lambda"
+include "pi_schema_Reducer.lambda"
+
+sumsq → (λa i n acc.
+  if (>= i n)
+  then acc
+  else (sumsq a (+ i 1) n (+ acc (* (arrayf-get a i) (arrayf-get a i)))))
+
+reduce-loop → (λz.
+  hd → (pi-next-call 0)
+  corr → (arrayi-get hd 0)
+  if (< corr 0)
+  then 0
+  else
+    nargs → (arrayi-get hd 2)
+    a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
+    if (== (arrayi-get hd 1) 0)
+    then
+      w → (pi-reply-ok corr (pi-vals1 (sumsq a 1 nargs 0.0)))
+      (reduce-loop 0)
+    else
+      w → (pi-reply-err corr 10001 0 0 (- 0 1))
+      (reduce-loop 0))
+
+hello → (pi-hello schema-hi schema-lo 2)
+(reduce-loop 0)

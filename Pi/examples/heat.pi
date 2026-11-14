@@ -1,0 +1,84 @@
+-- heat.pi : 1D diffusion on a chain of Lambda workers, with local-to-global error handling.
+-- Each element instance owns a stateful Lambda worker (examples/workers/heat1d.lambda).
+
+protocol HeatStateful⟨N⟩ {
+  op init            : (Int, Float) → ()
+  op step            : (Params) → (Shard, Stats)
+  op patch           : (HaloRing⟨N⟩, Params) → Shard
+  op renormalize     : (Params) → ()
+  op reduce_timestep : (Params) → ()
+  op inject          : (Int, Float) → ()
+  op snapshot        : () → Shard
+  errors : { 4002: "diverged_step" recoverable, 9001: "internal" transient }
+  purity : Pure
+}
+
+elem HeatWorker⟨N⟩(p : Params) {
+  in  tick      : Chan[()]
+  in  halos_in  : Ring[N]
+  out halos_out : Ring[N]
+  out stats     : Chan[Stats]
+  worker gs     : Worker⟨HeatStateful⟩
+
+  ctrl loop_step =
+    await call(gs, "init", 8, 1.0)
+    serve(tick) { _ ⇒
+      (b_out, st) → await call(gs, "step", p)
+      send(stats, st)
+      for i in 0..N { send(halos_out[i], b_out[i]) }
+      rings → for i in 0..N { recv(halos_in[i]) }
+      await call(gs, "patch", rings, p)
+    }
+
+  -- A resumed tick must still release the neighbours' recv: send empty halos.
+  on_failure {
+    | WorkerError(4002) ⇒ {
+        await call(gs, "renormalize", p)
+        for i in 0..N { send(halos_out[i], empty()) }
+        resume
+      }
+    | WorkerError(9001) ⇒ restart(max = 3, backoff = exp(0.01))
+    | WorkerDied        ⇒ restart(max = 3, backoff = exp(0.01))
+    | _                 ⇒ escalate
+  }
+
+  contract {
+    recovery      = resume-capable
+    terminates_on = close(tick)
+  }
+}
+
+system HeatChain(n, p : Params) {
+  instances { h[i] : HeatWorker⟨2⟩(p) for i in 0..n using { gs: "workers/heat1d.lambda" } }
+  couple    { couple_line(n) }
+  expose step = <push () into every h's tick channel>
+}
+
+program Main() = scope {
+  p → Params(alpha = 0.4, limit = 100.0, policy = Halt)
+  g → HeatChain(4, p)
+
+  iterate(3) { g.step() }
+  s1 → await call(g.h[1].gs, "snapshot")
+  emit("after 3 clean steps, h[1] =", s1)
+  emit_series("h1_clean", s1)
+  emit_grid("h1_clean_grid", s1, 8, 1)
+
+  -- tier 3 (fatal, recoverable): a cell explodes; policy Halt makes the worker return Err(4002);
+  -- on_failure renormalises and resumes with the last good state.
+  await call(g.h[1].gs, "inject", 3, 1000000000.0)
+  g.step()
+  s2 → await call(g.h[1].gs, "snapshot")
+  emit("after Err(4002) + resume,  h[1] =", s2)
+  emit_series("h1_resumed", s2)
+  emit_grid("h1_resumed_grid", s2, 8, 1)
+
+  -- worker death: the supervisor restarts a fresh worker process and replays the tick.
+  kill_worker(g.h[2].gs)
+  g.step()
+  s3 → await call(g.h[2].gs, "snapshot")
+  emit("after WorkerDied + restart, h[2] =", s3)
+  emit_series("h2_restarted", s3)
+
+  g.close()
+}

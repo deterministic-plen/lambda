@@ -1,0 +1,31 @@
+-- gray_scott.pi : Gray-Scott reaction-diffusion, 256x256, GPU-backed worker.
+--
+-- One local operation (`step`) and one interaction (`call`).  Pi schedules the
+-- frames and records them as an animation; it never touches a cell.
+--
+--   pi run examples/gray_scott.pi --out out/gray_scott
+--
+-- Worker resources request one GPU; Lambda falls back to CPU if CUDA/NVRTC is
+-- unavailable.
+
+protocol GrayScott {
+  op init : (Float) → ()
+  op step : () → Shard
+  op snapshot : () → Shard
+  errors : { 10001: "unknown_op" }
+  purity : Deterministic
+}
+
+program Main() = scope {
+  w → Pool("workers/gray_scott.lambda", 1,
+           {cpus: 1, gpus: 1, memory: "512MiB"}).recruit(1)
+
+  await call(w, "init", 0.0)
+
+  iterate(60) {
+    v → await call(w, "step")
+    emit_animation_frame("gray_scott", v, 512, 512)
+  }
+
+  emit_text("gray_scott", "3000 Euler steps sampled every 50, 512x512, U/V 5-point Laplacian")
+}

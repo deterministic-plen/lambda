@@ -1,0 +1,151 @@
+; drone.lambda -- a simulated 1D drone with a minimal constant-velocity Kalman filter.
+;
+; State is one flat array:
+;   0 x        true position
+;   1 v        true velocity
+;   2 p        estimated position
+;   3 pv       estimated velocity
+;   4 P00      covariance p,p
+;   5 P01      covariance p,v
+;   6 P11      covariance v,v
+;   7 u        last control
+;   8 t        step count
+;   9 count    history count
+;   10..       history, interleaved [x, p, u] per step
+;
+; Protocol Drone:
+;   op 0 init(seed)    -> Ok
+;   op 1 tick()        -> Ok [p_estimate]
+;   op 2 history_x()   -> Ok [x0, x1, ...]
+;   op 3 history_p()   -> Ok [p0, p1, ...]
+;   op 4 history_u()   -> Ok [u0, u1, ...]
+; Any other op -> Err(10001, unknown_op).
+
+include "pi_worker.lambda"
+include "pi_schema_Drone.lambda"
+
+cap → 3000
+dt → 0.01
+g → 9.81
+noise-amp → 0.03
+target → 0.0
+
+get → (λ&s i: Int. (arrayf-get s i))
+set → (λs i: Int v: Float. (arrayf-set s i v))
+clamp → (λv: Float lo: Float hi: Float.
+  if (< v lo) then lo else (if (> v hi) then hi else v))
+
+; one predict/update/control step
+step → (λs: ArrayF.
+  x → (get s 0)
+  v → (get s 1)
+  p → (get s 2)
+  pv → (get s 3)
+  p00 → (get s 4)
+  p01 → (get s 5)
+  p11 → (get s 6)
+  u → (get s 7)
+  t → (float->int (get s 8))
+  n → (float->int (get s 9))
+  ; --- plant: u is thrust, gravity acts down
+  acc → (- u g)
+  v2 → (+ v (* acc dt))
+  x2 → (+ x (* v2 dt))
+  ; deterministic sensor noise
+  z → (+ x2 (* noise-amp (sin (* 1.7 (int->float t)))))
+  ; --- Kalman predict (constant velocity)
+  p2 → (+ p (* pv dt))
+  pv2 → pv
+  pp00 → (+ p00 (+ (* 2.0 (* dt p01)) (* (* dt dt) p11)))
+  pp01 → (+ p01 (* dt p11))
+  pp11 → p11
+  ; process noise
+  q → 0.000001
+  pp00b → (+ pp00 q)
+  pp11b → (+ pp11 q)
+  ; --- update
+  r → 0.5
+  S → (+ pp00b r)
+  k0 → (/ pp00b S)
+  k1 → (/ pp01 S)
+  y → (- z p2)
+  p3 → (+ p2 (* k0 y))
+  pv3 → (+ pv2 (* k1 y))
+  p003 → (* (- 1.0 k0) pp00b)
+  p013 → (* (- 1.0 k0) pp01)
+  p113 → (- pp11b (* k1 pp01))
+  ; --- P controller with gravity feed-forward
+  u2 → (clamp (+ g (- (* 4.0 (- target p3)) (* 2.0 pv3))) (- 0.0 10.0) 10.0)
+  base → (* n 3)
+  s1 → (set s 0 x2)
+  s2 → (set s1 1 v2)
+  s3 → (set s2 2 p3)
+  s4 → (set s3 3 pv3)
+  s5 → (set s4 4 p003)
+  s6 → (set s5 5 p013)
+  s7 → (set s6 6 p113)
+  s8 → (set s7 7 u2)
+  s9 → (set s8 8 (int->float (+ t 1)))
+  s10 → (set s9 9 (int->float (+ n 1)))
+  s11 → (set s10 (+ 10 base) x2)
+  s12 → (set s11 (+ 11 base) p3)
+  (set s12 (+ 12 base) u2))
+
+history-go → (λ&s: ArrayF i: Int a: ArrayF which: Int n: Int.
+  if (>= i n)
+  then a
+  else (history-go s (+ i 1)
+          (arrayf-set a i (get s (+ 10 (+ (* i 3) which)))) which n))
+
+history → (λ&s: ArrayF which: Int.
+  n → (float->int (get s 9))
+  (history-go s 0 (arrayf n 0.0) which n))
+
+init-state → (λseed: Float.
+  s → (arrayf cap 0.0)
+  s1 → (set s 0 seed)
+  s2 → (set s1 4 1.0)
+  s3 → (set s2 6 1.0)
+  (set s3 7 g))
+
+loop → (λs: ArrayF.
+  hd → (pi-next-call 0)
+  corr → (arrayi-get hd 0)
+  if (< corr 0)
+  then 0
+  else
+    op → (arrayi-get hd 1)
+    nargs → (arrayi-get hd 2)
+    if (== op op-init)
+    then
+      a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
+      seed → (if (> nargs 0) then (arrayf-get a 0) else 0.0)
+      w → (pi-reply-ok corr pi-empty)
+      (loop (init-state seed))
+    else
+      if (== op op-tick)
+      then
+        s2 → (step s)
+        w → (pi-reply-ok corr (pi-vals1 (get s2 2)))
+        (loop s2)
+      else
+        if (== op op-history_x)
+        then
+          w → (pi-reply-ok corr (history s 0))
+          (loop s)
+        else
+          if (== op op-history_p)
+          then
+            w → (pi-reply-ok corr (history s 1))
+            (loop s)
+          else
+            if (== op op-history_u)
+            then
+              w → (pi-reply-ok corr (history s 2))
+              (loop s)
+            else
+              w → (pi-reply-err corr error-unknown_op 0 0 (- 0 1))
+              (loop s))
+
+hello → (pi-hello schema-hi schema-lo 2)
+(loop (init-state 0.0))

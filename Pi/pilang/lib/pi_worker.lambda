@@ -1,0 +1,92 @@
+; pi_worker.lambda -- Lambda side of the Pi worker seam (Pi spec v2.0, sections 9.3, 10, 11.3).
+;
+; A Pi worker is an ordinary Lambda program compiled with `--input --data`.
+; It is a long-lived process that serves requests until stdin reaches EOF.
+;
+; REQUEST (text on stdin, one number per line -- Lambda's only structured input):
+;   corr     : Int    correlation id chosen by Pi
+;   op       : Int    operation index (declaration order in the protocol)
+;   nargs    : Int    number of Float lines that follow
+;   arg_0 .. arg_(nargs-1) : Float
+;
+; REPLY (one LMB1 f64 frame per request, stream id = corr).  The payload is the
+; Result[T] shape of spec section 11.3, flattened:
+;   Ok        : [0, v0, v1, ...]
+;   Ok+stats  : [1, k, s0 .. s(k-1), v0, v1, ...]
+;   Err       : [2, code, span_start, span_end, sym]      (sym = -1 for None)
+;
+; HELLO (stream id 0, i64 frame, written once at start-up by `pi-hello`):
+;   [schema_hi, schema_lo, version]     -- the 128-bit schema hash of the protocol
+;
+; Lambda has no tuples and no generic sums, so Result[T] cannot be a Lambda value
+; yet; the worker library builds the reply frame directly.  The transport is the
+; only place that knows this shape, exactly as the spec requires.
+
+include "lib/stream.lambda"
+
+; ---- reading requests -------------------------------------------------------
+
+pi-read-ints → (λa i n.
+  if (>= i n)
+  then a
+  else (pi-read-ints (arrayi-set a i (str->int (read-line ""))) (+ i 1) n))
+
+pi-read-floats → (λa i n.
+  if (>= i n)
+  then a
+  else (pi-read-floats (arrayf-set a i (str->float (read-line ""))) (+ i 1) n))
+
+; Returns [corr, op, nargs], or [-1, 0, 0] at EOF.
+pi-next-call → (λz.
+  h → (arrayi 3 0)
+  line → (read-line "")
+  if (== line "")
+  then (arrayi-set h 0 (- 0 1))
+  else
+    h1 → (arrayi-set h 0 (str->int line))
+    (pi-read-ints h1 1 3))
+
+; ---- writing replies --------------------------------------------------------
+
+pi-copy → (λdst src doff i n.
+  if (>= i n)
+  then dst
+  else (pi-copy (arrayf-set dst (+ doff i) (arrayf-get src i)) src doff (+ i 1) n))
+
+; Ok(vals)
+pi-reply-ok → (λcorr vals.
+  n → (arrayf-length vals)
+  out → (pi-copy (arrayf (+ n 1) 0.0) vals 1 0 n)
+  (emit-f64s corr out))
+
+; Ok(vals, stats)  -- stats is an ArrayF of any length k
+pi-reply-stats → (λcorr stats vals.
+  k → (arrayf-length stats)
+  n → (arrayf-length vals)
+  o0 → (arrayf (+ (+ n k) 2) 0.0)
+  o1 → (arrayf-set o0 0 1.0)
+  o2 → (arrayf-set o1 1 (int->float k))
+  o3 → (pi-copy o2 stats 2 0 k)
+  out → (pi-copy o3 vals (+ 2 k) 0 n)
+  (emit-f64s corr out))
+
+; Err(Error(code, Span(s, e), sym))     sym = -1 means None
+pi-reply-err → (λcorr code s e sym.
+  o0 → (arrayf 5 0.0)
+  o1 → (arrayf-set o0 0 2.0)
+  o2 → (arrayf-set o1 1 (int->float code))
+  o3 → (arrayf-set o2 2 (int->float s))
+  o4 → (arrayf-set o3 3 (int->float e))
+  (emit-f64s corr (arrayf-set o4 4 (int->float sym))))
+
+; HELLO frame: the protocol schema hash, as two signed 64-bit words, plus a version.
+pi-hello → (λhi lo version.
+  o0 → (arrayi 3 0)
+  o1 → (arrayi-set o0 0 hi)
+  o2 → (arrayi-set o1 1 lo)
+  (emit-i64s 0 (arrayi-set o2 2 version)))
+
+; Small helpers
+pi-empty → (arrayf 0 0.0)
+pi-vals1 → (λx. (arrayf-set (arrayf 1 0.0) 0 x))
+pi-vals2 → (λx y. (arrayf-set (arrayf-set (arrayf 2 0.0) 0 x) 1 y))

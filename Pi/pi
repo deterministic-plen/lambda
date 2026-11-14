@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# pi launcher:  ./pi run examples/heat.pi
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE" && PYTHONPATH="$HERE" exec python3 -m pilang "$@"

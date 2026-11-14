@@ -1,0 +1,18 @@
+protocol Fault {
+  op ping : () → Shard
+  op boom : () → Shard
+  errors : { 5001: "boom", 10001: "unknown_op" }
+  purity : Pure
+}
+
+program Main() = scope {
+  w → Pool("workers/fault.lambda", 1).recruit(1)
+  a → await call(w, "ping")
+  emit("a", a[0])
+  on_error(await call(w, "boom")) {
+    | WorkerError(5001) ⇒ restart(max = 2)
+    | _ ⇒ escalate
+  }
+  b → await call(w, "ping")
+  emit("b", b[0])
+}

@@ -1,0 +1,153 @@
+; heat1d.lambda -- a stateful Pi worker: 1D diffusion on a strip of cells.
+;
+; Implements protocol HeatStateful (examples/heat.pi).  The worker holds the
+; state (the "stateful worker" pattern, spec 12.3): u, dt and the two halo values
+; are threaded through the serve loop.  step only commits its scratch result on
+; success, so a failed step leaves the last good state intact and `resume` is sound.
+;
+; ops (index = declaration order in the protocol):
+;   0 init(n, v)          fill n cells with v                         -> Ok
+;   1 step(Params)        advance one tick, return boundary + stats   -> Ok | Ok+stats | Err
+;   2 patch(Ring, Params) store the neighbours' halo values           -> Ok [mean]
+;   3 renormalize(Params) clamp every cell into [-limit, limit]       -> Ok
+;   4 reduce_timestep(Params) halve dt                                -> Ok
+;   5 inject(i, v)        overwrite one cell (fault injection)        -> Ok
+;   6 snapshot()          return the whole state                      -> Ok [u0 .. u(n-1)]
+;
+; Params (encoded by Pi as [count, values in key order]): alpha, limit, policy
+;   policy: 0 = Renormalize (local, invisible), 1 = Report (aggregate), 2 = Halt (fatal)
+;
+; Error codes: 4002 diverged_step (policy Halt), 9001 internal (bad Params)
+
+include "pi_worker.lambda"
+include "pi_schema_HeatStateful.lambda"
+
+; ---- pure loops over the state (they only read u) ---------------------------
+
+clamp → (λv limit.
+  if (not (== v v)) then 0.0
+  else (if (> v limit) then limit
+  else (if (< v (- 0.0 limit)) then (- 0.0 limit) else v)))
+
+excess → (λv limit.
+  if (not (== v v)) then limit
+  else (if (> v limit) then (- v limit)
+  else (if (< v (- 0.0 limit)) then (- (- 0.0 v) limit) else 0.0)))
+
+cell-next → (λu i n coef hl hr.
+  left → (if (== i 0) then hl else (arrayf-get u (- i 1)))
+  right → (if (== i (- n 1)) then hr else (arrayf-get u (+ i 1)))
+  c → (arrayf-get u i)
+  (+ c (* coef (+ (- left (* 2.0 c)) right))))
+
+count-bad → (λu i n coef hl hr limit acc.
+  if (>= i n)
+  then acc
+  else (count-bad u (+ i 1) n coef hl hr limit
+          (+ acc (if (> (excess (cell-next u i n coef hl hr) limit) 0.0) then 1 else 0))))
+
+max-excess → (λu i n coef hl hr limit acc.
+  if (>= i n)
+  then acc
+  else (max-excess u (+ i 1) n coef hl hr limit
+          (let e = (excess (cell-next u i n coef hl hr) limit) in (if (> e acc) then e else acc))))
+
+build-next → (λu out i n coef hl hr limit.
+  if (>= i n)
+  then out
+  else (build-next u
+          (arrayf-set out i (clamp (cell-next u i n coef hl hr) limit))
+          (+ i 1) n coef hl hr limit))
+
+clamp-all → (λu out i n limit.
+  if (>= i n)
+  then out
+  else (clamp-all u (arrayf-set out i (clamp (arrayf-get u i) limit)) (+ i 1) n limit))
+
+fill → (λa i n v.
+  if (>= i n) then a else (fill (arrayf-set a i v) (+ i 1) n v))
+
+; ---- request handlers --------------------------------------------------------
+
+heat-step → (λcorr a u dt hl hr.
+  n → (arrayf-length u)
+  alpha → (arrayf-get a 1)
+  limit → (arrayf-get a 2)
+  policy → (float->int (arrayf-get a 3))
+  coef → (* alpha dt)
+  if (< alpha 0.0)
+  then
+    w → (pi-reply-err corr 9001 0 0 (- 0 1))
+    (heat-loop u dt hl hr)
+  else
+    bad → (count-bad u 0 n coef hl hr limit 0)
+    nxt → (build-next u (arrayf n 0.0) 0 n coef hl hr limit)
+    mx → (max-excess u 0 n coef hl hr limit 0.0)
+    if (and (> bad 0) (== policy 2))
+    then
+      w → (pi-reply-err corr 4002 0 bad (- 0 1))
+      (heat-loop u dt hl hr)
+    else
+      bnd → (pi-vals2 (arrayf-get nxt 0) (arrayf-get nxt (- n 1)))
+      if (and (> bad 0) (== policy 1))
+      then
+        w → (pi-reply-stats corr (pi-vals2 (int->float bad) mx) bnd)
+        (heat-loop nxt dt hl hr)
+      else
+        if (> bad 0)
+        then
+          w → (pi-reply-ok corr bnd)
+          (heat-loop nxt dt hl hr)
+        else
+          w → (pi-reply-stats corr (pi-vals2 0.0 0.0) bnd)
+          (heat-loop nxt dt hl hr))
+
+heat-patch → (λcorr a u dt hl hr.
+  n → (arrayf-length u)
+  len0 → (float->int (arrayf-get a 0))
+  nhl → (if (> len0 0) then (arrayf-get a 1) else (arrayf-get u 0))
+  i1 → (+ 1 len0)
+  len1 → (float->int (arrayf-get a i1))
+  nhr → (if (> len1 0) then (arrayf-get a (+ i1 1)) else (arrayf-get u (- n 1)))
+  w → (pi-reply-ok corr (pi-vals1 (/ (+ nhl nhr) 2.0)))
+  (heat-loop u dt nhl nhr))
+
+heat-dispatch → (λop corr a u dt hl hr.
+  if (== op 0)
+  then
+    n → (float->int (arrayf-get a 0))
+    w → (pi-reply-ok corr pi-empty)
+    (heat-loop (fill (arrayf n 0.0) 0 n (arrayf-get a 1)) dt hl hr)
+  else (if (== op 1) then (heat-step corr a u dt hl hr)
+  else (if (== op 2) then (heat-patch corr a u dt hl hr)
+  else (if (== op 3)
+  then
+    n → (arrayf-length u)
+    limit → (arrayf-get a 2)
+    w → (pi-reply-ok corr pi-empty)
+    (heat-loop (clamp-all u (arrayf n 0.0) 0 n limit) dt hl hr)
+  else (if (== op 4)
+  then
+    w → (pi-reply-ok corr pi-empty)
+    (heat-loop u (* dt 0.5) hl hr)
+  else (if (== op 5)
+  then
+    w → (pi-reply-ok corr pi-empty)
+    (heat-loop (arrayf-set (arrayf-clone u) (float->int (arrayf-get a 0)) (arrayf-get a 1)) dt hl hr)
+  else
+    w → (pi-reply-ok corr (arrayf-clone u))
+    (heat-loop u dt hl hr)))))))
+
+heat-loop → (λu dt hl hr.
+  hd → (pi-next-call 0)
+  corr → (arrayi-get hd 0)
+  if (< corr 0)
+  then 0
+  else
+    op → (arrayi-get hd 1)
+    nargs → (arrayi-get hd 2)
+    a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
+    (heat-dispatch op corr a u dt hl hr))
+
+hello → (pi-hello schema-hi schema-lo 2)
+(heat-loop (arrayf 8 0.0) 0.1 0.0 0.0)

@@ -1,0 +1,67 @@
+-- gray_scott_multi.pi : Gray-Scott on four horizontal stripe workers.
+--
+-- The local operation is the stripe update; the interaction is the two halo
+-- rows exchanged with the neighbouring stripes.  Pi owns the ring topology and
+-- calls one synchronous step; it never touches a cell.
+
+protocol GrayStripe {
+  op init     : (Int) → ()
+  op step     : (Shard, Shard) → ()
+  op top      : () → Shard
+  op bottom   : () → Shard
+  op snapshot : () → Shard
+  errors : { 10001: "unknown_op" }
+  purity : Pure
+}
+
+elem GrayStripeWorker(off : Int) {
+  in  tick      : Chan[()]
+  in  halos_in  : Ring[2]
+  out halos_out : Ring[2]
+  worker gs     : Worker⟨GrayStripe⟩
+
+  ctrl loop =
+    await call(gs, "init", off)
+    t0 → await call(gs, "top")
+    b0 → await call(gs, "bottom")
+    send(halos_out[0], t0)
+    send(halos_out[1], b0)
+    serve(tick) { _ ⇒
+      t → recv(halos_in[0])
+      b → recv(halos_in[1])
+      await call(gs, "step", t, b)
+      ht → await call(gs, "top")
+      hb → await call(gs, "bottom")
+      send(halos_out[0], ht)
+      send(halos_out[1], hb)
+    }
+
+  on_failure {
+    | WorkerDied ⇒ restart(max = 2)
+    | _         ⇒ escalate
+  }
+
+  contract { terminates_on = close(tick) }
+}
+
+system GrayGrid(n) {
+  instances {
+    s[i] : GrayStripeWorker((i * 128)) for i in 0..n using { gs: "workers/gray_stripe.lambda" }
+  }
+  couple { couple_ring_block(n) }
+  expose step = <push () into every s's tick channel>
+}
+
+program Main() = scope {
+  g → GrayGrid(4)
+  iterate(60) {
+    iterate(50) { g.step() }
+    a → await call(g.s[0].gs, "snapshot")
+    b → await call(g.s[1].gs, "snapshot")
+    c → await call(g.s[2].gs, "snapshot")
+    d → await call(g.s[3].gs, "snapshot")
+    frame → concat([a, b, c, d])
+    emit_animation_frame("gray_scott", frame, 512, 512)
+  }
+  emit_text("gray_scott", "3000 steps, 4 stripe workers, 512x512")
+}

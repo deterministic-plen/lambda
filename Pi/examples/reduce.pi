@@ -1,0 +1,20 @@
+-- reduce.pi : data-parallel sum of squares over a pool of four Lambda workers.
+-- Pool + par for + allreduce, with a Rejected(Memory) guard from the pool's resource declaration.
+
+protocol Reducer {
+  op sumsq : (Shard) → Shard
+  errors : { 10001: "unknown_op" }
+  purity : Pure
+}
+
+program Main() = scope {
+  ws     → Pool("workers/reduce.lambda", 4, {cpus: 1, memory: "64MiB"}).recruit(4)
+  shards → split(payload(range(1, 101)), 4)
+  parts  → par for (w, shard) in zip(ws, shards) {
+             on_error(await call(w, "sumsq", shard)) {
+               | WorkerDied => restart(max = 2)
+               | _          => escalate
+             }
+           }
+  emit("sum of squares 1..100 =", allreduce(sum, parts))
+}

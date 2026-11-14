@@ -1,0 +1,16 @@
+-- field.pi : a Lambda worker computes a 2D field with arrayf-pmap, Pi renders it.
+-- Pi never touches the grid values: it routes the payload and names the artifact.
+
+protocol Field {
+  op render : (Int) → Shard
+  errors : { 10001: "unknown_op" }
+  purity : Pure
+}
+
+program Main() = scope {
+  w → Pool("workers/field.lambda", 1, {cpus: 1, gpus: 1, memory: "256MiB"}).recruit(1)
+  n → 200
+  g → await call(w, "render", n)
+  emit_grid("field", g, n, n)
+  emit_text("shape", "sin(x) * cos(y), 200 x 200")
+}
