@@ -60,6 +60,9 @@ PRIM_GLOBALS = {
     "str_to_list": "@lambda_prim_str_to_list",
     "str_len": "@lambda_prim_str_len",
     "str_append": "@lambda_prim_str_append",
+    "str_to_arrayb": "@lambda_prim_str_to_arrayb",
+    "arrayb_to_str": "@lambda_prim_arrayb_to_str",
+    "argv": "@lambda_prim_argv",
     "read_file": "@lambda_prim_read_file",
     "print": "@lambda_prim_print",
     "println": "@lambda_prim_println",
@@ -98,7 +101,11 @@ OP_FN = {
     "tail": "@lambda_op_tail", "empty": "@lambda_op_empty", "not": "@lambda_op_not", "and": "@lambda_op_and", "or": "@lambda_op_or",
     "str_to_int": "@lambda_op_str_to_int", "int_to_str": "@lambda_op_int_to_str",
     "str_to_list": "@lambda_op_str_to_list", "str_len": "@lambda_op_str_len",
+    "argc": "@lambda_op_argc", "argv": "@lambda_op_argv",
+    "str_to_arrayb": "@lambda_op_str_to_arrayb",
+    "arrayb_to_str": "@lambda_op_arrayb_to_str",
     "str_append": "@lambda_op_str_append", "read_file": "@lambda_op_read_file",
+    "argc": "@lambda_op_argc_prim",
     "write_file": "@lambda_op_write_file",
     "print": "@lambda_op_print", "println": "@lambda_op_println",
     "fix": "@lambda_fix",
@@ -295,14 +302,21 @@ class FunctionInfo:
 
 
 class FnContext:
-    __slots__ = ("ret_rep", "ret_type", "nparams", "param_reps")
+    __slots__ = ("ret_rep", "ret_type", "nparams", "param_reps",
+                 "is_direct", "params")
 
     def __init__(self, ret_rep: str, ret_type, nparams: int = 0,
-                 param_reps: Optional[List[str]] = None) -> None:
+                 param_reps: Optional[List[str]] = None,
+                 is_direct: bool = False, params=None) -> None:
         self.ret_rep = ret_rep
         self.ret_type = ret_type
         self.nparams = nparams
         self.param_reps = list(param_reps or [])
+        # ``is_direct`` marks a lowered direct function (not a closure body);
+        # ``params`` holds its loaded parameter values so a flattened dispatch
+        # can turn self tail calls into loop edges.
+        self.is_direct = is_direct
+        self.params = list(params or [])
 
 
 def is_bool_type(t) -> bool:
@@ -348,6 +362,8 @@ class Compiler:
         self.allow_data = allow_data
         self.exit_code = exit_code
         self.variant_tags = {}
+        self.current_lam = None
+        self.in_loop_body = False
         self.record_schemas = {}
         self.adt_schemas = {}
         self.adt_arenas = {}
@@ -615,7 +631,15 @@ class Compiler:
             info.ret_type = lam.body.type
             info.ret_rep = rep_of(lam.body.type)
 
-        info.param_borrows = [b.borrowed for b in info.params]
+        # Borrows come from the source annotations (`λ&x`), not from the
+        # resolver's binding flag: in boxed/dynamic mode the binding list is
+        # what the wrappers use, but the declared borrows are the language
+        # contract, and the two must not drift.
+        annotations = getattr(lam, "param_borrows", None)
+        if annotations is not None and len(annotations) == info.arity:
+            info.param_borrows = [bool(x) for x in annotations]
+        else:
+            info.param_borrows = [b.borrowed for b in info.params]
         info.direct_name = f"@fn_{info.id}"
         info.wrapper_names = [f"@wrap_{info.id}_{k}" for k in range(1, info.arity + 1)]
         info.env_type_names = [f"%env_{info.id}_{k}" for k in range(1, info.arity + 1)]
@@ -871,7 +895,9 @@ class Compiler:
         self.builder = IRBuilder()
         self.ctx = FnContext(info.ret_rep, info.ret_type,
                              len(info.captures) + info.arity,
-                             info.capture_reps + info.param_reps)
+                             info.capture_reps + info.param_reps,
+                             is_direct=True)
+        self.current_lam = info.lam
         self.scope_stack = []
         self.cleanup_stack = []
         self.terminated = False
@@ -889,6 +915,18 @@ class Compiler:
             sig.append(f"{self.rep_type(rep)}{attr} %par{i}")
         self.builder.raw(f"define internal {ret_ty} {info.direct_name}({', '.join(sig)}) inlinehint {{")
         self.builder.label("entry")
+
+        # Flattened if-chains that end in a self tail call reuse these slots
+        # instead of a fresh recursive frame (only plain word parameters; boxed
+        # values keep the ordinary frame for ownership/cleanup).
+        loop_slots: List[str] = []
+        if all(rep in (I64, F64) for rep in info.param_reps):
+            for i, rep in enumerate(info.param_reps):
+                loop_slots.append(self.builder.new_alloca(self.rep_type(rep)))
+            for i, (slot, rep) in enumerate(zip(loop_slots, info.param_reps)):
+                self.emit_inst(f"store {self.rep_type(rep)} %par{i}, {self.rep_type(rep)}* {slot}")
+            self.ctx.params = [Val(rep, slot)
+                               for rep, slot in zip(info.param_reps, loop_slots)]
 
         scope: Dict[int, Storage] = {}
         cleanup: List[Tuple[str, bool]] = []
@@ -1440,6 +1478,15 @@ class Compiler:
             return self.compile_record_field(
                 RecordField(base, rt.name, node.field_name, "", node.loc))
         if b.kind == PRIM:
+            if OP_CANON.get(b.name) == "argc":
+                res = self.new_reg()
+                if self.dynamic:
+                    raw = self.new_reg()
+                    self.emit_inst(f"{raw} = call i64 @lambda_op_argc()")
+                    self.emit_inst(f"{res} = call %Value* @lambda_box_int(i64 {raw})")
+                    return Val(BOX, res, owned=True)
+                self.emit_inst(f"{res} = call i64 @lambda_op_argc()")
+                return Val(I64, res)
             return self.primitive_global(b)
         if b.is_function:
             return self.materialize_function(b)
@@ -2087,23 +2134,47 @@ class Compiler:
         self.emit_inst(f"{res} = load %Value*, %Value** {slot}")
         return Val(BOX, res, owned=True)
 
-    def compile_if(self, node: If, is_tail: bool) -> Optional[Val]:
-        cond = self.compile(node.cond, is_tail=False)
-        if cond is None:
-            return None
-        if self.dynamic or cond.rep == BOX:
-            raw = self.new_reg()
-            self.emit_inst(f"{raw} = call i64 @lambda_truthy(%Value* {cond.name})")
-            self.release(cond)
-            cbool = self.new_reg()
-            self.emit_inst(f"{cbool} = icmp ne i64 {raw}, 0")
-        else:
-            cbool = self.new_reg()
-            self.emit_inst(f"{cbool} = icmp ne i64 {cond.name}, 0")
+    def _is_trampoline(self, node) -> bool:
+        """A self tail call: the call this branch ends with is the enclosing
+        function's own name, so the branch can be a loop edge instead of a
+        fresh recursive frame."""
+        lam = self.current_lam
+        if lam is None or self.ctx is None or not self.ctx.is_direct:
+            return False
+        if not isinstance(node, App):
+            return False
+        head, args = self.flatten_app(node)
+        if not isinstance(head, Var) or head.binding is None:
+            return False
+        b = head.binding
+        if b.def_node is None or b.def_node.value is not lam:
+            return False
+        info = self.lam_infos.get(id(lam))
+        return info is not None and len(args) == info.arity
 
-        then_bb = self.new_label("then")
-        else_bb = self.new_label("else")
-        self.emit_inst(f"br i1 {cbool}, label %{then_bb}, label %{else_bb}")
+    def _flatten_chain(self, node: If) -> Tuple[List[Tuple[Node, Node]], Node]:
+        """Collect ``if c1 then t1 else if c2 then t2 else e`` into a flat
+        list of ``(cond, branch)`` pairs plus the final else expression.
+
+        This is an iterative walk, so a long ``else if`` dispatch costs one
+        Python frame no matter how many arms it has.
+        """
+        arms: List[Tuple[Node, Node]] = []
+        cur: Node = node
+        while True:
+            arms.append((cur.cond, cur.then))
+            nxt = cur.else_
+            # A block wrapping a single `if` is a chained arm in disguise, as
+            # long as it has no definitions of its own to scope.
+            while isinstance(nxt, Block) and nxt.body is not None and not nxt.defs:
+                nxt = nxt.body
+            if isinstance(nxt, If):
+                cur = nxt
+                continue
+            return arms, nxt
+
+    def compile_if(self, node: If, is_tail: bool) -> Optional[Val]:
+        arms, last_else = self._flatten_chain(node)
 
         saved_moved = set(self.moved_uids)
         saved_cleanup = [list(c) for c in self.cleanup_stack]
@@ -2115,68 +2186,180 @@ class Compiler:
             # Moves in a branch are only safe when that branch returns.
             self.moves_allowed = saved_allowed and is_tail
 
+        def compile_cond(cond_node: Node) -> str:
+            cond = self.compile(cond_node, is_tail=False)
+            if cond is None:
+                raise CompileError("if condition produced no value", cond_node.loc)
+            if self.dynamic or cond.rep == BOX:
+                raw = self.new_reg()
+                self.emit_inst(f"{raw} = call i64 @lambda_truthy(%Value* {cond.name})")
+                self.release(cond)
+                cbool = self.new_reg()
+                self.emit_inst(f"{cbool} = icmp ne i64 {raw}, 0")
+            else:
+                cbool = self.new_reg()
+                self.emit_inst(f"{cbool} = icmp ne i64 {cond.name}, 0")
+            return cbool
+
         if is_tail:
-            self.builder.label(then_bb)
+            # Tail position: every arm returns, last else included.  A long
+            # dispatch becomes a chain of tests and blocks, not nested compile
+            # frames.  Arms that end in this function's own tail call reuse the
+            # entry block's parameter slots (a loop), so a dispatch inside a
+            # tail-recursive function does not grow the machine stack.
+            entry_bb = self.new_label("chain")
+            body_bb = self.new_label("chain_entry")
+            self.emit_inst(f"br label %{entry_bb}")
+
+            loopable = (self.ctx is not None and self.ctx.is_direct
+                        and bool(self.ctx.params)
+                        and not getattr(self, "in_loop_body", False)
+                        # Only self tail calls may become loop edges.  If any
+                        # branch lacks one, the machine must keep ordinary
+                        # frames for ownership restoration, so skip flattening
+                        # into a loop here and leave the recursion intact.
+                        and all(self._is_trampoline(br) for _, br in arms)
+                        and self._is_trampoline(last_else))
+
+            # Labels are allocated first, then conditions are compiled in
+            # order: a condition must not be emitted into another block.
+            arm_labels = [self.new_label("chain_test") for _ in arms]
+            body_label = self.new_label("chain_body")
+            last_label = self.new_label("chain_else")
+            labels = []
+            for idx, (cond_node, _) in enumerate(arms):
+                target = arm_labels[idx] if idx else entry_bb
+                self.builder.label(target)
+                self.terminated = False
+                cbool = compile_cond(cond_node)
+                arm_bb = self.new_label("chain_arm")
+                next_label = arm_labels[idx + 1] if idx + 1 < len(arm_labels) else last_label
+                self.emit_inst(f"br i1 {cbool}, label %{arm_bb}, label %{next_label}")
+                labels.append((arm_bb, target))
+            for idx, ((arm_bb, cond_label), (_, branch)) in enumerate(zip(labels, arms)):
+                self.builder.label(arm_bb)
+                self.terminated = False
+                restore_branch_state()
+                tramp = loopable and self._is_trampoline(branch)
+                if tramp:
+                    _, targs = self.flatten_app(branch)
+                    vals = []
+                    for arg, rep in zip(targs, self.ctx.param_reps):
+                        val = self.compile(arg, is_tail=False)
+                        if val is None:
+                            raise CompileError("tail-call argument produced no value", arg.loc)
+                        vals.append(self.coerce(val, rep, arg.type))
+                    for pval, val in zip(self.ctx.params, vals):
+                        if val.rep == F64:
+                            self.emit_inst(f"store double {val.name}, double* {pval.name}")
+                        elif val.rep == I64:
+                            self.emit_inst(f"store i64 {val.name}, i64* {pval.name}")
+                    # A loop edge leaves the frame like a tail call does:
+                    # release the callee's owned locals first.
+                    self.emit_cleanup_all()
+                    self.emit_inst(f"br label %{body_label}")
+                    self.terminated = True
+                else:
+                    tv = self.compile(branch, is_tail=True)
+                    if not self.terminated:
+                        self.emit_return(tv, branch.type)
+
+            self.builder.label(last_label)
             self.terminated = False
             restore_branch_state()
-            tv = self.compile(node.then, is_tail=True)
-            if not self.terminated:
-                self.emit_return(tv, node.then.type)
-            self.builder.label(else_bb)
-            self.terminated = False
-            restore_branch_state()
-            ev = self.compile(node.else_, is_tail=True)
-            if not self.terminated:
-                self.emit_return(ev, node.else_.type)
+            if loopable and self._is_trampoline(last_else):
+                _, eargs = self.flatten_app(last_else)
+                vals = []
+                for arg, rep in zip(eargs, self.ctx.param_reps):
+                    val = self.compile(arg, is_tail=False)
+                    if val is None:
+                        raise CompileError("tail-call argument produced no value", arg.loc)
+                    vals.append(self.coerce(val, rep, arg.type))
+                for pval, val in zip(self.ctx.params, vals):
+                    if val.rep == F64:
+                        self.emit_inst(f"store double {val.name}, double* {pval.name}")
+                    elif val.rep == I64:
+                        self.emit_inst(f"store i64 {val.name}, i64* {pval.name}")
+                self.emit_cleanup_all()
+                self.emit_inst(f"br label %{body_label}")
+                self.terminated = True
+            else:
+                ev = self.compile(last_else, is_tail=True)
+                if not self.terminated:
+                    self.emit_return(ev, last_else.type)
+
+            if loopable:
+                if not self.terminated:
+                    self.emit_inst(f"br label %{body_label}")
+                self.builder.label(body_label)
+                self.terminated = False
+                restore_branch_state()
+                # Re-emit the dispatch body for the next iteration without
+                # re-enabling the loop edge (that would recurse forever while
+                # compiling).
+                self.in_loop_body = True
+                try:
+                    return self.compile(node, is_tail=is_tail)
+                finally:
+                    self.in_loop_body = False
+
             self.terminated = True
             self.moved_uids = set(saved_moved)
             self.cleanup_stack = [list(c) for c in saved_cleanup]
             self.moves_allowed = saved_allowed
             return None
 
+        # Non-tail: each arm stores its value in a shared slot and jumps to the
+        # merge block.
         common = self.node_rep(node)
         slot_ty = self.rep_type(common)
         slot = self.builder.new_alloca(slot_ty)
         merge_bb = self.new_label("merge")
 
-        self.builder.label(then_bb)
-        self.terminated = False
-        restore_branch_state()
-        tv = self.compile(node.then, is_tail=False)
-        if tv is None:
-            raise CompileError("if branch produced no value", node.then.loc)
-        tv = self.coerce(tv, common, node.then.type)
-        if common == I64:
-            self.emit_inst(f"store i64 {tv.name}, i64* {slot}")
-        elif common == F64:
-            self.emit_inst(f"store double {tv.name}, double* {slot}")
-        elif common.startswith("REC:"):
-            ty = self.rep_type(common)
-            self.emit_inst(f"store {ty} {tv.name}, {ty}* {slot}")
-        else:
-            self.emit_inst(f"store %Value* {tv.name}, %Value** {slot}")
-        self.emit_inst(f"br label %{merge_bb}")
+        def store_value(val: Val, expr_type) -> None:
+            val = self.coerce(val, common, expr_type)
+            if common == I64:
+                self.emit_inst(f"store i64 {val.name}, i64* {slot}")
+            elif common == F64:
+                self.emit_inst(f"store double {val.name}, double* {slot}")
+            elif common.startswith("REC:"):
+                ty = self.rep_type(common)
+                self.emit_inst(f"store {ty} {val.name}, {ty}* {slot}")
+            else:
+                self.emit_inst(f"store %Value* {val.name}, %Value** {slot}")
+            self.emit_inst(f"br label %{merge_bb}")
 
-        self.builder.label(else_bb)
-        self.terminated = False
+        current = None
+        for idx, (cond_node, branch) in enumerate(arms):
+            if current is not None:
+                self.builder.label(current)
+                self.terminated = False
+            cbool = compile_cond(cond_node)
+            then_bb = self.new_label("then")
+            else_bb = self.new_label("else")
+            self.emit_inst(f"br i1 {cbool}, label %{then_bb}, label %{else_bb}")
+            self.builder.label(then_bb)
+            self.terminated = False
+            restore_branch_state()
+            tv = self.compile(branch, is_tail=False)
+            if tv is None:
+                raise CompileError("if branch produced no value", branch.loc)
+            store_value(tv, branch.type)
+            current = else_bb
+        if current is not None:
+            self.builder.label(current)
+            self.terminated = False
         restore_branch_state()
-        ev = self.compile(node.else_, is_tail=False)
+        ev = self.compile(last_else, is_tail=False)
         if ev is None:
-            raise CompileError("if branch produced no value", node.else_.loc)
-        ev = self.coerce(ev, common, node.else_.type)
-        if common == I64:
-            self.emit_inst(f"store i64 {ev.name}, i64* {slot}")
-        elif common == F64:
-            self.emit_inst(f"store double {ev.name}, double* {slot}")
-        elif common.startswith("REC:"):
-            ty = self.rep_type(common)
-            self.emit_inst(f"store {ty} {ev.name}, {ty}* {slot}")
-        else:
-            self.emit_inst(f"store %Value* {ev.name}, %Value** {slot}")
-        self.emit_inst(f"br label %{merge_bb}")
+            raise CompileError("if branch produced no value", last_else.loc)
+        store_value(ev, last_else.type)
 
         self.builder.label(merge_bb)
         self.terminated = False
+        self.moved_uids = set(saved_moved)
+        self.cleanup_stack = [list(c) for c in saved_cleanup]
+        self.moves_allowed = saved_allowed
         res = self.new_reg()
         if common == I64:
             self.emit_inst(f"{res} = load i64, i64* {slot}")
@@ -2452,6 +2635,23 @@ class Compiler:
                     "arrayi-pmap-chunk must be applied to a provably pure "
                     "Int -> Int function, a length and a chunk size", node.loc)
             self.check_pmap_function(args[0], node.loc)
+        # Constant-like primitives (argc) work without arguments even in the
+        # boxed path; the remaining zero-arity forms need staged application.
+        if op == "argc" and not args:
+            if self.dynamic:
+                res = self.new_reg()
+                self.emit_inst(f"{res} = call i64 @lambda_op_argc()")
+                boxed = self.new_reg()
+                self.emit_inst(f"{boxed} = call %Value* @lambda_box_int(i64 {res})")
+                val = Val(BOX, boxed, owned=True)
+            else:
+                res = self.new_reg()
+                self.emit_inst(f"{res} = call i64 @lambda_op_argc()")
+                val = Val(I64, res)
+            if is_tail:
+                self.emit_return(val, node.type)
+                return None
+            return val
         if self.dynamic:
             if len(args) == arity and arity > 0:
                 val = self.emit_boxed_primitive(op, args, node)
@@ -2948,6 +3148,21 @@ class Compiler:
             res = self.new_reg()
             self.emit_inst(f"{res} = call %Value* @lambda_op_str_to_int(%Value* {a.name})")
             return self.coerce(Val(BOX, res, owned=True), I64, node.type)
+        if op == "argc":
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call i64 @lambda_op_argc()")
+            return Val(I64, res)
+        if op == "argv":
+            a = self._prim_arg(args[0], BOX, args[0].type)
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_op_argv(%Value* {a.name})")
+            return Val(BOX, res, owned=True)
+        if op in ("str_to_arrayb", "arrayb_to_str"):
+            a = self._prim_arg(args[0], BOX, args[0].type)
+            fn = "@lambda_op_str_to_arrayb" if op == "str_to_arrayb" else "@lambda_op_arrayb_to_str"
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* {fn}(%Value* {a.name})")
+            return Val(BOX, res, owned=True)
         if op == "str_to_list":
             a = self._prim_arg(args[0], BOX, args[0].type)
             res = self.new_reg()
@@ -3326,7 +3541,15 @@ class Compiler:
     # ------------------------------------------------------------------
     def _gen_main(self, program: Block) -> None:
         self.builder = IRBuilder()
-        self.ctx = FnContext(BOX, None)
+        from typecheck import TINT as _TINT
+        # `main` returns Int and is not a lowered direct function: flattened
+        # chains must not build loop edges from it.  Previously the leftover
+        # context from the last generated function was reused here, which both
+        # picked that function's return type and made main look like a direct
+        # function with boxed parameters.
+        self.ctx = FnContext(I64, _TINT)
+        self.ctx.is_direct = False
+        self.current_lam = None
         self.scope_stack = []
         self.cleanup_stack = []
         self.terminated = False
@@ -3336,6 +3559,10 @@ class Compiler:
         self.builder.raw("define i32 @main(i32 %argc, i8** %argv) {")
         self.builder.label("entry")
         self.emit_inst("call void @lambda_runtime_init()")
+        # Capture process arguments so argc/argv work on every platform.
+        argc_ty = self.new_reg()
+        self.emit_inst(f"{argc_ty} = sext i32 %argc to i64")
+        self.emit_inst(f"call void @lambda_set_args(i64 {argc_ty}, i8** %argv)")
         for name, adt in sorted(self.adt_schemas.items()):
             if adt.layout != "arena" or name not in self.adt_arenas:
                 continue

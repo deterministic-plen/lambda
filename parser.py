@@ -52,7 +52,10 @@ PRIMITIVES = {
     "write-bytes", "write-f64s", "write-i64s",
     # strings
     "str->int", "int->str", "str->list", "str-len", "str-append",
+    "str->arrayb", "arrayb->str",
     "read-file", "write-file",
+    # process arguments
+    "argc", "argv",
     # io / misc
     "print", "println", "not", "and", "or",
     # fixed-point combinator (call-by-value)
@@ -104,6 +107,8 @@ OP_CANON = {
     "write-i64s": "write_i64s",
     "str->int": "str_to_int", "int->str": "int_to_str",
     "str->list": "str_to_list", "str-len": "str_len",
+    "str->arrayb": "str_to_arrayb", "arrayb->str": "arrayb_to_str",
+    "argc": "argc", "argv": "argv",
     "str-append": "str_append", "read-file": "read_file", "write-file": "write_file",
     "print": "print", "println": "println", "not": "not",
     "and": "and", "or": "or",

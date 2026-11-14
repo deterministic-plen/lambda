@@ -4,7 +4,7 @@
 
 | implementation | time | vs C |
 | --- | ---: | ---: |
-| Lambda | 59.1 ms | 2.36x |
-| C | 25.1 ms | 1.00x |
-| C++ | 29.6 ms | 1.18x |
-| Rust | 40.4 ms | 1.61x |
+| Lambda | 56.0 ms | 2.22x |
+| C | 25.2 ms | 1.00x |
+| C++ | 30.7 ms | 1.22x |
+| Rust | 41.1 ms | 1.63x |

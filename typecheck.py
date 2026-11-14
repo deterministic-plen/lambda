@@ -471,6 +471,14 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TSTR], TINT))
     if name == "str-append":
         return mono(tfun([TSTR, TSTR], TSTR))
+    if name == "str->arrayb":
+        return mono(tfun([TSTR], TARRAYB))
+    if name == "arrayb->str":
+        return mono(tfun([TARRAYB], TSTR))
+    if name == "argc":
+        return mono(TINT)
+    if name == "argv":
+        return mono(tfun([TINT], TSTR))
     if name == "read-file":
         return mono(tfun([TSTR], TSTR))
     if name in ("read-line",):

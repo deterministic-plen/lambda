@@ -177,6 +177,20 @@ total → (sum xs)
 `map`, `pmap`, `range`, `head`, `tail`, `empty?`, `nil`, and `sum`/`product`
 are available.  A list is boxed and reference-counted.
 
+### Process arguments and raw bytes
+
+```lambda
+argc            ; Int  - argument count (argv[0] is the executable)
+(argv i)        ; String - i-th argument, "" when out of range
+(str->arrayb s) ; ArrayB - copy a string's bytes into a flat buffer
+(arrayb->str b) ; String - copy bytes back into a string
+```
+
+`read-file` already returns a whole file with a run-time-determined length, so
+`(str->arrayb (read-file path))` gives a file as bytes without knowing its size
+at compile time.  [`examples/brainf_argv.lambda`](examples/brainf_argv.lambda)
+reads the Brainfuck program path from `argv[1]`.
+
 ### Flat arrays
 
 For numeric state, use one of three mutable flat buffers:
@@ -407,7 +421,7 @@ fields, variants, and qualified names.  Validation:
 python run_tests.py
 ```
 
-144 compile/run/leak regression cases; every program must finish with
+145 compile/run/leak regression cases; every program must finish with
 `live=0` allocation statistics.  The suite covers scalars, floats, strings,
 lists, arrays, products, sums, enums, closures, CSE, tail calls, includes,
 parallel maps, bigint, and compile-time errors.

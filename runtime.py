@@ -1392,6 +1392,57 @@ Value *lambda_op_read_file(Value *pathv) {
     return r;
 }
 
+/* Copy a string's bytes into a flat ArrayB (no boxed per-byte list). */
+Value *lambda_op_str_to_arrayb(Value *v) {
+    if (!v || v->tag != TAG_STRING) fail_type("String", v);
+    int64_t len = v->i;
+    Value *arr = lambda_arrayb_new(len, 0);
+    if (len > 0) memcpy(arr->p, v->p, (size_t)len);
+    lambda_release(v);
+    return arr;
+}
+
+/* Copy an ArrayB's bytes into a String (inverse of str->arrayb). */
+Value *lambda_op_arrayb_to_str(Value *v) {
+    if (!v || v->tag != TAG_ARRAYB) fail_type("ArrayB", v);
+    Value *r = lambda_string_new_len((const char *)v->p, v->i);
+    lambda_release(v);
+    return r;
+}
+
+/* Command-line arguments captured by main().  argv(0) is the executable.
+   (lambda_prim_argc is defined with the other primitive globals below.) */
+int64_t lambda_argc = 0;
+char **lambda_argv = NULL;
+
+void lambda_refresh_argc_prim(int64_t argc);
+
+void lambda_set_args(int64_t argc, char **argv) {
+    lambda_argc = argc;
+    lambda_argv = argv;
+    lambda_refresh_argc_prim(argc);
+}
+
+int64_t lambda_op_argc(void) {
+    return lambda_argc;
+}
+
+/* `argc` is a value, not a function: boxed references see the live cast. */
+Value *lambda_op_argc_prim(void) {
+    return lambda_box_int(lambda_argc);
+}
+
+/* Returns "" for an out-of-range index rather than failing. */
+Value *lambda_op_argv(Value *v) {
+    if (!v || v->tag != TAG_INT) fail_type("Int", v);
+    int64_t idx = v->i;
+    lambda_release(v);
+    if (!lambda_argv || idx < 0 || idx >= lambda_argc) {
+        return lambda_string_new_len("", 0);
+    }
+    return lambda_string_new_len(lambda_argv[idx], (int64_t)strlen(lambda_argv[idx]));
+}
+
 /* Write the bytes of an ArrayB to a file.  Returns bytes written, or -1. */
 int64_t lambda_op_write_file(Value *pathv, Value *data) {
     if (!pathv || pathv->tag != TAG_STRING) fail_type("String", pathv);
@@ -2648,6 +2699,15 @@ Value *lambda_prim_or = NULL;
 Value *lambda_prim_str_to_int = NULL;
 Value *lambda_prim_int_to_str = NULL;
 Value *lambda_prim_str_to_list = NULL;
+Value *lambda_prim_str_to_arrayb = NULL;
+Value *lambda_prim_arrayb_to_str = NULL;
+Value *lambda_prim_argv = NULL;
+Value *lambda_prim_argc = NULL;
+
+void lambda_refresh_argc_prim(int64_t argc) {
+    /* argc is materialised per use (no boxed global to leak). */
+    (void)argc;
+}
 Value *lambda_prim_str_len = NULL;
 Value *lambda_prim_str_append = NULL;
 Value *lambda_prim_read_file = NULL;
@@ -2720,6 +2780,7 @@ static BinRoot root_pmap = { { NULL }, lambda_op_pmap };
 
 void lambda_runtime_init(void) {
     pool_init();
+
     lambda_prim_add = make_immortal_closure((void *)bin_stage1, &root_add);
     lambda_prim_sub = make_immortal_closure((void *)bin_stage1, &root_sub);
     lambda_prim_mul = make_immortal_closure((void *)bin_stage1, &root_mul);
@@ -2742,6 +2803,9 @@ void lambda_runtime_init(void) {
     lambda_prim_str_to_list = make_immortal_closure((void *)unary_stage, (void *)lambda_op_str_to_list);
     lambda_prim_str_len = make_immortal_closure((void *)unary_stage, (void *)lambda_op_str_len);
     lambda_prim_str_append = make_immortal_closure((void *)bin_stage1, &root_str_append);
+    lambda_prim_str_to_arrayb = make_immortal_closure((void *)unary_stage, (void *)lambda_op_str_to_arrayb);
+    lambda_prim_arrayb_to_str = make_immortal_closure((void *)unary_stage, (void *)lambda_op_arrayb_to_str);
+    lambda_prim_argv = make_immortal_closure((void *)unary_stage, (void *)lambda_op_argv);
     lambda_prim_read_file = make_immortal_closure((void *)unary_stage, (void *)lambda_op_read_file);
     lambda_prim_print = make_immortal_closure((void *)unary_stage, (void *)lambda_op_print);
     lambda_prim_println = make_immortal_closure((void *)unary_stage, (void *)lambda_op_println);
@@ -2866,6 +2930,12 @@ declare %Value* @lambda_op_str_to_list(%Value*)
 declare %Value* @lambda_op_str_len(%Value*)
 declare %Value* @lambda_op_str_append(%Value*, %Value*)
 declare %Value* @lambda_op_read_file(%Value*)
+declare %Value* @lambda_op_str_to_arrayb(%Value*)
+declare %Value* @lambda_op_arrayb_to_str(%Value*)
+declare i64 @lambda_op_argc()
+declare %Value* @lambda_op_argc_prim()
+declare %Value* @lambda_op_argv(%Value*)
+declare void @lambda_set_args(i64, i8**)
 declare %Value* @lambda_op_print(%Value*)
 declare %Value* @lambda_op_println(%Value*)
 declare %Value* @lambda_fix(%Value*)

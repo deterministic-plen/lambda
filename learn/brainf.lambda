@@ -1,0 +1,60 @@
+; A minimal implementation of Brain**** in lambda
+; Based on Rosetta Code's Execute_Brain**** tasl
+; Brainf's syntax:
+; > ptr increment
+; < ptr decrement
+; + increment cell
+; - decrement cell
+; . output character
+; , read character
+; [ jump to next ] if the cell value is 0
+; ] jump to [ if cell value is 0
+skipf → (λ&source source-ptr depth.
+    if (>= source-ptr (arrayb-length source)) then source-ptr
+    else
+        chari → (arrayb-get source source-ptr)
+        if (== chari 91) then
+            skipf &source (+ source-ptr 1) (+ depth 1)
+            else if (== chari 93) then
+                 if (== depth 0) then source-ptr
+                 else skipf &source (+ source-ptr 1) (- depth 1)
+        else skipf &source (+ source-ptr 1) depth
+)
+skipb → (λ&source source-ptr depth.
+    if (< source-ptr 0) then 0
+    else
+        chari → (arrayb-get source source-ptr)
+        if (== chari 93) then
+            skipb &source (- source-ptr 1) (+ depth 1)
+            else if (== chari 91) then
+                 if (== depth 0) then source-ptr
+                 else skipb &source (- source-ptr 1) (- depth 1)
+        else skipb &source (- source-ptr 1) depth
+)
+
+bf → (λ&source tape source-ptr ptr.
+    if (< ptr 0) then bf &source tape source-ptr 0 else
+    if (>= source-ptr (arrayb-length source)) then tape
+    else
+    
+    chari → (arrayb-get source source-ptr)
+    cell → (arrayb-get tape ptr)
+    next → (+ source-ptr 1)
+    
+    if (== chari 62) then bf &source tape next (+ ptr 1) else
+    if (== chari 60) then bf &source tape next (- ptr 1) else
+    if (== chari 43) then bf &source (arrayb-set tape ptr (+ cell 1)) (+ source-ptr 1) ptr else
+    if (== chari 45) then bf &source (arrayb-set tape ptr (- cell 1)) (+ source-ptr 1) ptr else
+    if (== chari 91) then bf &source tape (if (== 0 cell) then (skipf &source next 0) else next) ptr else
+    if (== chari 93) then bf &source tape (if (== 0 cell) then next else (skipb &source (- source-ptr 1) 0)) ptr else
+    if (== chari 46) then 
+    a → (write-bytes (arrayb-of [cell]))
+    bf &source tape next ptr else
+    if (== chari 44) then
+    a → (read-int "> ")
+    bf &source (arrayb-set tape ptr (% a 255)) next ptr else tape
+)
+
+prog → (arrayb-of [62, 43, 43, 43, 43, 43, 43, 43, 43, 91, 60, 43, 43, 43, 43, 43, 43, 43, 43, 43, 62, 45, 93, 60, 46, 62, 43, 43, 43, 43, 91, 60, 43, 43, 43, 43, 43, 43, 43, 62, 45, 93, 60, 43, 46, 43, 43, 43, 43, 43, 43, 43, 46, 46, 43, 43, 43, 46, 62, 62, 43, 43, 43, 43, 43, 43, 91, 60, 43, 43, 43, 43, 43, 43, 43, 62, 45, 93, 60, 43, 43, 46, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 46, 62, 43, 43, 43, 43, 43, 43, 91, 60, 43, 43, 43, 43, 43, 43, 43, 43, 43, 62, 45, 93, 60, 43, 46, 60, 46, 43, 43, 43, 46, 45, 45, 45, 45, 45, 45, 46, 45, 45, 45, 45, 45, 45, 45, 45, 46, 62, 62, 62, 43, 43, 43, 43, 91, 60, 43, 43, 43, 43, 43, 43, 43, 43, 62, 45, 93, 60, 43, 46, 62, 43, 43, 43, 43, 43, 43, 43, 43, 91, 60, 43, 43, 43, 43, 43, 43, 43, 43, 43, 62, 45, 93, 60, 46, 62, 43, 43, 43, 43, 91, 60, 43, 43, 43, 43, 43, 43, 43, 62, 45, 93, 60, 43, 46, 43, 43, 43, 43, 43, 43, 43, 46, 46, 43, 43, 43, 46, 62, 62])
+tape → (bf &prog (arrayb 32000 0) 0 0)
+0

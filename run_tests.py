@@ -135,6 +135,7 @@ CASES = [
     ("adt_float", "4.0\n", [], None, None),
     ("adt_five", "15\n", [], None, None),
     ("adt_rose", "4\n", [], None, None),
+    ("bytes_roundtrip", "hi\n", [], None, None),
     ("list_lib", "[3, 3, 2, 6]\n", [], None, None),
     # parallel
     ("pmap_basic", "[2, 3, 4, 5]\n", [], None, None),

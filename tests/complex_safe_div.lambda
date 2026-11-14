@@ -2,8 +2,8 @@ include "complex"
 
 z → (Complex 1.0 2.0)
 zero → (Complex 0.0 0.0)
-ok → (Complex::safe-div z (Complex 1.0 0.0))
-bad → (Complex::safe-div z zero)
+ok → (Complex::div z (Complex 1.0 0.0))
+bad → (Complex::div z zero)
 if (Complex::is-nan bad)
 then [(Complex-re ok), (Complex-im ok), 1.0]
 else [(Complex-re ok), (Complex-im ok), 0.0]

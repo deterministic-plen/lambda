@@ -33,4 +33,3 @@ maxf → (λ&data.
     (go 0 data (arrayf-get data 0))
 )
 
-sort

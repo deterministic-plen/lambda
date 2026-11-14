@@ -1,0 +1,40 @@
+﻿; Brainfuck interpreter: program path from argv[1]; build with --data.
+;
+; This file only interprets and prints through `bf`, whose '.' branch writes a
+; byte.  Because `write-bytes` consumes its array, the output call happens in a
+; block that also performs the next recursive step; the tape is threaded.
+
+skipf → (λ&src p d.
+  if (>= p (arrayb-length src)) then p
+  else
+    ch → (arrayb-get src p)
+    if (== ch 91) then (skipf &src (+ p 1) (+ d 1))
+    else if (== ch 93) then (if (== d 0) then p else (skipf &src (+ p 1) (- d 1)))
+    else (skipf &src (+ p 1) d))
+
+skipb → (λ&src p d.
+  if (< p 0) then 0
+  else
+    ch → (arrayb-get src p)
+    if (== ch 93) then (skipb &src (- p 1) (+ d 1))
+    else if (== ch 91) then (if (== d 0) then p else (skipb &src (- p 1) (- d 1)))
+    else (skipb &src (- p 1) d))
+
+bf → (λ&src tape ptr sp.
+  if (>= sp (arrayb-length src)) then tape
+  else
+    ch → (arrayb-get src sp)
+    cell → (arrayb-get tape ptr)
+    next → (+ sp 1)
+    if (== ch 62) then (bf &src tape (+ ptr 1) next)
+    else if (== ch 60) then (bf &src tape (- ptr 1) next)
+    else if (== ch 43) then (bf &src (arrayb-set tape ptr (+ cell 1)) ptr next)
+    else if (== ch 45) then (bf &src (arrayb-set tape ptr (- cell 1)) ptr next)
+    else if (== ch 91) then (bf &src tape ptr (if (== cell 0) then (skipf &src next 1) else next))
+    else if (== ch 93) then (bf &src tape ptr (if (== cell 0) then next else (skipb &src (- sp 1) 1)))
+    else (bf &src tape ptr next))
+
+path → (if (>= argc 2) then (argv 1) else "")
+src → (str->arrayb (read-file path))
+(bf &src (arrayb 32000 0) 0 0)
+0

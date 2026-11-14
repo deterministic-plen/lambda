@@ -45,6 +45,7 @@ PRIM_ARITY = {
     "cons": 2, "head": 1, "tail": 1, "empty": 1, "nil": 0,
     "str_to_int": 1, "int_to_str": 1, "str_to_list": 1, "str_len": 1,
     "str_append": 2, "read_file": 1, "print": 1, "println": 1, "not": 1,
+    "str_to_arrayb": 1, "arrayb_to_str": 1, "argc": 0, "argv": 1,
     "fix": 1,
     "int_to_float": 1, "float_to_int": 1, "str_to_float": 1, "float_to_str": 1,
     "sqrt": 1, "sin": 1, "cos": 1, "tan": 1, "asin": 1, "acos": 1, "atan": 1,

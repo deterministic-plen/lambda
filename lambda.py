@@ -168,7 +168,53 @@ def build(input_file: str, output: str, *, strict: bool = False,
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+# The compiler is a recursive-descent translator: long `else if` chains, deep
+# applications (`(- (- (- ...)))`) and nested blocks consume several Python
+# frames per source node.  The default 1000-frame limit rejects legitimate
+# programs with a misleading RecursionError, so the driver raises it up front
+# and reports genuine overflow as a compile error instead.
+COMPILER_RECURSION_LIMIT = 20000
+
+
+COMPILER_THREAD_STACK = 64 * 1024 * 1024
+
+
 def main(argv=None) -> int:
+    return _main_in_big_stack(argv)
+
+
+def _main_in_big_stack(argv=None):
+    """Run the compiler on a thread with a large stack.
+
+    The parser, resolver, type checker and code generator are all recursive
+    over the AST, so long ``else if`` dispatch chains (thousands of arms) need
+    far more than the interpreter's default 8 MB C stack even when Python's
+    own recursion limit is raised.  CPython 3.10 cannot run Python code on an
+    enlarged main-thread stack, so the work is moved to a worker thread.
+    """
+    import threading
+
+    box = {}
+
+    def run():
+        try:
+            box["code"] = _main(argv)
+        except SystemExit as exc:  # pragma: no cover - defensive
+            box["code"] = exc.code if isinstance(exc.code, int) else 1
+
+    try:
+        threading.stack_size(COMPILER_THREAD_STACK)
+    except (ValueError, RuntimeError):  # pragma: no cover - platform limits
+        return _main(argv)
+    thread = threading.Thread(target=run, name="lambda-compile")
+    thread.start()
+    thread.join()
+    return box.get("code", 1)
+
+
+def _main(argv=None) -> int:
+    if sys.getrecursionlimit() < COMPILER_RECURSION_LIMIT:
+        sys.setrecursionlimit(COMPILER_RECURSION_LIMIT)
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")
@@ -227,6 +273,14 @@ def main(argv=None) -> int:
             search_paths=args.lib,
             exit_code=args.exit_code,
         )
+    except RecursionError:
+        print(
+            f"{args.input_file}: compile error: compiler stack overflow while lowering "
+            "this program (deeply nested expressions, or an error raised inside a "
+            "nested/untyped branch)",
+            file=sys.stderr,
+        )
+        return 1
     except LambdaError as exc:
         if exc.loc and exc.loc.line:
             where = f"{exc.loc.source}:{exc.loc.line}:{exc.loc.col}"
