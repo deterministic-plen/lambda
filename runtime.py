@@ -16,6 +16,7 @@ RUNTIME_C = r"""
 #define _CRT_SECURE_NO_WARNINGS
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
