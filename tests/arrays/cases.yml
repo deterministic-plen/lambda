@@ -1,0 +1,52 @@
+description: 'Flat arrays: ArrayF/ArrayI/ArrayB and stream output'
+cases:
+- name: arrayf_basic
+  stdout: '[5.0, 3.5, 1.25]
+
+    '
+- name: arraydyn
+  stdout: '[5.0, 3.5, 1.25]
+
+    '
+  flags:
+  - --dynamic
+- name: arrayb_basic
+  stdout: '32640
+
+    '
+- name: array_clone
+  stdout: '[9.0, 1.0]
+
+    '
+- name: array_rebind
+  stdout: '7
+
+    '
+- name: stream_f64
+  stdout: 4c4d4231010000000100000010000000000000000000f03f00000000000000c0
+  binary: true
+  flags:
+  - --data
+- name: array_sum_f
+  stdout: '6.0
+
+    '
+- name: arrayi_pmap
+  stdout: '[0, 2, 6, 12, 20]
+
+    '
+- name: arrayi_pmap_chunk
+  stdout: '[0, 10, 20, 30]
+
+    '
+- name: arrayf_pmap
+  stdout: '[1000, 295, 700]
+
+    '
+- name: array_pmap_impure
+  compile_fail: pmap requires a provably pure function
+- name: array_consume_reuse
+  compile_fail: consumed by a destructive array update
+- name: stream_no_data
+  compile_fail: binary output is disabled
+strict: true

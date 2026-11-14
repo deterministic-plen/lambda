@@ -862,6 +862,7 @@ class Inferencer:
                 param_types.append(v)
                 env2[b.uid] = mono(v)
             body_t = self.infer(node.body, env2)
+            node.param_types = param_types
             return tfun(param_types, body_t)
 
         if isinstance(node, App):
@@ -1095,6 +1096,28 @@ class Inferencer:
             d.binding.type = t
             env[d.binding.uid] = scheme
 
+        # Function parameters whose types came from source annotations must
+        # keep those types at every call site.  The annotation is stored on the
+        # Lam node, not inside the TFun type, so generalizing the lambda's type
+        # would hand callers a fresh variable for e.g. `λ&a: ArrayB`.  Pin the
+        # annotated parameters by removing their variables from the scheme's
+        # quantified set.
+        for d in block.defs:
+            lam = d.value if isinstance(d.value, Lam) else None
+            if lam is None or d.binding is None or d.binding.scheme is None:
+                continue
+            annotated = [v for a, v in zip(
+                lam.param_annotations, getattr(lam, "param_types", [])) if a]
+            if not annotated:
+                continue
+            pinned = set()
+            for v in annotated:
+                pinned |= free_type_vars(prune(v))
+            # Keep instantiation sharing the SAME unifiers for annotated
+            # positions: `quantified` maps the variables that may be replaced
+            # with fresh ones, so removing them is sufficient.
+            d.binding.scheme.quantified = d.binding.scheme.quantified - pinned
+            env[d.binding.uid] = d.binding.scheme
         return self.infer(block.body, env)
 
 

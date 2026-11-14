@@ -418,13 +418,34 @@ fields, variants, and qualified names.  Validation:
 ## Tests
 
 ```sh
-python run_tests.py
+python run_tests.py                 # everything
+python run_tests.py data floats     # whole groups
+python run_tests.py -k adt          # by case-name substring
+python run_tests.py --list          # discover without running
+python run_tests.py tests/data/adt_tree.lambda   # a single case
+```
+
+Cases live in `tests/<group>/` next to their sources, and each group's
+`cases.yml` declares the expected stdout (or the expected compiler error) and
+any compiler flags or stdin.  Discovery is recursive, so adding a group means
+adding a directory with a manifest -- no Python changes.
+
+```yaml
+description: Recursive data declarations and their layouts
+cases:
+- name: adt_tree
+  stdout: |
+    3
+- name: adt_boxed
+  stdout: |
+    hi
 ```
 
 145 compile/run/leak regression cases; every program must finish with
 `live=0` allocation statistics.  The suite covers scalars, floats, strings,
-lists, arrays, products, sums, enums, closures, CSE, tail calls, includes,
-parallel maps, bigint, and compile-time errors.
+lists, arrays, recursive data layouts, products, sums, enums, closures, CSE,
+tail calls, includes, parallel maps, bigint, terminal input, and compile-time
+errors.
 
 ## Limitations and roadmap
 

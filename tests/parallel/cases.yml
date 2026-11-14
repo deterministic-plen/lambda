@@ -1,0 +1,41 @@
+description: pmap, comprehensions and lambda-p
+cases:
+- name: float_pmap
+  stdout: '[2.0, 4.0, 6.0]
+
+    '
+- name: pmap_basic
+  stdout: '[2, 3, 4, 5]
+
+    '
+- name: pmap_capture
+  stdout: '[11, 12, 13]
+
+    '
+- name: pmap_boxed_capture
+  stdout: '[11, 12, 13]
+
+    '
+- name: pmap_dynamic
+  stdout: '[2, 3, 4, 5]
+
+    '
+  flags:
+  - --dynamic
+- name: comp_seq
+  stdout: '[2, 3, 4]
+
+    '
+- name: comp_par
+  stdout: '[2, 3, 4]
+
+    '
+- name: lambda_p
+  stdout: '42
+
+    '
+- name: pmap_impure
+  compile_fail: pmap requires a provably pure function
+- name: lambda_p_impure
+  compile_fail: λp function body must be pure
+strict: true

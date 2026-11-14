@@ -1,0 +1,32 @@
+description: Terminal input (opt-in)
+cases:
+- name: input_int
+  stdout: '41
+
+    '
+  flags:
+  - --input
+  stdin: '41
+
+    '
+- name: input_line
+  stdout: '5
+
+    '
+  flags:
+  - --input
+  stdin: 'hello
+
+    '
+- name: input_float
+  stdout: '3.0
+
+    '
+  flags:
+  - --input
+  stdin: '1.5
+
+    '
+- name: input_disabled
+  compile_fail: terminal input is disabled
+strict: true

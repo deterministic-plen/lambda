@@ -1,0 +1,56 @@
+description: Recursion, fixed points, combinator and tail-call lowering
+cases:
+- name: fib
+  stdout: '75025
+
+    '
+- name: deeploop
+  stdout: '5000000
+
+    '
+- name: zcombinator
+  stdout: '3628800
+
+    '
+  strict: false
+  note: self-application needs a recursive type (t = t -> u); HM rejects it, so this case runs on the
+    boxed backend by design
+- name: fix
+  stdout: '3628800
+
+    '
+- name: yfix
+  stdout: '5050
+
+    '
+- name: fix_inline
+  stdout: '3628800
+
+    '
+- name: fix_first_class
+  stdout: '720
+
+    '
+- name: cse
+  stdout: '0
+
+    '
+- name: cse30
+  stdout: '0
+
+    '
+- name: churn
+  stdout: '2
+
+    '
+- name: closure_churn
+  stdout: '1
+
+    '
+- name: fib_nomt
+  stdout: '75025
+
+    '
+  flags:
+  - --no-musttail
+strict: true

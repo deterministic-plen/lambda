@@ -1,0 +1,23 @@
+description: Include resolution and library includes
+cases:
+- name: include_basic
+  stdout: '42
+
+    '
+- name: include_nested
+  stdout: '40
+
+    '
+- name: include_once
+  stdout: '42
+
+    '
+- name: include_stdlib
+  stdout: '1024
+
+    '
+- name: include_cycle_a
+  compile_fail: include cycle
+- name: include_body
+  compile_fail: definitions only
+strict: true

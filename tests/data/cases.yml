@@ -1,0 +1,35 @@
+description: Recursive data declarations and their layouts
+cases:
+- name: adt_tree
+  stdout: '3
+
+    '
+- name: adt_boxed
+  stdout: 'hi
+
+    '
+- name: adt_listfield
+  stdout: '[1, 2, 3]
+
+    '
+- name: adt_generic
+  stdout: '1
+
+    '
+- name: adt_color
+  stdout: '2
+
+    '
+- name: adt_float
+  stdout: '4.0
+
+    '
+- name: adt_five
+  stdout: '15
+
+    '
+- name: adt_rose
+  stdout: '4
+
+    '
+strict: true

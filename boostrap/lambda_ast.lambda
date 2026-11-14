@@ -11,6 +11,4 @@ data Node =
 | NBool   (value: Bool)
 | NString (lit: Int)    
 | NEnum (id:Int, tag:Int)
-| NData (name: Int, params: [Int], variants: [Node]
-
-)
+| NData (name: Int, params: [Int], variants: [Node])

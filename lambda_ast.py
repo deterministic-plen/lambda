@@ -41,11 +41,14 @@ class Loc:
 class Node:
     """Base class for all AST nodes."""
 
-    __slots__ = ("loc", "type")
+    __slots__ = ("loc", "type", "parenthesized")
 
     def __init__(self, loc: Optional[Loc] = None) -> None:
         self.loc = loc or Loc()
         self.type = None
+        # Set by the parser when this node was written as a parenthesised
+        # expression; the application loop uses it to separate statements.
+        self.parenthesized = False
 
 
 class Block(Node):
@@ -94,7 +97,7 @@ class Lam(Node):
 
     __slots__ = (
         "params", "body", "param_bindings", "param_annotations", "param_borrows",
-        "is_parallel", "info", "captures", "capture_set",
+        "is_parallel", "info", "captures", "capture_set", "param_types",
     )
 
     def __init__(self, params: List[str], body: Node, loc: Optional[Loc] = None) -> None:
@@ -106,6 +109,8 @@ class Lam(Node):
         self.param_borrows: List[bool] = [False] * len(params)
         self.is_parallel = False
         self.captures: List["Binding"] = []
+        # Filled in by the type checker: the resolved parameter types.
+        self.param_types: List[object] = []
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"Lam({self.params!r}, {self.body!r})"

@@ -1,0 +1,29 @@
+description: Product types and record fields
+cases:
+- name: record_complex
+  stdout: '[4.0, 6.0]
+
+    '
+- name: record_if
+  stdout: '3.0
+
+    '
+- name: record_vector
+  stdout: '[4.0, 6.0, 52.0]
+
+    '
+- name: record_suffix
+  stdout: '[1.0, 2.0]
+
+    '
+- name: record_suffix_last
+  stdout: '[1.0, 2.0]
+
+    '
+- name: record_firstclass
+  compile_fail: product-typed functions cannot be captured
+- name: record_mix
+  compile_fail: numeric operator expects Int or Float
+  flags:
+  - --strict
+strict: true

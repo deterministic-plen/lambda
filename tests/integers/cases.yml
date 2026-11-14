@@ -1,0 +1,35 @@
+description: Integer and bitwise operations
+cases:
+- name: int_sum_range
+  stdout: '10
+
+    '
+- name: range
+  stdout: '[0, 1, 2, 3, 4]
+
+    '
+- name: logic
+  stdout: '[true, false, false, true, true, false, false, true]
+
+    '
+- name: logic_shortcircuit
+  stdout: '[false, true, false, false]
+
+    '
+- name: logic_equiv
+  stdout: '[false, false, false, false, true, true]
+
+    '
+- name: bitwise_and
+  stdout: '[8, 8]
+
+    '
+- name: arrayi_loop
+  stdout: '332833500
+
+    '
+- name: array_sum_i
+  stdout: '15
+
+    '
+strict: true

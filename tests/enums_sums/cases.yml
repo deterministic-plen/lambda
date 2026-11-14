@@ -1,0 +1,39 @@
+description: Enums, sums and match
+cases:
+- name: enum_turnstile
+  stdout: '0
+
+    '
+- name: enum_coffee
+  stdout: 'Idle
+
+    '
+- name: enum_match_turnstile
+  stdout: '0
+
+    '
+- name: enum_match_deep
+  stdout: '0
+
+    '
+- name: sum_option
+  stdout: '3.5
+
+    '
+- name: sum_shape
+  stdout: '[12.0, 6.0, 0.0]
+
+    '
+- name: enum_mix
+  compile_fail: numeric operator expects Int or Float
+  flags:
+  - --strict
+- name: enum_match_missing
+  compile_fail: non-exhaustive match
+  flags:
+  - --strict
+- name: sum_binder_arity
+  compile_fail: payload binders
+  flags:
+  - --strict
+strict: true

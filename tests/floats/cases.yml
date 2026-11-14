@@ -1,0 +1,67 @@
+description: Floating-point arithmetic and transcendental functions
+cases:
+- name: float_add
+  stdout: '3.75
+
+    '
+- name: float_sqrt
+  stdout: '1.4142135623730951
+
+    '
+- name: float_sum
+  stdout: '6.0
+
+    '
+- name: float_sum_annot
+  stdout: '6.0
+
+    '
+- name: float_annot
+  stdout: '9.0
+
+    '
+- name: float_map
+  stdout: '[2.0, 4.0, 6.0]
+
+    '
+- name: float_closure
+  stdout: '[2.0, 4.0, 6.0]
+
+    '
+- name: float_partial
+  stdout: '3.5
+
+    '
+- name: float_firstclass
+  stdout: '[1.0, 2.0, 3.0, 4.0]
+
+    '
+- name: float_convert
+  stdout: '4.0
+
+    '
+- name: float_str
+  stdout: '6.2831853071795862
+
+    '
+- name: float_trig
+  stdout: '1.0
+
+    '
+- name: newton
+  stdout: 'true
+
+    '
+- name: fixed_point
+  stdout: 'true
+
+    '
+- name: transcendentals
+  stdout: '[true, true, true, true, true]
+
+    '
+- name: float_strict
+  compile_fail: type error
+  flags:
+  - --strict
+strict: true

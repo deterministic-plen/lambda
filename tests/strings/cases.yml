@@ -1,0 +1,7 @@
+description: String and byte-buffer conversions
+cases:
+- name: bytes_roundtrip
+  stdout: 'hi
+
+    '
+strict: true

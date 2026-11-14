@@ -1,0 +1,83 @@
+description: Core expressions, closures, definitions and modes
+cases:
+- name: hello
+  stdout: '3
+
+    '
+- name: partial
+  stdout: '42
+
+    '
+- name: compose
+  stdout: '41
+
+    '
+- name: hof
+  stdout: '42
+
+    '
+- name: local_fn_value
+  stdout: '25
+
+    '
+- name: local_rec_value
+  stdout: '42
+
+    '
+- name: capture_chain
+  stdout: '11
+
+    '
+- name: mutual
+  stdout: 'true
+
+    '
+- name: polymorphic
+  stdout: '8
+
+    '
+- name: top_values
+  stdout: '7
+
+    '
+- name: strings
+  stdout: 'hello, world
+
+    '
+- name: strings2
+  stdout: '7
+
+    '
+- name: let
+  stdout: '6
+
+    '
+- name: equality
+  stdout: 'true
+
+    '
+- name: side_effects
+  stdout: 'x
+
+    x
+
+    2
+
+    '
+- name: namespace
+  stdout: '4.0
+
+    '
+- name: hello_dynamic
+  stdout: '3
+
+    '
+  flags:
+  - --dynamic
+- name: map_dynamic
+  stdout: '[2, 3, 4, 5]
+
+    '
+  flags:
+  - --dynamic
+strict: true

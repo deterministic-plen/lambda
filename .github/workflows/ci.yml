@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pyyaml
+
       - name: Verify Clang is available
         run: clang --version
 
@@ -32,4 +35,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-output
-          path: logs.txt
+          path: test_output.txt

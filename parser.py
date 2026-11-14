@@ -469,6 +469,11 @@ class Parser:
         body = self.parse_expr()
         if self.peek().kind != "eof":
             tok = self.peek()
+            if tok.kind == "punct" and tok.value == "(":
+                raise SyntaxErr(
+                    "a program has one final expression, so this second "
+                    "statement is unreachable; bind the first to a name "
+                    "(x → (...)) or use let ... in", tok.loc)
             raise SyntaxErr(f"unexpected token '{tok.value}' after program", tok.loc)
         return Block(defs, body, start, data_decls=self.data_decls)
 
@@ -487,6 +492,24 @@ class Parser:
                 "expected an expression, but the file ended" + where,
                 self.peek().loc)
         body = self.parse_expr()
+        # A block that ended inside an `if` branch may leave the surrounding
+        # grammar tokens (`else`, `then`, `with`, closing brackets) to the
+        # caller; those are not stray statements.
+        if (self.peek().kind != "eof"
+                and not (self.peek().kind == "punct"
+                         and self.peek().value in ")]},:.")
+                and not (self.peek().kind in ("keyword", "pipe", "ppipe")
+                         and self.peek().value in ("else", "in", "with"))):
+            tok = self.peek()
+            hint = ""
+            if tok.kind == "punct" and tok.value == "(":
+                hint = (
+                    ": a block has exactly one final expression; to run two "
+                    "statements in sequence, bind the first to a name "
+                    "(x → (...)) or move them into an integer-returning block")
+            raise SyntaxErr(
+                f"unexpected expression after the block's final expression, got "
+                f"'{tok.value}'" + hint + self.context_suffix(), tok.loc)
         return Block(defs, body, start, data_decls=self.data_decls)
 
     def parse_definition_value(self) -> Node:
@@ -643,11 +666,33 @@ class Parser:
                 break
             if self.at_definition_start():
                 break
-            args.append(self.parse_atom())
+            # Juxtaposition is application, but a *statement-shaped* head
+            # followed by another parenthesised expression is two statements:
+            # `(println 1) (println 2)` must not parse as
+            # `println 1 (println 2)`.  A parenthesised lambda is a value
+            # being applied, so it keeps absorbing arguments.
+            if (tok.kind == "punct" and tok.value == "("
+                    and getattr(first, "parenthesized", False)
+                    and not isinstance(first, Lam)
+                    and not (args and getattr(args[-1], "parenthesized", False)
+                             is False)):
+                break
+            atom = self.parse_atom()
+            args.append(atom)
         if not args:
             return first
         self.warn_infix_use(first, args)
         return App(first, args, first.loc)
+
+    @staticmethod
+    def _atom_accepts_paren_args(first: Node) -> bool:
+        """Whether ``first`` may absorb a following parenthesised argument.
+
+        Atom kinds that can never be a bare expression statement on their own
+        (a callable name, a primitive operator) accept them; a parenthesised
+        expression does not.
+        """
+        return isinstance(first, (Var, Lam))
 
     def warn_infix_use(self, first: Node, args: List[Node]) -> None:
         """Warn about the ``z == 1`` shape, which is an application.
@@ -726,6 +771,9 @@ class Parser:
             expr = self.parse_expr()
             self.expect("punct", ")", "')'")
             self.pop_context()
+            # Mark the result so the application loop knows this atom came
+            # from parentheses: `(f x) (g y)` is two statements, not a call.
+            expr.parenthesized = True
             return expr
         if tok.kind == "punct" and tok.value == "[":
             return self.parse_list()

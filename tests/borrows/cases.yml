@@ -1,0 +1,25 @@
+description: Borrowed inspection (read-only references)
+cases:
+- name: borrow_inspect
+  stdout: '[7, 35, 7]
+
+    '
+- name: borrow_get
+  stdout: '9
+
+    '
+- name: borrow_consume
+  compile_fail: borrowed inspection
+- name: borrow_read
+  stdout: '6
+
+    '
+- name: complex_safe_div
+  stdout: '[1.0, 2.0, 1.0]
+
+    '
+- name: borrow_mutate
+  compile_fail: cannot mutate a borrowed
+- name: borrow_return
+  compile_fail: borrowed parameter cannot be returned
+strict: true

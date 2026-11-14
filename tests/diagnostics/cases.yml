@@ -1,0 +1,23 @@
+description: Expected compile failures and error messages
+cases:
+- name: typeerror
+  compile_fail: type error
+  flags:
+  - --strict
+- name: unbound
+  compile_fail: unbound variable
+- name: syntax
+  compile_fail: syntax error
+- name: syntax_defs_only
+  compile_fail: program ends after its definitions
+- name: syntax_unclosed
+  compile_fail: while parsing parenthesized expression
+- name: syntax_list_unclosed
+  compile_fail: while parsing list or comprehension
+- name: syntax_lambda_eof
+  compile_fail: while parsing lambda expression
+- name: infix_warn
+  compile_fail: Lambda has no infix operators
+  flags:
+  - --strict
+strict: true
