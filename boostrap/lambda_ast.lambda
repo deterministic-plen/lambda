@@ -1,0 +1,11 @@
+data Node =
+  NBlock (defs: [Node], body: Node)
+| NDef (name: Int, value: Node)
+| NLam (params: [Node], body: Node)
+| NApp (func: Node, args: [Node])
+| NIf (cond: Node, then_: Node, else_: Node)
+| NMatch (subject: Node, arms: [Node])
+| NVar (sym: Int)
+| NInt (value: Int)
+| NLiteral (lit: Int)
+| NData (name: Int, params: [Int], variants: [Node])
