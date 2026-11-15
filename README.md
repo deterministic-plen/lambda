@@ -1,4 +1,6 @@
 # Lambda
+[![Lambda Test](https://github.com/deterministic-plen/lambda/actions/workflows/ci.yml/badge.svg)](https://github.com/deterministic-plen/lambda/actions/workflows/ci.yml)
+
 
 **Lambda is an impure, eagerly evaluated, statically typed functional language
 in the ML/Lisp tradition: a strict lambda calculus with Hindley–Milner
