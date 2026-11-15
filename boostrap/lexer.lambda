@@ -1,2 +1,1 @@
-enum Slots (Kind, Value, Loc)
-type Token ()
+data token

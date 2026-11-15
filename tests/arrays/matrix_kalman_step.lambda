@@ -1,0 +1,17 @@
+include "lib/matrix.lambda"
+; One Kalman step: F = [[1,1],[0,1]], x=0, P=I, H=[1,0], R=1, z=1.
+f → (M 2 2 (arrayf-of [1.0, 1.0, 0.0, 1.0]))
+h → (M 1 2 (arrayf-of [1.0, 0.0]))
+x0 → (M 2 1 (arrayf-of [0.0, 0.0]))
+p0 → (mat-id 2)
+q → (M 2 2 (arrayf-of [0.0, 0.0, 0.0, 0.0]))
+xpred → (mat-mul f x0)
+ppred → (mat-add (mat-mul (M 2 2 (arrayf-of [1.0, 1.0, 0.0, 1.0])) (mat-mul p0 (mat-transpose (M 2 2 (arrayf-of [1.0, 1.0, 0.0, 1.0]))))) q)
+s → (mat-add (mat-mul h (mat-mul ppred (mat-transpose h))) (M 1 1 (arrayf-of [1.0])))
+sv → (mat-scalar s)
+k → (mat-scale (mat-mul ppred (mat-transpose h)) (/ 1.0 sv))
+xnew → (mat-add xpred (mat-mul k (M 1 1 (arrayf-of [1.0]))))
+pnew → (mat-mul (mat-sub (mat-id 2) (mat-mul k h)) ppred)
+xd → (match xnew with M r c d: d)
+pd → (match pnew with M r c d: d)
+[(arrayf-get xd 0), (arrayf-get xd 1), (arrayf-get pd 0), (arrayf-get pd 1), (arrayf-get pd 2), (arrayf-get pd 3)]

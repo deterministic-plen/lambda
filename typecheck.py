@@ -24,7 +24,6 @@ from errors import TypeError_
 
 INFIX_NAMES = {
     "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
-    "⊕", "⊖", "⊗", "⊘", "⊙", "≡", "≺", "≼", "≻", "≽",
 }
 
 I64 = "i64"
@@ -298,6 +297,28 @@ def parse_type_annotation(text: str, loc=None,
         "Int": TINT, "Float": TFLOAT, "Bool": TBOOL, "String": TSTR,
         "ArrayF": TARRAYF, "ArrayI": TARRAYI, "ArrayB": TARRAYB,
     }
+    if text.startswith("Array<") and text.endswith(">"):
+        inner = parse_type_annotation(text[6:-1], loc, known_enums,
+                                      known_records, known_adts, known_params)
+        inner = prune(inner)
+        if inner == TINT:
+            return TARRAYI
+        if inner == TFLOAT:
+            return TARRAYF
+        if inner == TBOOL:
+            return TARRAYB
+        # Array<T> for a float-product T uses the planar ArrayF convention.
+        # This covers Vec2, Vec3, Complex, and user-defined float products.
+        if isinstance(inner, TAdt) and len(inner.variants) == 1:
+            fields = inner.variants[0][2]
+            if fields and all(prune(ft) == TFLOAT for _, ft in fields):
+                return TARRAYF
+        if isinstance(inner, TRecord):
+            if inner.fields and all(prune(ft) == TFLOAT for _, ft in inner.fields):
+                return TARRAYF
+        raise TypeError_(
+            f"Array<T> currently supports Int, Float, Bool elements; got '{text}'",
+            loc)
     if "<" in text:
         base = text.split("<", 1)[0].strip()
         if known_adts is not None and base in known_adts:
@@ -547,11 +568,10 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TARRAYB, TINT], TINT))
     if name == "arrayf-pmap":
         return mono(tfun([tfun([TINT], TFLOAT), TINT], TARRAYF))
-    if name == "arrayf-gray-scott":
-        return mono(tfun([TARRAYF, TINT, TFLOAT, TFLOAT, TFLOAT, TFLOAT, TFLOAT, TINT], TARRAYF))
-    if name == "arrayf-gray-stripe":
-        return mono(tfun([TARRAYF, TARRAYF, TARRAYF, TINT, TINT,
-                          TFLOAT, TFLOAT, TFLOAT, TFLOAT, TFLOAT], TARRAYF))
+    if name == "arrayf-get-unchecked":
+        return mono(tfun([TARRAYF, TINT], TFLOAT))
+    if name == "arrayf-pmap-into":
+        return mono(tfun([tfun([TINT], TFLOAT), TARRAYF, TINT], TARRAYF))
     if name == "arrayi-pmap":
         return mono(tfun([tfun([TINT], TINT), TINT], TARRAYI))
     if name == "arrayi-pmap-chunk":
@@ -617,11 +637,24 @@ class Inferencer:
         self.record_schemas = {}
         self.adt_schemas = {}
         data_decls = []
+        seen_decl_ids = set()
         for block in walk(program):
             if isinstance(block, Block):
-                data_decls.extend(getattr(block, "data_decls", ()))
+                for d in getattr(block, "data_decls", ()):
+                    # Nested blocks carry the parser's whole declaration list;
+                    # keep one instance of each declaration object.
+                    if id(d) in seen_decl_ids:
+                        continue
+                    seen_decl_ids.add(id(d))
+                    data_decls.append(d)
         self.data_params = set()
+        seen_data = set()
         for d in data_decls:
+            if d.name in seen_data:
+                raise TypeError_(
+                    f"duplicate data type '{d.name}' (main file and includes "
+                    f"must define each type once)", getattr(d, "loc", None))
+            seen_data.add(d.name)
             self.data_params.update(d.params)
             self.adt_schemas[d.name] = TAdt(d.name, (), tuple(d.params))
         for d in data_decls:
@@ -859,6 +892,8 @@ class Inferencer:
                 else:
                     v = TVar()
                 b.type = v
+                if i < len(getattr(node, "param_pure", [])):
+                    b.pure = bool(node.param_pure[i])
                 param_types.append(v)
                 env2[b.uid] = mono(v)
             body_t = self.infer(node.body, env2)

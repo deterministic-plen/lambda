@@ -1,0 +1,37 @@
+; arena.lambda -- a linear bump allocator over one flat ArrayF.
+;
+; The arena itself is an ArrayF.  The caller owns the cursor explicitly:
+;   [arena, used]
+; and alloc returns an ArrayI [offset, used'] (offset = -1 on overflow).
+; No per-element heap nodes are allocated.
+
+arena-new → (λ cap: Int. (arrayf cap 0.0))
+
+arena-alloc → (λ used: Int n: Int cap: Int.
+  if (<= (+ used n) cap)
+  then
+    out → (arrayi 2 0)
+    out1 → (arrayi-set out 0 used)
+    (arrayi-set out1 1 (+ used n))
+  else
+    out → (arrayi 2 0)
+    (arrayi-set out 0 (- 0 1)))
+
+arena-offset → (λ r: ArrayI. (arrayi-get r 0))
+arena-used → (λ r: ArrayI. (arrayi-get r 1))
+
+arena-get → (λ a: ArrayF off: Int i: Int.
+  (arrayf-get a (+ off i)))
+
+arena-set → (λ a: ArrayF off: Int i: Int x: Float.
+  (arrayf-set a (+ off i) x))
+
+arena-copy → (λ src: ArrayF dst: ArrayF n: Int i: Int.
+  if (>= i n) then dst
+  else (arena-copy src (arrayf-set dst i (arrayf-get src i)) n (+ i 1)))
+
+arena-reserve → (λ src: ArrayF used: Int cap: Int.
+  if (<= used cap) then src
+  else
+    dst → (arena-new (* cap 2))
+    (arena-copy src dst used 0))

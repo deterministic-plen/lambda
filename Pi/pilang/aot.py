@@ -257,6 +257,20 @@ class AotGen:
             x = self.expr(node.args[1])
             y = self.expr(node.args[2]) if len(node.args) > 2 else x
             return f"(pi_emit_series({namev}.str, {x}, {y}), pi_unit())"
+        if name == "emit_points":
+            if len(node.args) < 2:
+                self.fail(node, "emit_points(name, xs, ys)")
+            namev = self.expr(node.args[0])
+            x = self.expr(node.args[1])
+            y = self.expr(node.args[2]) if len(node.args) > 2 else x
+            return f"(pi_emit_points({namev}.str, {x}, {y}), pi_unit())"
+        if name == "emit_bars":
+            if len(node.args) < 2:
+                self.fail(node, "emit_bars(name, xs, ys)")
+            namev = self.expr(node.args[0])
+            x = self.expr(node.args[1])
+            y = self.expr(node.args[2]) if len(node.args) > 2 else x
+            return f"(pi_emit_bars({namev}.str, {x}, {y}), pi_unit())"
         if name == "emit_grid":
             if len(node.args) < 2:
                 self.fail(node, "emit_grid(name, values, rows, cols)")

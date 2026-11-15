@@ -1,0 +1,20 @@
+; vec3.lambda -- first-class 3-vectors and planar 3-vector fields.
+;
+; A field of Vec3 is an ArrayF with three component planes:
+;   [x0 .. x(n-1), y0 .. y(n-1), z0 .. z(n-1)]
+; `Array<Vec3>` is accepted as that planar convention.
+
+type Vec3 (x: Float, y: Float, z: Float)
+
+v3-add → (λ a: Vec3 b: Vec3.
+  (Vec3 (+ (Vec3-x a) (Vec3-x b))
+        (+ (Vec3-y a) (Vec3-y b))
+        (+ (Vec3-z a) (Vec3-z b))))
+
+v3-dot → (λ a: Vec3 b: Vec3.
+  (+ (* (Vec3-x a) (Vec3-x b))
+     (+ (* (Vec3-y a) (Vec3-y b))
+        (* (Vec3-z a) (Vec3-z b)))))
+
+v3-scale → (λ a: Vec3 s: Float.
+  (Vec3 (* (Vec3-x a) s) (* (Vec3-y a) s) (* (Vec3-z a) s)))

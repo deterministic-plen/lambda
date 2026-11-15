@@ -17,7 +17,7 @@ protocol Drone {
 }
 
 program Main() = scope {
-  w → Pool("workers/drone.lambda", 1, {cpus: 1, memory: "64MiB"}).recruit(1)
+  w → Pool("workers/drone_matrix.lambda", 1, {cpus: 1, memory: "64MiB"}).recruit(1)
   await call(w, "init", 0.0)
 
   -- 200 control periods at 5 ms = 1 simulated second.
@@ -33,5 +33,5 @@ program Main() = scope {
   emit_series("true_position", idx, xs)
   emit_series("kalman_estimate", idx, ps)
   emit_series("control", idx, us)
-  emit_text("shape", "200 control steps at 5 ms; scalar Kalman + gravity feed-forward")
+  emit_text("shape", "200 control steps at 5 ms; matrix Kalman + gravity feed-forward")
 }

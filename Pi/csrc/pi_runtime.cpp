@@ -639,6 +639,8 @@ struct Interp {
 
     void emit_text(const std::string &s);
     void emit_series(const std::string &name, const V &x, const V &y);
+    void emit_points(const std::string &name, const V &x, const V &y);
+    void emit_bars(const std::string &name, const V &x, const V &y);
     void emit_grid(const std::string &name, const V &v, long rows, long cols);
     void emit_frame(const std::string &name, const V &v, long rows, long cols);
     void finish();
@@ -661,9 +663,31 @@ void Interp::emit_series(const std::string &name0, const V &x, const V &y) {
     for (size_t i = 0; i < n; i++) f << x.payload[i] << "," << y.payload[i] << "\n";
 }
 
+void Interp::emit_points(const std::string &name0, const V &x, const V &y) {
+    std::string name = safe_artifact_name(name0);
+    Art a; a.kind = "points"; a.name = name; a.x = x.payload; a.y = y.payload;
+    arts.push_back(a);
+    if (outdir.empty()) { std::printf("points %s: %zu\n", name.c_str(), a.x.size()); return; }
+    std::ofstream f(fs::path(outdir) / (name + ".csv"));
+    f << "x,y\n";
+    size_t n = std::min(a.x.size(), a.y.size());
+    for (size_t i = 0; i < n; i++) f << a.x[i] << "," << a.y[i] << "\n";
+}
+
+void Interp::emit_bars(const std::string &name0, const V &x, const V &y) {
+    std::string name = safe_artifact_name(name0);
+    Art a; a.kind = "bars"; a.name = name; a.x = x.payload; a.y = y.payload;
+    arts.push_back(a);
+    if (outdir.empty()) { std::printf("bars %s: %zu\n", name.c_str(), a.x.size()); return; }
+    std::ofstream f(fs::path(outdir) / (name + ".csv"));
+    f << "x,y\n";
+    size_t n = std::min(a.x.size(), a.y.size());
+    for (size_t i = 0; i < n; i++) f << a.x[i] << "," << a.y[i] << "\n";
+}
+
 void Interp::emit_grid(const std::string &name0, const V &v, long rows, long cols) {
     std::string name = safe_artifact_name(name0);
-    if (rows < 0 || cols < 0 || (rows && cols > (long)(1 << 20) / rows)) die("grid dimensions invalid");
+    if (rows < 0 || cols < 0 || (rows && cols > (long)(1 << 26) / rows)) die("grid dimensions invalid");
     Art a; a.kind = "grid"; a.name = name; a.rows = rows; a.cols = cols; a.values = v.payload;
     arts.push_back(a);
     if (outdir.empty()) { std::printf("grid %s: %ldx%ld\n", name.c_str(), rows, cols); return; }
@@ -678,7 +702,7 @@ void Interp::emit_grid(const std::string &name0, const V &v, long rows, long col
 
 void Interp::emit_frame(const std::string &name0, const V &v, long rows, long cols) {
     std::string name = safe_artifact_name(name0);
-    if (rows < 0 || cols < 0 || (rows && cols > (long)(1 << 20) / rows)) die("frame dimensions invalid");
+    if (rows < 0 || cols < 0 || (rows && cols > (long)(1 << 26) / rows)) die("frame dimensions invalid");
     frame_count++;
     if (!outdir.empty() && !frame_file.is_open()) {
         frame_name = name;
@@ -731,6 +755,61 @@ static std::string svg_line(const Art &a) {
     return o.str();
 }
 
+static std::string svg_points(const Art &a) {
+    size_t n = std::min(a.x.size(), a.y.size());
+    if (!n) return "";
+    const int W = 640, H = 360, P = 40;
+    double xmin = a.x[0], xmax = a.x[0], ymin = a.y[0], ymax = a.y[0];
+    for (size_t i = 1; i < n; i++) {
+        xmin = std::min(xmin, a.x[i]); xmax = std::max(xmax, a.x[i]);
+        ymin = std::min(ymin, a.y[i]); ymax = std::max(ymax, a.y[i]);
+    }
+    if (xmax == xmin) xmax = xmin + 1;
+    if (ymax == ymin) ymax = ymin + 1;
+    std::ostringstream o;
+    o << "<svg xmlns='http://www.w3.org/2000/svg' width='" << W << "' height='" << H
+      << "' viewBox='0 0 " << W << " " << H << "'>"
+      << "<rect width='100%' height='100%' fill='white'/>"
+      << "<line x1='" << P << "' y1='" << (H-P) << "' x2='" << (W-P) << "' y2='" << (H-P)
+      << "' stroke='#888'/><line x1='" << P << "' y1='" << P << "' x2='" << P << "' y2='"
+      << (H-P) << "' stroke='#888'/>";
+    size_t stride = std::max<size_t>(1, n / 5000);
+    for (size_t i = 0; i < n; i += stride) {
+        double px = P + (a.x[i] - xmin) / (xmax - xmin) * (W - 2 * P);
+        double py = H - P - (a.y[i] - ymin) / (ymax - ymin) * (H - 2 * P);
+        o << "<circle cx='" << px << "' cy='" << py << "' r='1.5' fill='#1f77b4'/>";
+    }
+    o << "</svg>";
+    return o.str();
+}
+
+static std::string svg_bars(const Art &a) {
+    size_t n = std::min(a.x.size(), a.y.size());
+    if (!n) return "";
+    const int W = 640, H = 360, P = 40;
+    double ymin = 0.0, ymax = 0.0;
+    for (size_t i = 0; i < n; i++) ymax = std::max(ymax, a.y[i]);
+    if (ymax <= 0) ymax = 1;
+    std::ostringstream o;
+    o << "<svg xmlns='http://www.w3.org/2000/svg' width='" << W << "' height='" << H
+      << "' viewBox='0 0 " << W << " " << H << "'>"
+      << "<rect width='100%' height='100%' fill='white'/>"
+      << "<line x1='" << P << "' y1='" << (H-P) << "' x2='" << (W-P) << "' y2='" << (H-P)
+      << "' stroke='#888'/>"
+      << "<line x1='" << P << "' y1='" << P << "' x2='" << P << "' y2='" << (H-P)
+      << "' stroke='#888'/>";
+    double bw = (double)(W - 2 * P) / (double)n;
+    for (size_t i = 0; i < n; i++) {
+        double h = (a.y[i] - ymin) / (ymax - ymin) * (H - 2 * P);
+        double x = P + i * bw + 1;
+        double y = H - P - h;
+        o << "<rect x='" << x << "' y='" << y << "' width='" << std::max(1.0, bw - 2)
+          << "' height='" << h << "' fill='#1f77b4'/>";
+    }
+    o << "</svg>";
+    return o.str();
+}
+
 static std::string svg_heat(const Art &a) {
     if (a.rows <= 0 || a.cols <= 0 || a.values.empty()) return "";
     const int MAX = 160;
@@ -757,7 +836,150 @@ static std::string svg_heat(const Art &a) {
     return o.str();
 }
 
+static void heat_color(double q, int &r, int &g, int &b) {
+    q = std::max(0.0, std::min(1.0, q));
+    r = (int)(255 * std::max(0.0, std::min(1.0, 1.6 * q - 0.15)));
+    g = (int)(255 * std::max(0.0, std::min(1.0, 1.5 - 2.0 * std::fabs(q - 0.55))));
+    b = (int)(255 * std::max(0.0, std::min(1.0, 1.25 - 1.8 * q)));
+}
+
+static void put_u32(std::ofstream &f, uint32_t v) {
+    f.write((const char *)&v, sizeof(v));
+}
+
+static void put_u16(std::ofstream &f, uint16_t v) {
+    f.write((const char *)&v, sizeof(v));
+}
+
+/* Minimal 24-bit BMP writer: no image library, every browser can display it. */
+static bool write_bmp(const fs::path &path, int w, int h,
+                      const std::vector<float> &vals, double lo, double hi) {
+    if (w <= 0 || h <= 0 || vals.size() < (size_t)w * (size_t)h) return false;
+    const int row = (w * 3 + 3) & ~3;
+    const uint32_t image = (uint32_t)row * (uint32_t)h;
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.put('B'); f.put('M');
+    put_u32(f, 54u + image);
+    put_u16(f, 0); put_u16(f, 0); put_u32(f, 54);
+    put_u32(f, 40); put_u32(f, (uint32_t)w); put_u32(f, (uint32_t)h);
+    put_u16(f, 1); put_u16(f, 24); put_u32(f, 0);
+    put_u32(f, image); put_u32(f, 0); put_u32(f, 0);
+    put_u32(f, 0); put_u32(f, 0);
+    std::vector<unsigned char> line((size_t)row, 0);
+    for (int y = h - 1; y >= 0; --y) {
+        for (int x = 0; x < w; ++x) {
+            double v = vals[(size_t)y * (size_t)w + (size_t)x];
+            double q = (hi > lo) ? (v - lo) / (hi - lo) : 0.0;
+            int r, g, b; heat_color(q, r, g, b);
+            line[(size_t)x * 3 + 0] = (unsigned char)b;
+            line[(size_t)x * 3 + 1] = (unsigned char)g;
+            line[(size_t)x * 3 + 2] = (unsigned char)r;
+        }
+        f.write((const char *)line.data(), (std::streamsize)line.size());
+    }
+    return (bool)f;
+}
+
+struct PreviewInfo {
+    long count = 0;
+    long stride = 1;
+    long source_count = 0;
+    int width = 0, height = 0;
+};
+
+/* Convert the binary animation frames into a bounded BMP preview sequence.
+   Full per-frame BMPs at 512x512 would be hundreds of megabytes for a long
+   run, so the report shows at most 120 frames, downsampled to at most 256px.
+   The raw .frames.bin file remains the full-resolution record. */
+static PreviewInfo write_frame_images(const fs::path &outdir, const std::string &name,
+                                      long rows, long cols, long count) {
+    PreviewInfo info;
+    fs::path src = outdir / (name + ".frames.bin");
+    std::ifstream f(src, std::ios::binary);
+    if (!f || count <= 0) return info;
+    uint32_t w = 0, h = 0, n = 0;
+    f.read((char *)&w, 4); f.read((char *)&h, 4); f.read((char *)&n, 4);
+    if (!f || w == 0 || h == 0 || n == 0) return info;
+    long use_n = std::min<long>((long)n, count);
+    std::vector<float> frame((size_t)w * (size_t)h);
+    double lo = 0.0, hi = 0.0;
+    bool first = true;
+    for (long i = 0; i < use_n; ++i) {
+        f.read((char *)frame.data(), (std::streamsize)(frame.size() * sizeof(float)));
+        if (!f) return info;
+        for (float v : frame) {
+            if (first) { lo = hi = v; first = false; }
+            else { lo = std::min(lo, (double)v); hi = std::max(hi, (double)v); }
+        }
+    }
+    if (hi <= lo) hi = lo + 1e-9;
+
+    const long MAX_PREVIEW = 120;
+    const int MAX_EDGE = 256;
+    info.stride = std::max<long>(1, (use_n + MAX_PREVIEW - 1) / MAX_PREVIEW);
+    info.count = (use_n + info.stride - 1) / info.stride;
+    info.source_count = use_n;
+    double scale = std::min(1.0, (double)MAX_EDGE / (double)std::max(w, h));
+    info.width = std::max(1, (int)std::lround(w * scale));
+    info.height = std::max(1, (int)std::lround(h * scale));
+
+    f.clear(); f.seekg(12, std::ios::beg);
+    fs::create_directories(outdir / "frames");
+    std::vector<float> preview_px((size_t)info.width * (size_t)info.height);
+    long out = 0;
+    for (long i = 0; i < use_n; ++i) {
+        f.read((char *)frame.data(), (std::streamsize)(frame.size() * sizeof(float)));
+        if (!f) return info;
+        if (i % info.stride != 0 && i + 1 != use_n) continue;
+        for (int y = 0; y < info.height; ++y) {
+            long sy = (long)((double)y * h / info.height);
+            for (int x = 0; x < info.width; ++x) {
+                long sx = (long)((double)x * w / info.width);
+                preview_px[(size_t)y * info.width + x] =
+                    frame[(size_t)sy * w + (size_t)sx];
+            }
+        }
+        std::ostringstream nm;
+        nm << name << "_preview_" << std::setw(6) << std::setfill('0') << out++ << ".bmp";
+        if (!write_bmp(outdir / "frames" / nm.str(), info.width, info.height,
+                       preview_px, lo, hi))
+            return PreviewInfo{};
+    }
+    info.count = out;
+    return info;
+}
+
+static std::string js_escape(const std::string &s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '\\' || c == '"') { o += '\\'; o += c; }
+        else if (c == '\n') o += "\\n";
+        else if (c == '\r') o += "\\r";
+        else if (c == '<') o += "\\x3c";
+        else if (c == '>') o += "\\x3e";
+        else o += c;
+    }
+    return o;
+}
+
 void Interp::finish() {
+    // Finalize the raw frame stream before generating the report.  The report
+    // can then read it back and turn frames into ordinary images.
+    if (frame_file.is_open()) {
+        frame_file.seekp((std::streamoff)8);
+        uint32_t n = (uint32_t)frame_count;
+        frame_file.write((char *)&n, sizeof(n));
+        frame_file.close();
+        std::printf("animation frames: %ld\n", frame_count);
+    }
+    PreviewInfo preview;
+    if (!outdir.empty() && frame_count > 0 && !frame_name.empty()) {
+        preview = write_frame_images(fs::path(outdir), frame_name,
+                                     last_rows, last_cols, frame_count);
+    }
+    bool have_frames = preview.count > 0;
+
     if (!outdir.empty()) {
         if (!last_name.empty()) {
             Art a; a.kind = "grid"; a.name = last_name + "_final";
@@ -776,37 +998,111 @@ void Interp::finish() {
                 if (!first) json << ",";
                 first = false;
                 json << "{\"kind\":\"series\",\"name\":\"" << esc(a.name) << "\"}";
-                sections.push_back("<section><h2>" + esc(a.name) + " <small>series</small></h2>" + svg_line(a) + "</section>");
+                sections.push_back("<section><h2>" + esc(a.name) +
+                                   " <small>series</small></h2>" +
+                                   svg_line(a) + "</section>");
+            } else if (a.kind == "points" || a.kind == "bars") {
+                std::string svg_text = a.kind == "points" ? svg_points(a) : svg_bars(a);
+                std::ofstream svg(fs::path(outdir) / (a.name + ".svg"));
+                svg << svg_text;
+                if (!first) json << ",";
+                first = false;
+                json << "{\"kind\":\"" << (a.kind == "points" ? "points" : "bars")
+                     << "\",\"name\":\"" << esc(a.name) << "\"}";
+                sections.push_back("<section><h2>" + esc(a.name) +
+                                   " <small>" + a.kind + "</small></h2>" +
+                                   svg_text + "</section>");
             } else if (a.kind == "grid") {
                 std::ofstream svg(fs::path(outdir) / (a.name + ".svg"));
                 svg << svg_heat(a);
                 if (!first) json << ",";
                 first = false;
                 json << "{\"kind\":\"grid\",\"name\":\"" << esc(a.name) << "\"}";
-                sections.push_back("<section><h2>" + esc(a.name) + " <small>grid</small></h2>" + svg_heat(a) + "</section>");
+                sections.push_back("<section><h2>" + esc(a.name) +
+                                   " <small>grid</small></h2>" +
+                                   svg_heat(a) + "</section>");
             }
         }
         json << "]}";
+
+        std::string player;
+        std::string player_js;
+        if (have_frames) {
+            std::ostringstream frames;
+            for (long i = 0; i < preview.count; ++i) {
+                if (i) frames << ",";
+                std::ostringstream nm;
+                nm << frame_name << "_preview_" << std::setw(6) << std::setfill('0')
+                   << i << ".bmp";
+                frames << "\"frames/" << js_escape(nm.str()) << "\"";
+            }
+            std::ostringstream note;
+            note << "preview " << preview.count << " of " << preview.source_count
+                 << " frames, stride " << preview.stride
+                 << ", " << preview.width << "x" << preview.height;
+            player =
+                "<section class='player'><h2>" + esc(frame_name) +
+                " <small>animation</small></h2>"
+                "<p class='note'>" + note.str() + " (full-resolution sequence: " +
+                esc(frame_name) + ".frames.bin)</p>"
+                "<img id='frame' alt='animation frame' src='frames/" +
+                esc(frame_name) + "_preview_000000.bmp'>"
+                "<div class='controls'>"
+                "<button id='prev' title='previous frame'>&#9664;</button>"
+                "<button id='play'>Play</button>"
+                "<button id='next' title='next frame'>&#9654;</button>"
+                "<input id='scrub' type='range' min='0' max='" +
+                std::to_string(preview.count - 1) + "' value='0'>"
+                "<span id='counter'>1/" + std::to_string(preview.count) + "</span>"
+                "</div></section>";
+            player_js =
+                "<script>"
+                "(function(){const frames=[" + frames.str() + "];"
+                "let i=0,timer=null;const img=document.getElementById('frame');"
+                "const scrub=document.getElementById('scrub');"
+                "const counter=document.getElementById('counter');"
+                "function show(k){if(!frames.length)return;i=(k+frames.length)%frames.length;"
+                "img.src=frames[i];scrub.value=i;"
+                "counter.textContent=(i+1)+'/'+frames.length;}"
+                "function play(){if(timer)return;timer=setInterval(function(){"
+                "show(i+1);if(i+1>=frames.length)playStop();},100);"
+                "document.getElementById('play').textContent='Pause';}"
+                "function playStop(){if(timer){clearInterval(timer);timer=null;}"
+                "document.getElementById('play').textContent='Play';}"
+                "document.getElementById('play').onclick=function(){timer?playStop():play();};"
+                "document.getElementById('prev').onclick=function(){playStop();show(i-1);};"
+                "document.getElementById('next').onclick=function(){playStop();show(i+1);};"
+                "scrub.oninput=function(){playStop();show(+scrub.value);};"
+                "window.addEventListener('load',function(){if(frames.length>1)play();});"
+                "})();"
+                "</script>";
+        }
+
         std::ofstream rf(fs::path(outdir) / "results.json");
         rf << json.str();
+
         std::ofstream html(fs::path(outdir) / "report.html");
-        html << "<!doctype html><meta charset='utf-8'><title>Pi C++ report</title>"
-             << "<style>body{font-family:Segoe UI,Arial,sans-serif;margin:24px}svg{border:1px solid #ddd;max-width:100%;height:auto}</style>"
+        html << "<!doctype html><html><head><meta charset='utf-8'>"
+             << "<title>Pi report</title>"
+             << "<style>body{font-family:Segoe UI,Arial,sans-serif;margin:24px;"
+                "max-width:1100px}svg{border:1px solid #ddd;max-width:100%;height:auto}"
+                ".player img{max-width:100%;image-rendering:auto;border:1px solid #ddd}"
+                ".controls{display:flex;gap:8px;align-items:center;margin-top:8px}"
+                ".controls input{flex:1;min-width:160px}"
+                "button{padding:6px 12px;font:inherit}"
+                ".note{color:#555;font-size:14px;margin:4px 0}"
+                "small{color:#666;font-weight:normal}</style></head><body>"
              << "<h1>Pi report (C++ runtime)</h1>";
         for (auto &s : sections) html << s;
+        html << player;
         for (auto &a : arts)
-            if (a.kind == "text") html << "<section><h2>text</h2><pre>" << esc(a.text) << "</pre></section>";
+            if (a.kind == "text")
+                html << "<section><h2>text</h2><pre>" << esc(a.text) << "</pre></section>";
         if (frame_count) html << "<p>animation frames: " << frame_count << "</p>";
-        html << "</body>";
+        html << player_js << "</body></html>";
         std::printf("pi-cpp: report %s\n", (fs::path(outdir) / "report.html").string().c_str());
     }
-    if (frame_file.is_open()) {
-        frame_file.seekp((std::streamoff)8);
-        uint32_t n = (uint32_t)frame_count;
-        frame_file.write((char *)&n, sizeof(n));
-        frame_file.close();
-        std::printf("animation frames: %ld\n", frame_count);
-    }
+
     if (outdir.empty() || last_name.empty()) return;
     std::ofstream f(fs::path(outdir) / (last_name + ".final.csv"));
     f << "row,col,value\n";
@@ -1277,6 +1573,230 @@ V Interp::call(const J &n) {
         } else die("concat needs list");
         return V::payload_of(std::move(out));
     }
+    if (fname == "halo2") {
+        // Extract one edge from a planar two-field tile payload (U then V).
+        // Used by the generic GridTile element to hand neighbours only the
+        // boundary values, not the whole tile.
+        V tile = eval(args.arr.at(0));
+        long rows = as_int(eval(args.arr.at(1)));
+        long cols = as_int(eval(args.arr.at(2)));
+        long side = as_int(eval(args.arr.at(3)));
+        if (tile.kind != V::PAYLOAD || rows < 1 || cols < 1 || side < 0 || side > 3)
+            die("halo2 expects a two-field tile and side 0..3");
+        size_t n = (size_t)rows * (size_t)cols;
+        if (tile.payload.size() < 2 * n) die("halo2 tile is too small");
+        std::vector<double> out;
+        if (side == 0 || side == 1) {
+            size_t base = (side == 0) ? 0 : (size_t)(rows - 1) * (size_t)cols;
+            for (long c = 0; c < cols; c++) out.push_back(tile.payload[base + (size_t)c]);
+            for (long c = 0; c < cols; c++) out.push_back(tile.payload[n + base + (size_t)c]);
+        } else {
+            size_t col = (side == 2) ? 0 : (size_t)(cols - 1);
+            for (long r = 0; r < rows; r++)
+                out.push_back(tile.payload[(size_t)r * (size_t)cols + col]);
+            for (long r = 0; r < rows; r++)
+                out.push_back(tile.payload[n + (size_t)r * (size_t)cols + col]);
+        }
+        return V::payload_of(std::move(out));
+    }
+    if (fname == "halo1") {
+        // One scalar field tile edge, used by the heat/diffusion element.
+        V tile = eval(args.arr.at(0));
+        long rows = as_int(eval(args.arr.at(1)));
+        long cols = as_int(eval(args.arr.at(2)));
+        long side = as_int(eval(args.arr.at(3)));
+        if (tile.kind != V::PAYLOAD || rows < 1 || cols < 1 || side < 0 || side > 3)
+            die("halo1 expects a tile and side 0..3");
+        if (tile.payload.size() < (size_t)rows * (size_t)cols) die("halo1 tile is too small");
+        std::vector<double> out;
+        if (side == 0 || side == 1) {
+            size_t base = (side == 0) ? 0 : (size_t)(rows - 1) * (size_t)cols;
+            for (long c = 0; c < cols; c++) out.push_back(tile.payload[base + (size_t)c]);
+        } else {
+            size_t col = (side == 2) ? 0 : (size_t)(cols - 1);
+            for (long r = 0; r < rows; r++)
+                out.push_back(tile.payload[(size_t)r * (size_t)cols + col]);
+        }
+        return V::payload_of(std::move(out));
+    }
+    if (fname == "partition") {
+        // Partition a 2D field into nx*ny tile descriptors.  Each descriptor is
+        // [x_origin, y_origin, tile_rows, tile_cols, grid_rows, grid_cols].
+        // Descriptors are row-major by tile row (y) then tile column (x).
+        long nx = as_int(eval(args.arr.at(0)));
+        long ny = as_int(eval(args.arr.at(1)));
+        long rows = as_int(eval(args.arr.at(2)));
+        long cols = as_int(eval(args.arr.at(3)));
+        if (nx < 1 || ny < 1 || rows < 1 || cols < 1)
+            die("partition expects positive dimensions");
+        if (rows && cols > (long)(1 << 26) / rows)
+            die("partition tile is too large");
+        V out; out.kind = V::TUPLE;
+        for (long ty = 0; ty < ny; ty++) {
+            for (long tx = 0; tx < nx; tx++) {
+                std::vector<double> d = {
+                    (double)(tx * cols), (double)(ty * rows),
+                    (double)rows, (double)cols,
+                    (double)(nx * rows), (double)(ny * cols)};
+                out.tuple.push_back(V::payload_of(std::move(d)));
+            }
+        }
+        return out;
+    }
+    if (fname == "snapshot_grid") {
+        // One-call convenience: collect every worker's snapshot and stitch the
+        // tile grid into a single payload.  Equivalent to collect + stitch_grid,
+        // but keeps Pi programs focused on the simulation loop.
+        V fam = eval(args.arr.at(0));
+        long nx = as_int(eval(args.arr.at(1)));
+        long ny = as_int(eval(args.arr.at(2)));
+        long rows = as_int(eval(args.arr.at(3)));
+        long cols = as_int(eval(args.arr.at(4)));
+        if (fam.kind != V::FAMILY) die("snapshot_grid expects a system family");
+        if (nx < 1 || ny < 1 || rows < 1 || cols < 1)
+            die("snapshot_grid dimensions must be positive");
+        // Bound the stitched payload before any multiplication/allocation.
+        // 100M doubles is 800 MiB; anything larger is a program error here.
+        long long total = 1;
+        const long long kMaxCells = 100000000LL;
+        auto scale = [&](long v) {
+            if (v > kMaxCells / total) die("snapshot_grid grid is too large");
+            total *= (long long)v;
+        };
+        scale(nx); scale(ny); scale(rows); scale(cols);
+        auto fit = fam.sys->families.find(fam.field);
+        if (fit == fam.sys->families.end()) die("snapshot_grid: unknown family");
+        std::vector<std::shared_ptr<Instance>> insts = fit->second;
+        std::sort(insts.begin(), insts.end(),
+                  [](const std::shared_ptr<Instance> &a,
+                     const std::shared_ptr<Instance> &b) {
+                      size_t n = std::min(a->pos.size(), b->pos.size());
+                      for (size_t i = n; i-- > 0;) {
+                          if (a->pos[i] != b->pos[i]) return a->pos[i] < b->pos[i];
+                      }
+                      return false;
+                  });
+        auto oi = op_index.find("snapshot");
+        if (oi == op_index.end()) die("snapshot_grid: protocol has no snapshot op");
+        long long tiles_n = (long long)nx * (long long)ny;
+        if ((long long)insts.size() < tiles_n)
+            die("snapshot_grid: not enough tiles");
+        std::vector<V> tiles;
+        tiles.reserve((size_t)tiles_n);
+        for (long ty = 0; ty < ny; ty++)
+            for (long tx = 0; tx < nx; tx++) {
+                auto &inst = insts[(size_t)(ty * nx + tx)];
+                auto it = inst->env.find("gs");
+                if (it == inst->env.end() || it->second.kind != V::WORKER)
+                    die("snapshot_grid: instance has no worker 'gs'");
+                std::string ret = (oi->second < (long)op_rets.size())
+                                      ? op_rets[(size_t)oi->second] : "";
+                tiles.push_back(worker_call(it->second.worker, oi->second,
+                                            std::vector<V>(), ret));
+            }
+        size_t tile_n = (size_t)rows * (size_t)cols;
+        size_t out_cols = (size_t)nx * (size_t)cols;
+        std::vector<double> out((size_t)total);
+        for (long ty = 0; ty < ny; ty++)
+            for (long tx = 0; tx < nx; tx++) {
+                const V &t = tiles[(size_t)(ty * nx + tx)];
+                if (t.payload.size() < tile_n) die("snapshot_grid: tile is too small");
+                for (long r = 0; r < rows; r++)
+                    for (long c = 0; c < cols; c++)
+                        out[(size_t)(ty * rows + r) * out_cols +
+                            (size_t)(tx * cols + c)] =
+                            t.payload[(size_t)r * (size_t)cols + (size_t)c];
+            }
+        return V::payload_of(std::move(out));
+    }
+    if (fname == "collect") {
+        // Collect one worker operation from every instance of a family, in
+        // row-major tile order (y first, then x).  This removes the per-tile
+        // snapshot boilerplate from a grid program.
+        V fam = eval(args.arr.at(0));
+        std::string op = eval(args.arr.at(1)).str;
+        if (fam.kind != V::FAMILY) die("collect expects a system family");
+        auto fit = fam.sys->families.find(fam.field);
+        if (fit == fam.sys->families.end()) die("collect: unknown family");
+        std::vector<std::shared_ptr<Instance>> insts = fit->second;
+        std::sort(insts.begin(), insts.end(),
+                  [](const std::shared_ptr<Instance> &a,
+                     const std::shared_ptr<Instance> &b) {
+                      size_t n = std::min(a->pos.size(), b->pos.size());
+                      for (size_t i = n; i-- > 0;) {
+                          if (a->pos[i] != b->pos[i]) return a->pos[i] < b->pos[i];
+                      }
+                      return false;
+                  });
+        auto oi = op_index.find(op);
+        if (oi == op_index.end()) die("collect: unknown op " + op);
+        std::string ret = (oi->second < (long)op_rets.size())
+                              ? op_rets[(size_t)oi->second] : "";
+        V out; out.kind = V::TUPLE;
+        for (auto &inst : insts) {
+            auto it = inst->env.find("gs");
+            if (it == inst->env.end() || it->second.kind != V::WORKER)
+                die("collect: instance has no worker 'gs'");
+            out.tuple.push_back(worker_call(it->second.worker, oi->second,
+                                            std::vector<V>(), ret));
+        }
+        return out;
+    }
+    if (fname == "stitch_grid") {
+        // Flat list of tiles, row-major by tile row then tile column.
+        V ts = eval(args.arr.at(0));
+        long nx = as_int(eval(args.arr.at(1)));
+        long ny = as_int(eval(args.arr.at(2)));
+        long rows = as_int(eval(args.arr.at(3)));
+        long cols = as_int(eval(args.arr.at(4)));
+        if (ts.kind != V::TUPLE || nx < 1 || ny < 1 || rows < 1 || cols < 1)
+            die("stitch_grid needs a list of tiles and positive dimensions");
+        if ((long)ts.tuple.size() < nx * ny) die("stitch_grid needs nx*ny tiles");
+        size_t tile_n = (size_t)rows * (size_t)cols;
+        std::vector<double> out((size_t)(nx * cols) * (size_t)(ny * rows));
+        long out_cols = nx * cols;
+        for (long ty = 0; ty < ny; ty++) {
+            for (long tx = 0; tx < nx; tx++) {
+                const V &t = ts.tuple[(size_t)(ty * nx + tx)];
+                if (t.payload.size() < tile_n) die("stitch_grid tile is too small");
+                for (long r = 0; r < rows; r++) {
+                    for (long c = 0; c < cols; c++) {
+                        out[(size_t)(ty * rows + r) * (size_t)out_cols + (size_t)(tx * cols + c)] =
+                            t.payload[(size_t)r * (size_t)cols + (size_t)c];
+                    }
+                }
+            }
+        }
+        return V::payload_of(std::move(out));
+    }
+    if (fname == "hstack") {
+        // Tile assembly: [a | b] with each tile rows x cols.
+        V av = eval(args.arr.at(0)), bv = eval(args.arr.at(1));
+        long rows = as_int(eval(args.arr.at(2)));
+        long cols = as_int(eval(args.arr.at(3)));
+        if (rows < 0 || cols < 0 || av.payload.size() < (size_t)rows * (size_t)cols ||
+            bv.payload.size() < (size_t)rows * (size_t)cols)
+            die("hstack tile shape mismatch");
+        std::vector<double> out((size_t)rows * (size_t)cols * 2);
+        for (long r = 0; r < rows; r++) {
+            for (long c = 0; c < cols; c++) {
+                out[(size_t)r * 2 * cols + c] = av.payload[(size_t)r * cols + c];
+                out[(size_t)r * 2 * cols + cols + c] = bv.payload[(size_t)r * cols + c];
+            }
+        }
+        return V::payload_of(std::move(out));
+    }
+    if (fname == "vstack") {
+        V av = eval(args.arr.at(0)), bv = eval(args.arr.at(1));
+        long rows = as_int(eval(args.arr.at(2)));
+        long cols = as_int(eval(args.arr.at(3)));
+        if (rows < 0 || cols < 0 || av.payload.size() < (size_t)rows * (size_t)cols ||
+            bv.payload.size() < (size_t)rows * (size_t)cols)
+            die("vstack tile shape mismatch");
+        std::vector<double> out(av.payload.begin(), av.payload.begin() + rows * cols);
+        out.insert(out.end(), bv.payload.begin(), bv.payload.begin() + rows * cols);
+        return V::payload_of(std::move(out));
+    }
     if (fname == "scalar") {
         V v = eval(args.arr.at(0));
         if (v.kind == V::PAYLOAD && v.payload.size() == 1) return V(v.payload[0]);
@@ -1321,6 +1841,20 @@ V Interp::call(const J &n) {
         V x = eval(args.arr.at(1));
         V y = args.arr.size() > 2 ? eval(args.arr.at(2)) : x;
         emit_series(name, x, y);
+        return V();
+    }
+    if (fname == "emit_points") {
+        std::string name = eval(args.arr.at(0)).str;
+        V x = eval(args.arr.at(1));
+        V y = args.arr.size() > 2 ? eval(args.arr.at(2)) : x;
+        emit_points(name, x, y);
+        return V();
+    }
+    if (fname == "emit_bars") {
+        std::string name = eval(args.arr.at(0)).str;
+        V x = eval(args.arr.at(1));
+        V y = args.arr.size() > 2 ? eval(args.arr.at(2)) : x;
+        emit_bars(name, x, y);
         return V();
     }
     if (fname == "emit_grid") {

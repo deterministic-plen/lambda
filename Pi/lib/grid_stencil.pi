@@ -1,0 +1,48 @@
+-- grid_stencil.pi : reusable 2D tile stencil element and system.
+--
+-- The element owns ONLY halo routing: call the worker's step, extract the
+-- four edges of the returned tile, exchange them with neighbours, then call
+-- patch.  A simulation supplies a worker with ops init/step/patch/snapshot;
+-- its step is an ordinary tile update (matrix-like), not halo plumbing.
+
+protocol GrayTile {
+  op init     : (Int, Int, Int, Int, Int, Int) → ()
+  op step     : () → Shard
+  op patch    : (HaloRing⟨4⟩) → ()
+  op snapshot : () → Shard
+  errors : { 9001: "internal" }
+  purity : Pure
+}
+
+elem GridTile(part) {
+  in  tick      : Chan[()]
+  in  halos_in  : Ring[4]
+  out halos_out : Ring[4]
+  worker gs     : Worker⟨GrayTile⟩
+
+  ctrl loop =
+    await call(gs, "init", part[0], part[1], part[2], part[3], part[4], part[5])
+    serve(tick) { _ ⇒
+      tile → await call(gs, "step")
+      -- couple_grid2d_block directions are left, right, up, down.
+      send(halos_out[0], halo2(tile, part[2], part[3], 2))
+      send(halos_out[1], halo2(tile, part[2], part[3], 3))
+      send(halos_out[2], halo2(tile, part[2], part[3], 0))
+      send(halos_out[3], halo2(tile, part[2], part[3], 1))
+      halos → for k in 0..4 { recv(halos_in[k]) }
+      await call(gs, "patch", halos)
+    }
+
+  on_failure {
+    | WorkerDied ⇒ restart(max = 2)
+    | _         ⇒ escalate
+  }
+}
+
+system GrayTiles(nx, ny, rows, cols, layout) {
+  instances {
+    g[i,j] : GridTile(layout[(j * nx + i)]) for i in 0..nx, j in 0..ny using { gs: "workers/gray_scott_tile.lambda" }
+  }
+  couple { couple_grid2d_block(nx, ny, periodic=true) }
+  expose step = <push () into every g's tick channel>
+}

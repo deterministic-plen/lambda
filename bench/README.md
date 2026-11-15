@@ -64,6 +64,59 @@ See [results.md](results.md) for the latest table. Headline:
 * old explicit-stack arena prototype: ~6x C. Kept only as a historical
   baseline; it is superseded by the generated arena benchmark.
 
+## Stencil benchmark
+
+`bench/stencil_bench.lambda` (and the C/C++ versions) run a 512x512
+periodic five-point heat stencil for 50 steps:
+
+```powershell
+python bench/run_stencil_bench.py
+```
+
+It writes `stencil_results.md` / `.json`.  The Lambda version uses an ordinary
+`arrayf-pmap` lambda; no stencil primitive.
+
+Current reference result:
+
+```text
+C in-place          18.6 ms
+C++                 16.3 ms
+C functional        29.0 ms   (one new output buffer per step)
+Lambda inline       35.3 ms
+```
+
+Against the same-semantics functional C baseline, the latest Lambda run is
+**1.22x**; against the allocation-free in-place C baseline it is 1.9x.  The
+remaining difference is bounds/loop/vectorization overhead, not boxing or
+dispatch.
+
+`stencil_bench_fast.lambda` is the same kernel with caller-asserted
+`arrayf-get-unchecked` reads.  It runs at roughly the functional-C time, but is
+an explicitly unsafe escape hatch, not the idiomatic default.
+
+## Vec2 SoA benchmark
+
+`bench/vec2_bench.c` / `.lambda` rotate 1,000,000 SoA vectors three times and
+reduce them.  Run:
+
+```powershell
+python bench/run_vec2_bench.py
+```
+
+Current reference result:
+
+```text
+C in-place     10.4 ms
+C functional  15.6 ms
+Lambda        16.2 ms   (1.05x functional C)
+```
+
+The compiler specializes `v2-map` at its call site and inlines the pure
+`fx`/`fy` arguments into the pmap body.  With a same-semantics functional C
+baseline, Lambda is within about 5%; the in-place C baseline is faster because
+it reuses component buffers.  Correctness is covered by `arrays/vec2_rotate`
+and `arrays/vec2_impure`.
+
 The product/sum benchmark is separate:
 
 ```powershell

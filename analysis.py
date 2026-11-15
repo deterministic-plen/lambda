@@ -36,7 +36,7 @@ IMPURE_PRIMITIVES = {
     "arrayi_pmap",
     "arrayi_pmap_chunk",
     "write_bytes", "write_f64s", "write_i64s", "write_file",
-    "arrayf_pmap", "gray_scott", "gray_stripe",
+    "arrayf_pmap", "arrayf_pmap_into",
 }
 
 PRIM_ARITY = {
@@ -58,12 +58,11 @@ PRIM_ARITY = {
     "arrayf": 2, "arrayi": 2, "arrayb": 2,
     "arrayf_of": 1, "arrayi_of": 1, "arrayb_of": 1,
     "arrayf_get": 2, "arrayf_set": 3, "arrayf_length": 1, "arrayf_clone": 1,
-    "gray_scott": 8, "gray_stripe": 10,
     "arrayi_get": 2, "arrayi_set": 3, "arrayi_length": 1, "arrayi_clone": 1,
     "arrayb_get": 2, "arrayb_set": 3, "arrayb_length": 1, "arrayb_clone": 1,
     "arrayi_sum": 1, "arrayf_sum": 1,
     "arrayf_get_ro": 2, "arrayi_get_ro": 2, "arrayb_get_ro": 2,
-    "arrayi_pmap": 2, "arrayi_pmap_chunk": 3, "arrayf_pmap": 2,
+    "arrayi_pmap": 2, "arrayi_pmap_chunk": 3, "arrayf_pmap": 2, "arrayf_pmap_into": 3, "arrayf_get_unchecked": 2,
     "write_file": 2,
     "write_bytes": 1, "write_f64s": 1, "write_i64s": 1,
     "read_line": 1, "read_int": 1, "read_float": 1,
@@ -287,6 +286,8 @@ def compute_purity(program: Node) -> Dict[int, bool]:
         if not isinstance(head, Var) or head.binding is None:
             return False
         b = head.binding
+        if b.pure:
+            return True
         if b.kind == PRIM:
             op = OP_CANON.get(b.name)
             if op is None:
@@ -367,6 +368,8 @@ def compute_lambda_purity(program: Node) -> Dict[int, bool]:
             return pure.get(id(n), False)
         if isinstance(n, Var) and n.binding is not None:
             b = n.binding
+            if b.pure:
+                return True
             if b.kind == PRIM:
                 op = OP_CANON.get(b.name)
                 if op is None or op in IMPURE_PRIMITIVES:
@@ -407,6 +410,8 @@ def compute_lambda_purity(program: Node) -> Dict[int, bool]:
                 return False
             if isinstance(head, Var) and head.binding is not None:
                 b = head.binding
+                if b.pure:
+                    return True
                 if b.kind == PRIM:
                     op = OP_CANON.get(b.name)
                     if op is None:

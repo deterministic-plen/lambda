@@ -36,7 +36,6 @@ from lexer import Token, tokenize
 PRIMITIVES = {
     # numeric operations (Int or Float, homogeneous)
     "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
-    "⊕", "⊖", "⊗", "⊘", "⊙", "≡", "≺", "≼", "≻", "≽",
     # lists
     "cons", "head", "tail", "empty?", "nil",
     # flat arrays (consume-on-write)
@@ -47,7 +46,8 @@ PRIMITIVES = {
     "arrayb-get", "arrayb-set", "arrayb-length", "arrayb-clone",
     "arrayi-sum", "arrayf-sum",
     "arrayf-get-ro", "arrayi-get-ro", "arrayb-get-ro",
-    "arrayi-pmap", "arrayi-pmap-chunk", "arrayf-pmap", "arrayf-gray-scott", "arrayf-gray-stripe",
+    "arrayi-pmap", "arrayi-pmap-chunk", "arrayf-pmap", "arrayf-pmap-into",
+    "arrayf-get-unchecked",
     # binary data stream (requires --data)
     "write-bytes", "write-f64s", "write-i64s",
     # strings
@@ -78,16 +78,16 @@ PRIMITIVES = {
 # Canonical operation for each spelling.  Code generation and the type checker
 # share this table so aliases cannot drift apart.
 OP_CANON = {
-    "+": "add", "⊕": "add",
-    "-": "sub", "⊖": "sub",
-    "*": "mul", "⊗": "mul",
-    "/": "div", "⊘": "div",
-    "%": "mod", "⊙": "mod",
-    "==": "eq", "≡": "eq",
-    "<": "lt", "≺": "lt",
-    "<=": "le", "≼": "le",
-    ">": "gt", "≻": "gt",
-    ">=": "ge", "≽": "ge",
+    "+": "add", 
+    "-": "sub", 
+    "*": "mul", 
+    "/": "div", 
+    "%": "mod", 
+    "==": "eq", 
+    "<": "lt", 
+    "<=": "le",
+    ">": "gt", 
+    ">=": "ge", 
     "cons": "cons", "head": "head", "tail": "tail", "empty?": "empty",
     "nil": "nil",
     "arrayf": "arrayf", "arrayi": "arrayi", "arrayb": "arrayb",
@@ -101,7 +101,7 @@ OP_CANON = {
     "arrayi-sum": "arrayi_sum", "arrayf-sum": "arrayf_sum",
     "arrayf-get-ro": "arrayf_get_ro", "arrayi-get-ro": "arrayi_get_ro",
     "arrayb-get-ro": "arrayb_get_ro", "arrayi-pmap": "arrayi_pmap", "arrayf-pmap": "arrayf_pmap",
-    "arrayf-gray-scott": "gray_scott", "arrayf-gray-stripe": "gray_stripe",
+    "arrayf-pmap-into": "arrayf_pmap_into", "arrayf-get-unchecked": "arrayf_get_unchecked",
     "arrayi-pmap-chunk": "arrayi_pmap_chunk",
     "write-bytes": "write_bytes", "write-f64s": "write_f64s",
     "write-i64s": "write_i64s",
@@ -136,7 +136,6 @@ OP_CANON = {
 
 INFIX_NAMES = {
     "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
-    "⊕", "⊖", "⊗", "⊘", "⊙", "≡", "≺", "≼", "≻", "≽",
 }
 
 
@@ -549,6 +548,7 @@ class Parser:
         self.push_context("lambda expression", start)
         params: List[str] = []
         annotations: List[Optional[str]] = []
+        pure_flags: List[bool] = []
         borrows: List[bool] = []
         while not self.check("punct", "."):
             borrowed = False
@@ -574,9 +574,16 @@ class Parser:
             borrows.append(borrowed)
             if self.check("punct", ":"):
                 self.pop()
-                annotations.append(self.parse_type_annotation())
+                ann = self.parse_type_annotation()
+                if ann == "pure":
+                    annotations.append(None)
+                    pure_flags.append(True)
+                else:
+                    annotations.append(ann)
+                    pure_flags.append(False)
             else:
                 annotations.append(None)
+                pure_flags.append(False)
         if not params:
             raise SyntaxErr("lambda needs at least one parameter", start)
         self.expect("punct", ".")
@@ -584,6 +591,7 @@ class Parser:
         self.pop_context()
         lam = Lam(params, body, start)
         lam.param_annotations = annotations
+        lam.param_pure = pure_flags
         lam.param_borrows = borrows
         lam.is_parallel = parallel
         return lam

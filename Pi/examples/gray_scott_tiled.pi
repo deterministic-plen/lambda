@@ -1,0 +1,20 @@
+-- gray_scott_tiled.pi : Gray-Scott on a 2D grid of subregion workers.
+--
+-- Pi owns the tile partition, the halo ring, and the per-step exchange.  The
+-- worker (workers/gray_scott_tile.lambda) only performs the five-point
+-- Laplacian update on its own matrix.
+
+import "../lib/grid_stencil.pi"
+
+program Main() = scope {
+  layout → partition(2, 2, 256, 256)
+  g → GrayTiles(2, 2, 256, 256, layout)
+
+  iterate(500) {
+    g.step()
+    frame → snapshot_grid(g.g, 2, 2, 256, 256)
+    emit_animation_frame("gray_scott", frame, 512, 512)
+  }
+
+  emit_text("gray_scott", "500 Euler steps, 2x2 tiles, explicit 5-point Laplacian")
+}

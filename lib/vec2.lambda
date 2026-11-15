@@ -1,0 +1,47 @@
+; vec2.lambda -- structure-of-arrays helper for 2D vector fields.
+;
+; A vector field is one planar ArrayF:
+;   [x0 .. x(n-1), y0 .. y(n-1)]
+;
+; The two components stay in separate contiguous halves, so per-component
+; loops can be vectorized without introducing a Vec2 primitive.
+;
+; arrayf-pmap falls back to a safe serial loop when fx/fy cannot be proved
+; pure, so this generic map is accepted even before effect annotations land.
+
+; vec2.lambda -- structure-of-arrays helper for 2D vector fields.
+;
+; A vector field is one planar ArrayF:
+;   [x0 .. x(n-1), y0 .. y(n-1)]
+;
+; The two components stay in separate contiguous halves, so per-component
+; loops can be vectorized without introducing a Vec2 primitive.
+;
+; A scalar Vec2 product is also available for code that genuinely needs a
+; first-class pair.  It is unboxed when inference knows the layout.
+
+data Vec2 = V2 (x: Float, y: Float)
+
+v2-dot → (λ a: Vec2 b: Vec2.
+  match a with V2 ax ay:
+    match b with V2 bx by: (+ (* ax bx) (* ay by)))
+
+v2-norm2 → (λ a: Vec2.
+  match a with V2 x y: (+ (* x x) (* y y)))
+
+
+v2-map → (λ v: ArrayF n: Int fx: pure fy: pure.
+  (arrayf-pmap
+    (λ p: Int.
+      if (< p n)
+      then (fx (arrayf-get v p) (arrayf-get v (+ n p)))
+      else (fy (arrayf-get v (- p n)) (arrayf-get v (+ n (- p n)))))
+    (* 2 n)))
+
+; Rotate every vector by +90 degrees: (x, y) -> (-y, x).
+v2-rotate90 → (λ v: ArrayF n: Int.
+  (v2-map v n (λ x y. (- 0.0 y)) (λ x y. x)))
+
+; Add a constant vector to every element.
+v2-shift → (λ v: ArrayF n: Int dx dy.
+  (v2-map v n (λ x y. (+ x dx)) (λ x y. (+ y dy))))

@@ -1,0 +1,11 @@
+; vec2_bench.lambda -- SoA 2D vector rotation, 1M elements, 3 rotations.
+include "lib/vec2.lambda"
+N → 1000000
+v0 → (arrayf-pmap (λ i.
+  if (< i N)
+  then (+ (int->float (% i 97)) 1.0)
+  else (+ (int->float (% (- i N) 89)) 2.0)) (* 2 N))
+v1 → (v2-rotate90 v0 N)
+v2 → (v2-rotate90 v1 N)
+v3 → (v2-rotate90 v2 N)
+(println (arrayf-sum v3))

@@ -1,0 +1,5 @@
+include "lib/kalman.lambda"
+k0 → (K2 0.0 0.0 1.0 0.0 1.0)
+k1 → (k2-predict k0 1.0 0.0)
+k2 → (k2-update k1 1.0 1.0)
+(match k2 with K2 p pv p00 p01 p11: [p, pv, p00, p01, p11])

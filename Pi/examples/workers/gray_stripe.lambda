@@ -37,6 +37,11 @@ v-at → (λ uv: ArrayF top: ArrayF bot: ArrayF y: Int x: Int.
   else (if (== y (- STRIPE 1)) then (arrayf-get bot (+ W x))
   else (arrayf-get uv (+ (+ N (* y W)) x))))
 
+clamp01 → (λ x.
+  if (< x 0.0) then 0.0
+  else if (> x 1.0) then 1.0
+  else x)
+
 u-new → (λ uv: ArrayF top: ArrayF bot: ArrayF p: Int.
   y → (/ p W)
   x → (% p W)
@@ -50,7 +55,7 @@ u-new → (λ uv: ArrayF top: ArrayF bot: ArrayF p: Int.
   lap → (- (+ (+ (u-at uv top bot y xm) (u-at uv top bot y xp))
               (+ (u-at uv top bot ym x) (u-at uv top bot yp x)))
            (* 4.0 u))
-  (+ u (* DT (- (- (* DU lap) uvv) (* FEED (- 1.0 u))))))
+  (clamp01 (+ u (* DT (+ (- (* DU lap) uvv) (* FEED (- 1.0 u)))))))
 
 v-new → (λ uv: ArrayF top: ArrayF bot: ArrayF p: Int.
   y → (/ p W)
@@ -65,7 +70,7 @@ v-new → (λ uv: ArrayF top: ArrayF bot: ArrayF p: Int.
   lap → (- (+ (+ (v-at uv top bot y xm) (v-at uv top bot y xp))
               (+ (v-at uv top bot ym x) (v-at uv top bot yp x)))
            (* 4.0 v))
-  (+ v (* DT (+ (+ (* DV lap) uvv) (* (- FEED KILL) v)))))
+  (clamp01 (+ v (* DT (+ (+ (* DV lap) uvv) (* (- FEED KILL) v))))))
 
 compute → (λ uv: ArrayF top: ArrayF bot: ArrayF.
   (arrayf-pmap (λ j: Int.
@@ -121,7 +126,7 @@ gs-loop → (λ z: Int uv: ArrayF.
     then
       top → (arrayf-pmap (λ j: Int. (arrayf-get a (+ 1 j))) (* 2 W))
       bot → (arrayf-pmap (λ j: Int. (arrayf-get a (+ (+ (* 2 W) 2) j))) (* 2 W))
-      uv2 → (arrayf-gray-stripe uv top bot W STRIPE DU DV FEED KILL DT)
+      uv2 → (compute uv top bot)
       w → (pi-reply-ok corr pi-empty)
       (gs-loop 0 uv2)
     else if (== op op-top)

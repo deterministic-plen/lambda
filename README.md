@@ -5,7 +5,7 @@ in the ML/Lisp tradition: a strict lambda calculus with Hindley–Milner
 inference, algebraic data types, flat arrays, reference-counted containers, and
 a native-code compiler.**  It is designed as a *compute* language: small,
 predictable, and fast enough to sit underneath a coordinator such as
-[Pi](pi-v2.0-impl/).
+[Pi](pi/).
 
 ```
 source .lambda (+ includes)
@@ -117,9 +117,10 @@ boxed dynamic backend.  `--strict` turns that into an error.
 type Complex (re: Float, im: Float)
 type Vec3 (x: Float, y: Float, z: Float)
 
-conj → (λz: Complex. (Complex z_re (- 0.0 z_im)))
+conj → (λz: Complex. (Complex (Complex-re z) (- 0.0 (Complex-im z))))
 dot  → (λa: Vec3 b: Vec3.
-        (+ (* a_x b_x) (+ (* a_y b_y) (* a_z b_z))))
+        (+ (* (Vec3-x a) (Vec3-x b))
+           (+ (* (Vec3-y a) (Vec3-y b)) (* (Vec3-z a) (Vec3-z b)))))
 ```
 
 ```lambda
@@ -138,6 +139,25 @@ monomorphic, and product values cannot be stored in lists or closures.  Field
 sugar `z_re` splits at the last underscore and is resolved before inference, so
 annotate parameters when using it.
 
+### Typed field helpers
+
+`lib/field.lambda` makes the planar convention explicit:
+
+```lambda
+include "lib/complex.lambda"
+include "lib/field.lambda"
+
+n → 3
+z0 → (field-new 2 n)
+z1 → (field-set z0 2 n 0 0 1.0)   ; real part of element 0
+z2 → (field-set z1 2 n 0 1 2.0)   ; imaginary part of element 0
+real0 → (field-get z2 2 n 0 0)
+```
+
+`lib/complex.lambda` and `lib/vec3.lambda` provide the scalar product helpers.
+`Array<Complex>` and `Array<Vec3>` are the planar `ArrayF` conventions described
+above.
+
 ### Qualified names
 
 ```lambda
@@ -147,7 +167,7 @@ Complex::add → (λa: Complex b: Complex.
 ```
 
 `::` is part of a global name, not a module system.  It is a naming convention
-for libraries (`Complex::add`, `Matrix::mul`); single `:` remains the
+for libraries (`Complex::add`, `mat-mul`); single `:` remains the
 type/field/match separator.
 
 ### Logic and bit operations
@@ -177,20 +197,6 @@ total → (sum xs)
 `map`, `pmap`, `range`, `head`, `tail`, `empty?`, `nil`, and `sum`/`product`
 are available.  A list is boxed and reference-counted.
 
-### Process arguments and raw bytes
-
-```lambda
-argc            ; Int  - argument count (argv[0] is the executable)
-(argv i)        ; String - i-th argument, "" when out of range
-(str->arrayb s) ; ArrayB - copy a string's bytes into a flat buffer
-(arrayb->str b) ; String - copy bytes back into a string
-```
-
-`read-file` already returns a whole file with a run-time-determined length, so
-`(str->arrayb (read-file path))` gives a file as bytes without knowing its size
-at compile time.  [`examples/brainf_argv.lambda`](examples/brainf_argv.lambda)
-reads the Brainfuck program path from `argv[1]`.
-
 ### Flat arrays
 
 For numeric state, use one of three mutable flat buffers:
@@ -213,7 +219,18 @@ They consume the list and copy its elements into one flat buffer; an empty list
 gives a zero-length array.  The constructor forms are `arrayf-of`, `arrayi-of`,
 and `arrayb-of`.
 
+Annotations may also use the generic scalar form: `Array<Float>` = `ArrayF`,
+`Array<Int>` = `ArrayI`, `Array<Bool>` = `ArrayB`.  `Array<T>` is also accepted
+for **any product/data type whose fields are all Float**: Vec2, Vec3, Complex,
+and user-defined float products.  Such an array is the planar SoA `ArrayF`
+convention with one component plane per field:
+`[component0 of all elements, component1 of all elements, ...]`.
+It is still a convention, not a compiler-known element stride; use
+`lib/field.lambda` to carry width and element index explicitly.
+
 Operations are `arrayf-get/set/length/clone`, and the same for `arrayi`/`arrayb`.
+`arrayf-get-unchecked` is an explicit low-level escape hatch: the caller asserts
+the index is in bounds.  The checked default remains `arrayf-get`.
 `arrayf-sum`/`arrayi-sum` reduce a whole buffer.  Arrays follow
 **consume-on-write**: `arrayf-set` consumes its array and returns a new handle
 to the same buffer.  Use `arrayf-clone` when you need two independent values.
@@ -225,6 +242,31 @@ fill → (λi a.
   else (fill (+ i 1) (arrayf-set a i (sin (int->float i)))))
 xs → (fill 0 (arrayf 100 0.0))
 ```
+
+### Matrices
+
+`lib/matrix.lambda` provides a row-major dense matrix type over `ArrayF`:
+
+```lambda
+include "lib/matrix.lambda"
+
+a → (M 2 2 (arrayf-of [1.0, 2.0, 3.0, 4.0]))
+b → (M 2 2 (arrayf-of [5.0, 6.0, 7.0, 8.0]))
+c → (mat-mul a b)
+p → (mat-mul c (M 2 1 (arrayf-of [1.0, 1.0])))
+[(mat-get c 0 0), (mat-get c 1 1), (mat-get p 0 0)]
+```
+
+Available operations include `mat-zero`, `mat-get`, `mat-set`, `mat-add`,
+`mat-sub`, `mat-scale`, `mat-transpose`, `mat-mul`, `mat-id`, `mat-scalar`,
+and `mat-clone`; `mat2-values`/`matvec2-values` extract unboxed product values
+without leaking the matrix shell.  Dimensions travel with the data; every
+element access is bounds-checked.
+
+`lib/kalman.lambda` builds the 2D constant-velocity Kalman filter on top of
+`Matrix`, exposing `Kalman2`, `k2-predict`, and `k2-update`.  This is what the
+matrix drone worker uses.  The worker is
+`Pi/examples/workers/drone_matrix.lambda`.
 
 ### Borrows and inspection
 
@@ -288,7 +330,9 @@ file always wins over the bundled library of the same name.  Included files must
 contain definitions only; runnable demos belong in `tests/` or `examples/`.
 
 The implementation audit (implemented vs deferred, known tradeoffs) is in
-[`docs/type-algebra-status.md`](docs/type-algebra-status.md).
+[`docs/type-algebra-status.md`](docs/type-algebra-status.md).  The memory,
+type, process and escape-hatch safety review is in
+[`docs/safety.md`](docs/safety.md).
 
 The self-hosting boundary and port plan (`.lambda` -> `.ll`, FSM lexer,
 deterministic parser, external clang) is in
@@ -327,7 +371,13 @@ first compiler-shaped prototype written in Lambda itself.
 `pmap` maps a pure function over a list.  `arrayi-pmap`/`arrayf-pmap` map a
 pure `Int -> Int`/`Int -> Float` over an index range into a flat output array.
 Outputs are disjoint; workers read only immutable input.  `LAMBDA_THREADS`
-controls the pool.
+controls the runtime pool.  A pure one-parameter `arrayf-pmap` or `arrayi-pmap` lambda is
+currently inlined into a raw serial `i64` loop (faster per element, but no
+intra-array threading); Pi obtains parallelism across workers/tiles.  A
+parallel raw-loop lowering is the remaining performance project.  An unknown function value in `arrayf-pmap` falls back to a
+serial loop; higher-order helpers can declare pure parameters, e.g.
+`fx: pure`, and a call-site check keeps the parallel path sound.  The Vec2 SoA
+helper in `lib/vec2.lambda` uses this.
 
 `arrayf-pmap` is also the GPU seam.  When the lambda is a simple expression
 that the compiler can translate to CUDA C (arithmetic, comparisons, `sin`,
@@ -340,19 +390,8 @@ read **one captured `ArrayF`** through `arrayf-get`; the compiler passes it as a
 back to the CPU thread pool.  Only one GPU is used; multi-GPU is not implemented.  This is a
 one-GPU backend, not a GPU language.
 
-For a nontrivial GPU workload, `arrayf-gray-scott` is an
-experimental C/CUDA primitive that advances a combined U/V field by `steps`
-Euler steps in one call.  It keeps the field on the device between substeps and
-falls back to C.  Signature:
-
-```lambda
-arrayf-gray-scott : ArrayF × Int × Float × Float × Float × Float × Float × Int -> ArrayF
-;                   uv      n   Du     Dv    feed   kill   dt    steps
-```
-
-`uv` is a combined `U` then `V` field of `2*n*n` Floats.  It is used by the Pi
-Gray-Scott example; it is not a general stencil language, and ordinary user
-kernels still go through `arrayf-pmap`.
+All numerical kernels are ordinary Lambda: `arrayf-pmap` is the generic
+data-parallel primitive, and there are no domain-specific stencil primitives.
 
 Requirements for the GPU path: an NVIDIA GPU, the CUDA driver (`nvcuda.dll`
 or `libcuda.so.1`), and NVRTC (`nvrtc64_*.dll` or `libnvrtc.so`). No CUDA link
@@ -418,34 +457,13 @@ fields, variants, and qualified names.  Validation:
 ## Tests
 
 ```sh
-python run_tests.py                 # everything
-python run_tests.py data floats     # whole groups
-python run_tests.py -k adt          # by case-name substring
-python run_tests.py --list          # discover without running
-python run_tests.py tests/data/adt_tree.lambda   # a single case
+python run_tests.py
 ```
 
-Cases live in `tests/<group>/` next to their sources, and each group's
-`cases.yml` declares the expected stdout (or the expected compiler error) and
-any compiler flags or stdin.  Discovery is recursive, so adding a group means
-adding a directory with a manifest -- no Python changes.
-
-```yaml
-description: Recursive data declarations and their layouts
-cases:
-- name: adt_tree
-  stdout: |
-    3
-- name: adt_boxed
-  stdout: |
-    hi
-```
-
-145 compile/run/leak regression cases; every program must finish with
+144 compile/run/leak regression cases; every program must finish with
 `live=0` allocation statistics.  The suite covers scalars, floats, strings,
-lists, arrays, recursive data layouts, products, sums, enums, closures, CSE,
-tail calls, includes, parallel maps, bigint, terminal input, and compile-time
-errors.
+lists, arrays, products, sums, enums, closures, CSE, tail calls, includes,
+parallel maps, bigint, and compile-time errors.
 
 ## Limitations and roadmap
 
@@ -457,9 +475,8 @@ errors.
   parallel only.
 * No type classes/generics over constructors; monomorphic products/sums.
 * Bigint is a library, not a compiler type.
-* GPU support is a single-device `arrayf-pmap` backend for simple expressions
-  plus the experimental Gray-Scott primitive; no multi-GPU, no arbitrary
-  kernels.
+* GPU support is a single-device `arrayf-pmap` backend for simple expressions;
+  no multi-GPU and no domain-specific numerical primitives.
 * The dynamic backend is a fallback, not an optimization target.
 
 ## Repository layout

@@ -5,8 +5,7 @@
 --
 --   pi run examples/gray_scott.pi --out out/gray_scott
 --
--- Worker resources request one GPU; Lambda falls back to CPU if CUDA/NVRTC is
--- unavailable.
+-- This is the explicit Lambda stencil; no domain-specific numerical primitive.
 
 protocol GrayScott {
   op init : (Float) → ()
@@ -22,10 +21,10 @@ program Main() = scope {
 
   await call(w, "init", 0.0)
 
-  iterate(60) {
+  iterate(100) {
     v → await call(w, "step")
     emit_animation_frame("gray_scott", v, 512, 512)
   }
 
-  emit_text("gray_scott", "3000 Euler steps sampled every 50, 512x512, U/V 5-point Laplacian")
+  emit_text("gray_scott", "100 Euler steps, 512x512, explicit U/V 5-point Laplacian")
 }

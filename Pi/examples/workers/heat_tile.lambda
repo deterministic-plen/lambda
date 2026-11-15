@@ -1,0 +1,111 @@
+; heat_tile.lambda -- one 2D subregion of a scalar heat field.
+;
+; The worker owns its tile and the four neighbouring halo edges.  `step`
+; performs an explicit five-point Laplacian update and returns the tile; Pi
+; extracts the edges and routes them.  `patch` installs the neighbours' edges.
+;
+; Protocol HeatTile:
+;   0 init(ox, oy, rows, cols, global_rows, global_cols)
+;   1 step()       -> tile
+;   2 patch(halos) -> ()
+;   3 snapshot()   -> tile
+
+include "tile_shim.lambda"
+include "pi_schema_HeatTile.lambda"
+
+data HeatState = HS (rows: Int, cols: Int, u: ArrayF,
+                    ht: ArrayF, hb: ArrayF, hl: ArrayF, hr: ArrayF)
+
+ALPHA → 0.2
+DT → 1.0
+
+; ---- state construction ----------------------------------------------------
+
+seed → (λ ox oy rows cols grows gcols k u.
+  if (>= k (* rows cols)) then u
+  else
+    gx → (+ ox (% k cols))
+    gy → (+ oy (/ k cols))
+    dx → (- gx (/ gcols 2))
+    dy → (- gy (/ grows 2))
+    small → (if (< grows gcols) then grows else gcols)
+    rad → (/ small 8)
+    inside → (if (<= (+ (* dx dx) (* dy dy)) (* rad rad)) then 1.0 else 0.0)
+    (seed ox oy rows cols grows gcols (+ k 1)
+      (if (> inside 0.0) then (arrayf-set u k 1.0) else u)))
+
+top-halo → (λ u cols.
+  (arrayf-pmap (λ j. (arrayf-get u j)) cols))
+
+bottom-halo → (λ u rows cols.
+  base → (* (- rows 1) cols)
+  (arrayf-pmap (λ j. (arrayf-get u (+ base j))) cols))
+
+left-halo → (λ u rows cols.
+  (arrayf-pmap (λ r. (arrayf-get u (* r cols))) rows))
+
+right-halo → (λ u rows cols.
+  col → (- cols 1)
+  (arrayf-pmap (λ r. (arrayf-get u (+ (* r cols) col))) rows))
+
+; ---- neighbour access ----------------------------------------------------
+
+u-at → (λ u ht hb hl hr rows cols y x.
+  if (== y (- 0 1)) then (arrayf-get ht x)
+  else if (== y rows) then (arrayf-get hb x)
+  else if (== x (- 0 1)) then (arrayf-get hl y)
+  else if (== x cols) then (arrayf-get hr y)
+  else (arrayf-get u (+ (* y cols) x)))
+
+u-new → (λ u ht hb hl hr rows cols p.
+  y → (/ p cols)
+  x → (% p cols)
+  c → (u-at u ht hb hl hr rows cols y x)
+  lap → (- (+ (+ (u-at u ht hb hl hr rows cols y (- x 1))
+                 (u-at u ht hb hl hr rows cols y (+ x 1)))
+              (+ (u-at u ht hb hl hr rows cols (- y 1) x)
+                 (u-at u ht hb hl hr rows cols (+ y 1) x)))
+           (* 4.0 c))
+  (+ c (* (* ALPHA DT) lap)))
+
+compute → (λ u ht hb hl hr rows cols.
+  (arrayf-pmap (λ p. (u-new u ht hb hl hr rows cols p)) (* rows cols)))
+
+; ---- halo patch -----------------------------------------------------------
+
+copy-range → (λ a start count.
+  (arrayf-pmap (λ j. (arrayf-get a (+ start j))) count))
+
+; ---- hooks supplied to the shared shim ---------------------------------
+
+ht-init → (λ ox: Int oy: Int rows: Int cols: Int grows: Int gcols: Int.
+  n → (* rows cols)
+  u0 → (seed ox oy rows cols grows gcols 0 (arrayf n 0.0))
+  ht → (top-halo u0 cols)
+  hb → (bottom-halo u0 rows cols)
+  hl → (left-halo u0 rows cols)
+  hr → (right-halo u0 rows cols)
+  (HS rows cols u0 ht hb hl hr))
+
+ht-step → (λs: HeatState.
+  match s with HS rows cols u ht hb hl hr:
+    (HS rows cols (compute u ht hb hl hr rows cols) ht hb hl hr))
+
+ht-payload → (λs: HeatState.
+  match s with HS rows cols u ht hb hl hr: u)
+
+ht-patch → (λs: HeatState a: ArrayF.
+  match s with HS rows cols u ht hb hl hr:
+    ; couple_grid2d_block order: left, right, up, down
+    left2 → (copy-range a 1 rows)
+    right2 → (copy-range a (+ 2 rows) rows)
+    up2 → (copy-range a (+ 3 (* 2 rows)) cols)
+    down2 → (copy-range a (+ 4 (+ (* 2 rows) cols)) cols)
+    (HS rows cols u up2 down2 left2 right2))
+
+ht-snapshot → (λs: HeatState.
+  match s with HS rows cols u ht hb hl hr: u)
+
+(tile-shim op-init op-step op-patch op-snapshot error-internal
+           schema-hi schema-lo 2 (ht-init 0 0 0 0 0 0)
+           ht-init ht-step ht-payload ht-patch ht-snapshot)

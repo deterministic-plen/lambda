@@ -46,12 +46,17 @@ class ProgramLoader:
         self.search_paths = unique
         self.loaded: Set[str] = set()
         self.active: List[str] = []
+        self.included_data_decls: List[object] = []
 
     def load_main(self, path: str) -> Node:
         full = os.path.abspath(path)
         if not os.path.exists(full):
             raise SyntaxErr(f"file '{path}' not found")
-        return self._parse_file(full, is_main=True)
+        self.included_data_decls = []
+        block = self._parse_file(full, is_main=True)
+        if self.included_data_decls:
+            block.data_decls = list(block.data_decls) + self.included_data_decls
+        return block
 
     def include(self, path: str, loc: Loc) -> List[Def]:
         full = self._resolve(path, loc)
@@ -62,6 +67,8 @@ class ProgramLoader:
             chain = " -> ".join(os.path.basename(p) for p in self.active + [key])
             raise SyntaxErr(f"include cycle: {chain}", loc)
         block = self._parse_file(full, is_main=False)
+        if block.data_decls:
+            self.included_data_decls.extend(block.data_decls)
         return list(block.defs)
 
     def _parse_file(self, path: str, is_main: bool) -> Block:

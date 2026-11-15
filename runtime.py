@@ -306,6 +306,33 @@ Value *lambda_box_int(int64_t x) {
     return v;
 }
 
+/* Immutable index boxes for parallel map.  The pmap path used to allocate and
+   free one Value per element, which serialized the allocator and dominated the
+   stencil timings.  Reuse immortal boxes for small/medium index ranges. */
+#define LAMBDA_INT_CACHE_MAX ((int64_t)1 << 20)
+static Value **g_int_cache = NULL;
+static int64_t g_int_cache_n = 0;
+
+static void int_cache_ensure(int64_t n) {
+    if (n <= g_int_cache_n) return;
+    if (n > LAMBDA_INT_CACHE_MAX) return;
+    int64_t old = g_int_cache_n;
+    Value **p = (Value **)realloc(g_int_cache, (size_t)n * sizeof(Value *));
+    if (!p) return;
+    g_int_cache = p;
+    for (int64_t i = old; i < n; i++) {
+        Value *v = value_alloc_immortal(TAG_INT);
+        v->i = i;
+        g_int_cache[i] = v;
+    }
+    g_int_cache_n = n;
+}
+
+static Value *int_immortal(int64_t x) {
+    if (x >= 0 && x < g_int_cache_n) return g_int_cache[x];
+    return lambda_box_int(x);
+}
+
 Value *lambda_box_bool(int64_t x) {
     Value *v = value_alloc(TAG_BOOL);
     v->i = x ? 1 : 0;
@@ -723,6 +750,28 @@ Value *lambda_arrayf_new(int64_t n, double init) {
     double *d = (double *)a->p;
     for (int64_t i = 0; i < n; ++i) d[i] = init;
     return a;
+}
+
+/* pmap fully overwrites every element, so skip the zero fill. */
+Value *lambda_arrayf_new_uninit(int64_t n) {
+    Value *a = value_alloc(TAG_ARRAYF);
+    a->i = n;
+    size_t cap = 0;
+    a->p = pool_take(checked_array_bytes(n, sizeof(double)), &cap);
+    return a;
+}
+
+Value *lambda_arrayi_new_uninit(int64_t n) {
+    Value *a = value_alloc(TAG_ARRAYI);
+    a->i = n;
+    size_t cap = 0;
+    a->p = pool_take(checked_array_bytes(n, sizeof(int64_t)), &cap);
+    return a;
+}
+
+double lambda_arrayf_get_unchecked(Value *a, int64_t idx) {
+    if (!a || a->tag != TAG_ARRAYF) fail_type("ArrayF", a);
+    return ((double *)a->p)[idx];
 }
 
 double lambda_arrayf_get(Value *a, int64_t idx) {
@@ -1939,7 +1988,7 @@ static void array_pmap_run(ArrayPMapJob *job) {
     for (;;) {
         int64_t i = __atomic_fetch_add(&job->next, 1, __ATOMIC_RELAXED);
         if (i >= job->n) break;
-        Value *arg = lambda_box_int(i);
+        Value *arg = int_immortal(i);
         Value *r = apply_owned(job->f, arg);
         int64_t value = lambda_get_int(r);
         lambda_release(r);
@@ -1961,6 +2010,7 @@ static void *array_pmap_thread_main(void *p) {
 
 Value *lambda_arrayi_pmap(Value *f, int64_t n) {
     if (n < 0) fail("array size must be non-negative");
+    int_cache_ensure(n);
     Value *out = lambda_arrayi_new(n, 0);
     int64_t threads = pmap_requested_threads();
     if (threads > LAMBDA_MAX_THREADS) threads = LAMBDA_MAX_THREADS;
@@ -1968,7 +2018,7 @@ Value *lambda_arrayi_pmap(Value *f, int64_t n) {
     if (threads <= 1 || n <= 1) {
         int64_t *data = (int64_t *)out->p;
         for (int64_t i = 0; i < n; i++) {
-            Value *r = apply_owned(f, lambda_box_int(i));
+            Value *r = apply_owned(f, int_immortal(i));
             data[i] = lambda_get_int(r);
             lambda_release(r);
         }
@@ -2007,6 +2057,29 @@ Value *lambda_arrayi_pmap(Value *f, int64_t n) {
     return out;
 }
 
+Value *lambda_arrayf_require_len(Value *a, int64_t n) {
+    if (!a || a->tag != TAG_ARRAYF) fail_type("ArrayF", a);
+    if (a->i < n) fail("arrayf-pmap-into destination is too short");
+    return a;
+}
+
+/* Map into an existing ArrayF.  The caller owns the destination; pmap writes
+   every element, so no output allocation is needed. */
+Value *lambda_arrayf_pmap_into(Value *f, Value *dst, int64_t n) {
+    if (n < 0) fail("array size must be non-negative");
+    if (!dst || dst->tag != TAG_ARRAYF) fail_type("ArrayF", dst);
+    if (dst->i < n) fail("arrayf-pmap-into destination is too short");
+    int_cache_ensure(n);
+    double *data = (double *)dst->p;
+    for (int64_t i = 0; i < n; i++) {
+        Value *r = apply_owned(f, int_immortal(i));
+        data[i] = lambda_get_float(r);
+        lambda_release(r);
+    }
+    lambda_release(f);
+    return dst;
+}
+
 /* Parallel Int -> Float map into a flat Float array. */
 typedef struct ArrayFPMapJob {
     Value *f;
@@ -2020,7 +2093,7 @@ static void arrayf_pmap_run(ArrayFPMapJob *job) {
     for (;;) {
         int64_t i = __atomic_fetch_add(&job->next, 1, __ATOMIC_RELAXED);
         if (i >= job->n) break;
-        Value *r = apply_owned(job->f, lambda_box_int(i));
+        Value *r = apply_owned(job->f, int_immortal(i));
         data[i] = lambda_get_float(r);
         lambda_release(r);
     }
@@ -2038,8 +2111,183 @@ static void *arrayf_pmap_thread_main(void *p) {
 }
 #endif
 
+/* Raw parallel pmap: the compiler supplies an environment and a callback
+   taking (env, i64) and returning double.  No Value boxing or closure call is
+   needed per element.  The environment's dtor releases captured values after
+   all workers finish. */
+typedef struct RawFPMapJob {
+    void *env;
+    double (*fn)(void *, int64_t);
+    Value *out;
+    int64_t n;
+    int64_t next;
+} RawFPMapJob;
+
+static void rawf_pmap_run(RawFPMapJob *job) {
+    double *data = (double *)job->out->p;
+    for (;;) {
+        int64_t i = __atomic_fetch_add(&job->next, 1, __ATOMIC_RELAXED);
+        if (i >= job->n) break;
+        data[i] = job->fn(job->env, i);
+    }
+}
+
+#ifdef _WIN32
+static DWORD WINAPI rawf_pmap_thread_main(LPVOID p) {
+    rawf_pmap_run((RawFPMapJob *)p);
+    return 0;
+}
+#else
+static void *rawf_pmap_thread_main(void *p) {
+    rawf_pmap_run((RawFPMapJob *)p);
+    return NULL;
+}
+#endif
+
+/* Raw parallel range loop: each worker runs the compiled body over a contiguous
+   [lo, hi) range.  This is the fast parallel path; there is no per-element
+   callback or boxing. */
+typedef void (*RawLoopFn)(void *, double *, int64_t, int64_t);
+
+typedef struct RawLoopArg {
+    RawLoopFn fn;
+    void *env;
+    double *data;
+} RawLoopArg;
+
+static void rawloop_run(RawLoopArg *a, int64_t lo, int64_t hi) {
+    if (hi > lo) a->fn(a->env, a->data, lo, hi);
+}
+
+#ifdef _WIN32
+typedef struct RawLoopWin { RawLoopArg *a; int64_t lo, hi; } RawLoopWin;
+static DWORD WINAPI rawloop_thread_main(LPVOID p) {
+    RawLoopWin *w = (RawLoopWin *)p;
+    rawloop_run(w->a, w->lo, w->hi);
+    return 0;
+}
+#else
+typedef struct RawLoopPosix { RawLoopArg *a; int64_t lo, hi; } RawLoopPosix;
+static void *rawloop_thread_main(void *p) {
+    RawLoopPosix *w = (RawLoopPosix *)p;
+    rawloop_run(w->a, w->lo, w->hi);
+    return NULL;
+}
+#endif
+
+Value *lambda_arrayf_pmap_raw_loop(void *env, RawLoopFn fn, int64_t n) {
+    if (n < 0) fail("array size must be non-negative");
+    Value *out = lambda_arrayf_new(n, 0.0);
+    RawLoopArg arg;
+    arg.fn = fn;
+    arg.env = env;
+    arg.data = (double *)out->p;
+    int64_t threads = pmap_requested_threads();
+    if (threads > LAMBDA_MAX_THREADS) threads = LAMBDA_MAX_THREADS;
+    if (threads > n) threads = n;
+    if (threads < 1) threads = 1;
+    if (threads > 1 && n > 1) {
+#ifdef _WIN32
+        HANDLE handles[LAMBDA_MAX_THREADS];
+        RawLoopWin args[LAMBDA_MAX_THREADS];
+        int created = 0;
+        for (int64_t t = 1; t < threads; t++) {
+            args[t].a = &arg;
+            args[t].lo = t * n / threads;
+            args[t].hi = (t + 1) * n / threads;
+            HANDLE h = CreateThread(NULL, 0, rawloop_thread_main, &args[t], 0, NULL);
+            if (h) handles[created++] = h;
+        }
+        rawloop_run(&arg, 0, n / threads);
+        if (created > 0) WaitForMultipleObjects((DWORD)created, handles, TRUE, INFINITE);
+        for (int i = 0; i < created; i++) CloseHandle(handles[i]);
+#else
+        pthread_t th[LAMBDA_MAX_THREADS];
+        RawLoopPosix args[LAMBDA_MAX_THREADS];
+        int created = 0;
+        for (int64_t t = 1; t < threads; t++) {
+            args[t].a = &arg;
+            args[t].lo = t * n / threads;
+            args[t].hi = (t + 1) * n / threads;
+            if (pthread_create(&th[created], NULL, rawloop_thread_main, &args[t]) == 0)
+                created++;
+        }
+        rawloop_run(&arg, 0, n / threads);
+        for (int i = 0; i < created; i++) pthread_join(th[i], NULL);
+#endif
+    } else {
+        rawloop_run(&arg, 0, n);
+    }
+    EnvHeader *h = (EnvHeader *)env;
+    if (h) {
+        if (h->dtor) h->dtor(env);
+        free(env);
+    }
+    return out;
+}
+
+Value *lambda_arrayf_pmap_raw(void *env, double (*fn)(void *, int64_t), int64_t n) {
+    if (n < 0) fail("array size must be non-negative");
+    Value *out = lambda_arrayf_new(n, 0.0);
+    if (n > 0) {
+        int64_t threads = pmap_requested_threads();
+        if (threads > LAMBDA_MAX_THREADS) threads = LAMBDA_MAX_THREADS;
+        if (threads > n) threads = n;
+        RawFPMapJob job;
+        job.env = env; job.fn = fn; job.out = out; job.n = n; job.next = 0;
+        if (threads <= 1) {
+            rawf_pmap_run(&job);
+        } else {
+#ifdef _WIN32
+            HANDLE handles[LAMBDA_MAX_THREADS];
+            int created = 0;
+            for (int64_t i = 1; i < threads; i++) {
+                HANDLE h = CreateThread(NULL, 0, rawf_pmap_thread_main, &job, 0, NULL);
+                if (h) handles[created++] = h;
+            }
+            rawf_pmap_run(&job);
+            if (created > 0) WaitForMultipleObjects((DWORD)created, handles, TRUE, INFINITE);
+            for (int i = 0; i < created; i++) CloseHandle(handles[i]);
+#else
+            pthread_t th[LAMBDA_MAX_THREADS];
+            int created = 0;
+            for (int64_t i = 1; i < threads; i++) {
+                if (pthread_create(&th[created], NULL, rawf_pmap_thread_main, &job) == 0)
+                    created++;
+            }
+            rawf_pmap_run(&job);
+            for (int i = 0; i < created; i++) pthread_join(th[i], NULL);
+#endif
+        }
+    }
+    EnvHeader *h = (EnvHeader *)env;
+    if (h) {
+        if (h->dtor) h->dtor(env);
+        free(env);
+    }
+    return out;
+}
+
+/* Serial fallback for arrayf-pmap when the function value cannot be proved
+   pure.  This keeps higher-order array code expressive without running an
+   unknown (possibly effectful) closure on worker threads. */
+Value *lambda_arrayf_map(Value *f, int64_t n) {
+    if (n < 0) fail("array size must be non-negative");
+    int_cache_ensure(n);
+    Value *out = lambda_arrayf_new(n, 0.0);
+    double *data = (double *)out->p;
+    for (int64_t i = 0; i < n; i++) {
+        Value *r = apply_owned(f, int_immortal(i));
+        data[i] = lambda_get_float(r);
+        lambda_release(r);
+    }
+    lambda_release(f);
+    return out;
+}
+
 Value *lambda_arrayf_pmap(Value *f, int64_t n) {
     if (n < 0) fail("array size must be non-negative");
+    int_cache_ensure(n);
     Value *out = lambda_arrayf_new(n, 0.0);
     int64_t threads = pmap_requested_threads();
     if (threads > LAMBDA_MAX_THREADS) threads = LAMBDA_MAX_THREADS;
@@ -2047,7 +2295,7 @@ Value *lambda_arrayf_pmap(Value *f, int64_t n) {
     if (threads <= 1 || n <= 1) {
         double *data = (double *)out->p;
         for (int64_t i = 0; i < n; i++) {
-            Value *r = apply_owned(f, lambda_box_int(i));
+            Value *r = apply_owned(f, int_immortal(i));
             data[i] = lambda_get_float(r);
             lambda_release(r);
         }
@@ -2309,160 +2557,6 @@ Value *lambda_gpu_arrayf_pmap1(Value *f, int64_t n, const char *source,
         return lambda_arrayf_pmap(f, n);
     }
     lambda_release(f);
-    return out;
-}
-
-/* ------------------------------------------------------------------ */
-/* Gray-Scott reaction-diffusion step (combined U,V ArrayF, 2*n*n).    */
-/* CPU fallback plus an optional CUDA kernel; this is an experimental  */
-/* numerical primitive, not a general GPU language.                    */
-/* ------------------------------------------------------------------ */
-
-static void grayscott_cpu(double *out, const double *in, int n,
-                          double du, double dv, double feed, double kill,
-                          double dt) {
-    int n2 = n * n;
-    for (int y = 0; y < n; y++) {
-        for (int x = 0; x < n; x++) {
-            int p = y * n + x;
-            int xm = (x + n - 1) % n, xp = (x + 1) % n;
-            int ym = (y + n - 1) % n, yp = (y + 1) % n;
-            int pl = y * n + xm, pr = y * n + xp;
-            int pu = ym * n + x, pd = yp * n + x;
-            double u = in[p], v = in[n2 + p];
-            double uvv = u * v * v;
-            double lu = in[pl] + in[pr] + in[pu] + in[pd] - 4.0 * u;
-            double lv = in[n2 + pl] + in[n2 + pr] + in[n2 + pu] + in[n2 + pd] - 4.0 * v;
-            out[p] = u + dt * (du * lu - uvv + feed * (1.0 - u));
-            out[n2 + p] = v + dt * (dv * lv + uvv - (feed + kill) * v);
-        }
-    }
-}
-
-static const char *GRAYSCOTT_SRC =
-    "extern \"C\" __global__ void gs(double* out, const double* in, int n,"
-    " double du, double dv, double feed, double kill, double dt) {"
-    " int n2 = n*n; int p = (int)blockIdx.x*blockDim.x + threadIdx.x;"
-    " if (p >= n2) return; int x = p % n; int y = p / n;"
-    " int xm=(x+n-1)%n, xp=(x+1)%n, ym=(y+n-1)%n, yp=(y+1)%n;"
-    " int pl=y*n+xm, pr=y*n+xp, pu=ym*n+x, pd=yp*n+x;"
-    " double u=in[p], v=in[n2+p]; double uvv=u*v*v;"
-    " double lu=in[pl]+in[pr]+in[pu]+in[pd]-4.0*u;"
-    " double lv=in[n2+pl]+in[n2+pr]+in[n2+pu]+in[n2+pd]-4.0*v;"
-    " out[p]=u+dt*(du*lu-uvv+feed*(1.0-u));"
-    " out[n2+p]=v+dt*(dv*lv+uvv-(feed+kill)*v); }";
-
-/* One horizontal stripe of Gray-Scott with explicit top/bottom halo rows.
-   top/bot are 2*W ArrayF payloads: U row then V row. */
-static double stripe_at(const double *u, const double *v, const double *tu,
-                        const double *tv, const double *bu, const double *bv,
-                        int W, int R, int y, int x, int which) {
-    if (y < 0) return which ? tv[x] : tu[x];
-    if (y >= R) return which ? bv[x] : bu[x];
-    return which ? v[(int64_t)y * W + x] : u[(int64_t)y * W + x];
-}
-
-Value *lambda_gray_stripe(Value *uv, Value *top, Value *bot, int64_t W, int64_t R,
-                          double du, double dv, double feed, double kill, double dt) {
-    if (W <= 0 || R <= 0 || W > INT_MAX || R > INT_MAX ||
-        (uint64_t)W > (uint64_t)INT64_MAX / (uint64_t)R)
-        lambda_array_bounds_fail();
-    int64_t N = W * R;
-    if (N > INT64_MAX / 2 || 2 * W < 2) lambda_array_bounds_fail();
-    if (!uv || uv->tag != TAG_ARRAYF || uv->i < 2 * N ||
-        !top || top->tag != TAG_ARRAYF || top->i < 2 * W ||
-        !bot || bot->tag != TAG_ARRAYF || bot->i < 2 * W) {
-        lambda_array_bounds_fail();
-    }
-    Value *out = lambda_arrayf_new(2 * N, 0.0);
-    const double *u = (const double *)uv->p;
-    const double *v = u + N;
-    const double *tu = (const double *)top->p;
-    const double *tv = tu + W;
-    const double *bu = (const double *)bot->p;
-    const double *bv = bu + W;
-    double *ou = (double *)out->p;
-    double *ov = ou + N;
-    for (int64_t y = 0; y < R; y++) {
-        for (int64_t x = 0; x < W; x++) {
-            int64_t p = y * W + x;
-            int xm = (int)((x + W - 1) % W), xp = (int)((x + 1) % W);
-            double u0 = u[p], v0 = v[p];
-            double uvv = u0 * v0 * v0;
-            double lu = stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y - 1, x, 0)
-                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y, xm, 0)
-                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y, xp, 0)
-                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y + 1, x, 0)
-                      - 4.0 * u0;
-            double lv = stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y - 1, x, 1)
-                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y, xm, 1)
-                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y, xp, 1)
-                      + stripe_at(u, v, tu, tv, bu, bv, (int)W, (int)R, (int)y + 1, x, 1)
-                      - 4.0 * v0;
-            ou[p] = u0 + dt * (du * lu - uvv + feed * (1.0 - u0));
-            ov[p] = v0 + dt * (dv * lv + uvv - (feed + kill) * v0);
-        }
-    }
-    lambda_release(uv); lambda_release(top); lambda_release(bot);
-    return out;
-}
-
-Value *lambda_gray_scott(Value *uv, int64_t n, double du, double dv,
-                         double feed, double kill, double dt, int64_t steps) {
-    if (n <= 0 || n > INT_MAX || (uint64_t)n > (uint64_t)INT64_MAX / (uint64_t)n)
-        lambda_array_bounds_fail();
-    int64_t n2 = n * n;
-    if (n2 > INT64_MAX / 2 || !uv || uv->tag != TAG_ARRAYF || uv->i < 2 * n2) {
-        lambda_array_bounds_fail();
-    }
-    if (steps < 1) steps = 1;
-    Value *out = lambda_arrayf_new(2 * n2, 0.0);
-    if (getenv("LAMBDA_GPU") && strcmp(getenv("LAMBDA_GPU"), "1") == 0 &&
-        n2 >= 32768 && gpu_init()) {
-        GpuKernel *k = gpu_kernel_named(GRAYSCOTT_SRC, "gs");
-        if (k && k->fn) {
-            gpu_ptr d0 = 0, d1 = 0;
-            size_t bytes = sizeof(double) * (size_t)(2 * n2);
-            if (gpu.cuMemAlloc(&d0, bytes) == 0 && gpu.cuMemAlloc(&d1, bytes) == 0 &&
-                gpu.cuMemcpyHtoD(d0, uv->p, bytes) == 0) {
-                int nn = (int)n;
-                unsigned threads = 256;
-                unsigned blocks = (unsigned)((n2 + threads - 1) / threads);
-                gpu_ptr src = d0, dst = d1;
-                gpu_result rc = 0;
-                for (int64_t s = 0; s < steps && rc == 0; s++) {
-                    void *args[] = {&dst, &src, &nn, &du, &dv, &feed, &kill, &dt};
-                    rc = gpu.cuLaunchKernel(k->fn, blocks, 1, 1, threads, 1, 1,
-                                            0, NULL, args, NULL);
-                    gpu_ptr t = src; src = dst; dst = t;
-                }
-                if (rc == 0) rc = gpu.cuCtxSynchronize();
-                if (rc == 0) rc = gpu.cuMemcpyDtoH(out->p, src, bytes);
-                gpu.cuMemFree(d0); gpu.cuMemFree(d1);
-                if (rc == 0) {
-                    lambda_release(uv);
-                    return out;
-                }
-            } else {
-                if (d0) gpu.cuMemFree(d0);
-                if (d1) gpu.cuMemFree(d1);
-            }
-        }
-    }
-    double *tmp = (double *)xmalloc(sizeof(double) * (size_t)(2 * n2));
-    double *src = uv->p, *dst = out->p;
-    for (int64_t s = 0; s < steps; s++) {
-        grayscott_cpu(dst, src, (int)n, du, dv, feed, kill, dt);
-        if (s + 1 < steps) {
-            double *t = src == uv->p ? tmp : src;
-            (void)t;
-            double *next = (dst == out->p) ? tmp : out->p;
-            src = dst; dst = next;
-        }
-    }
-    if (dst != out->p) memcpy(out->p, dst, sizeof(double) * (size_t)(2 * n2));
-    free(tmp);
-    lambda_release(uv);
     return out;
 }
 
@@ -2941,7 +3035,10 @@ declare %Value* @lambda_op_println(%Value*)
 declare %Value* @lambda_fix(%Value*)
 
 declare %Value* @lambda_arrayf_new(i64, double)
+declare noalias %Value* @lambda_arrayf_new_uninit(i64)
+declare %Value* @lambda_arrayi_new_uninit(i64)
 declare void @lambda_array_bounds_fail()
+declare double @lambda_arrayf_get_unchecked(%Value*, i64)
 declare double @lambda_arrayf_get(%Value*, i64)
 declare void @lambda_arrayf_set(%Value*, i64, double)
 declare i64 @lambda_arrayf_length(%Value*)
@@ -2963,10 +3060,13 @@ declare i64 @lambda_arrayb_length(%Value*)
 declare %Value* @lambda_arrayb_clone(%Value*)
 declare %Value* @lambda_arrayi_pmap(%Value*, i64)
 declare %Value* @lambda_arrayf_pmap(%Value*, i64)
+declare %Value* @lambda_arrayf_map(%Value*, i64)
+declare %Value* @lambda_arrayf_pmap_into(%Value*, %Value*, i64)
+declare %Value* @lambda_arrayf_require_len(%Value*, i64)
+declare %Value* @lambda_arrayf_pmap_raw(i8*, ptr, i64)
+declare %Value* @lambda_arrayf_pmap_raw_loop(i8*, ptr, i64)
 declare %Value* @lambda_gpu_arrayf_pmap(%Value*, i64, i8*)
 declare %Value* @lambda_gpu_arrayf_pmap1(%Value*, i64, i8*, %Value*)
-declare %Value* @lambda_gray_scott(%Value*, i64, double, double, double, double, double, i64)
-declare %Value* @lambda_gray_stripe(%Value*, %Value*, %Value*, i64, i64, double, double, double, double, double)
 declare %Value* @lambda_op_arrayi_pmap(%Value*, %Value*)
 declare %Value* @lambda_op_arrayf_pmap(%Value*, %Value*)
 declare i64 @lambda_op_write_file(%Value*, %Value*)

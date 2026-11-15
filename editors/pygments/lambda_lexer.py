@@ -26,7 +26,7 @@ KEYWORDS = (
 )
 
 BUILTINS = (
-    "abs acos and arrayf-of arrayi-of arrayb-of arrayf-pmap arrayf-gray-scott arrayf-gray-stripe arrayb arrayb-clone arrayb-get arrayb-get-ro arrayb-length "
+    "abs acos and arrayf-of arrayi-of arrayb-of arrayf-pmap arrayb arrayb-clone arrayb-get arrayb-get-ro arrayb-length "
     "arrayb-set arrayf arrayf-clone arrayf-get arrayf-get-ro arrayf-length "
     "arrayf-set arrayf-sum arrayi arrayi-clone arrayi-get arrayi-get-ro "
     "arrayi-length arrayi-sum arrayi-pmap arrayi-pmap-chunk arrayi-set "

@@ -55,7 +55,7 @@ system GrayGrid(n) {
 program Main() = scope {
   g → GrayGrid(4)
   iterate(60) {
-    iterate(50) { g.step() }
+    iterate(10) { g.step() }
     a → await call(g.s[0].gs, "snapshot")
     b → await call(g.s[1].gs, "snapshot")
     c → await call(g.s[2].gs, "snapshot")
@@ -63,5 +63,5 @@ program Main() = scope {
     frame → concat([a, b, c, d])
     emit_animation_frame("gray_scott", frame, 512, 512)
   }
-  emit_text("gray_scott", "3000 steps, 4 stripe workers, 512x512")
+  emit_text("gray_scott", "600 steps, 4 stripe workers, 512x512, explicit stencil")
 }

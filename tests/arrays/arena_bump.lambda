@@ -1,0 +1,8 @@
+include "lib/arena.lambda"
+a → (arena-new 16)
+r0 → (arena-alloc 0 4 16)
+r1 → (arena-alloc (arena-used r0) 5 16)
+a1 → (arena-set a (arena-offset r0) 0 1.5)
+a2 → (arena-set a1 (arena-offset r0) 1 2.5)
+a3 → (arena-set a2 (arena-offset r1) 0 9.0)
+[(int->float (arena-offset r0)), (int->float (arena-offset r1)), (int->float (arena-used r1)), (arena-get a3 (arena-offset r0) 0), (arena-get a3 (arena-offset r1) 0)]

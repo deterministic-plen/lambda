@@ -325,6 +325,30 @@ static void pi_emit_series(const char *name, PiVal x, PiVal y) {
     }
     fclose(f);
 }
+static void pi_emit_points(const char *name, PiVal x, PiVal y) {
+    FILE *f = open_out(name, ".csv");
+    if (!f) { printf("points %s: %ld\n", name, x.payload ? x.payload->n : 0); return; }
+    fprintf(f, "x,y\n");
+    if (x.kind == PI_PAYLOAD && y.kind == PI_PAYLOAD) {
+        long n = x.payload->n < y.payload->n ? x.payload->n : y.payload->n;
+        for (long i = 0; i < n; i++)
+            fprintf(f, "%.17g,%.17g\n", x.payload->v[i], y.payload->v[i]);
+    }
+    fclose(f);
+}
+
+static void pi_emit_bars(const char *name, PiVal x, PiVal y) {
+    FILE *f = open_out(name, ".csv");
+    if (!f) { printf("bars %s: %ld\n", name, x.payload ? x.payload->n : 0); return; }
+    fprintf(f, "x,y\n");
+    if (x.kind == PI_PAYLOAD && y.kind == PI_PAYLOAD) {
+        long n = x.payload->n < y.payload->n ? x.payload->n : y.payload->n;
+        for (long i = 0; i < n; i++)
+            fprintf(f, "%.17g,%.17g\n", x.payload->v[i], y.payload->v[i]);
+    }
+    fclose(f);
+}
+
 static void pi_emit_grid(const char *name, PiVal v, long rows, long cols) {
     FILE *f = open_out(name, ".csv");
     if (!f) { printf("grid %s: %ldx%ld\n", name, rows, cols); return; }

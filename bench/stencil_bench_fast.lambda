@@ -1,0 +1,36 @@
+; stencil_bench.lambda -- 5-point periodic heat stencil, 512 x 512 x 50.
+N → 512
+STEPS → 50
+ALPHA → 0.2
+
+field → (arrayf-pmap (λ p.
+  y → (/ p N)
+  x → (% p N)
+  dx → (- x (/ N 2))
+  dy → (- y (/ N 2))
+  (if (<= (+ (* dx dx) (* dy dy)) 4096) then 1.0 else 0.0)) (* N N))
+
+step → (λ a.
+  (arrayf-pmap
+    (λ p.
+      y → (/ p N)
+      x → (% p N)
+      xm → (% (+ x (- N 1)) N)
+      xp → (% (+ x 1) N)
+      ym → (% (+ y (- N 1)) N)
+      yp → (% (+ y 1) N)
+      c → (arrayf-get-unchecked a p)
+      lap → (- (+ (+ (arrayf-get-unchecked a (+ (* y N) xm))
+                     (arrayf-get-unchecked a (+ (* y N) xp)))
+                  (+ (arrayf-get-unchecked a (+ (* ym N) x))
+                     (arrayf-get-unchecked a (+ (* yp N) x))))
+               (* 4.0 c))
+      (+ c (* ALPHA lap)))
+    (* N N)))
+
+run → (λ s a.
+  if (>= s STEPS) then a
+  else (run (+ s 1) (step a)))
+
+v → (run 0 field)
+(println (arrayf-sum v))

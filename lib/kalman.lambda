@@ -1,0 +1,45 @@
+include "lib/matrix.lambda"
+
+; A 2D constant-velocity Kalman state: position, velocity and 2x2 covariance.
+data Kalman2 = K2 (p: Float, pv: Float, p00: Float, p01: Float, p11: Float)
+
+k2-predict → (λ k: Kalman2 dt: Float q: Float.
+  match k with K2 p pv p00 p01 p11:
+    f1 → (mat2 1.0 dt 0.0 1.0)
+    f2 → (mat2 1.0 dt 0.0 1.0)
+    f3 → (mat2 1.0 dt 0.0 1.0)
+    x → (matvec2 p pv)
+    P → (mat2 p00 p01 p01 p11)
+    Q → (mat2 q 0.0 0.0 q)
+    xp → (mat-mul f1 x)
+    pp → (mat-add (mat-mul f2 (mat-mul P (mat-transpose f3))) Q)
+    xv → (matvec2-values xp)
+    pv2 → (mat2-values pp)
+    (K2 (MatVec2Values-a xv) (MatVec2Values-b xv)
+        (Mat2Values-a pv2) (Mat2Values-b pv2) (Mat2Values-d pv2)))
+
+k2-update → (λ k: Kalman2 z: Float r: Float.
+  match k with K2 p pv p00 p01 p11:
+    x → (matvec2 p pv)
+    P1 → (mat2 p00 p01 p01 p11)
+    P2 → (mat2 p00 p01 p01 p11)
+    h1 → (mat-row2 1.0 0.0)
+    h2 → (mat-row2 1.0 0.0)
+    h3 → (mat-row2 1.0 0.0)
+    h4 → (mat-row2 1.0 0.0)
+    zm → (mat11 z)
+    rm → (mat11 r)
+    y → (mat-sub zm (mat-mul h1 x))
+    S → (mat-add (mat-mul h2 (mat-mul P1 (mat-transpose h3))) rm)
+    sv → (mat-scalar S)
+    K → (mat-scale (mat-mul P2 (mat-transpose h4)) (/ 1.0 sv))
+  ; Rebuild P for the covariance update; K already consumed its copy.
+    xnew → (mat-add (matvec2 p pv) (mat-mul K y))
+    P3 → (mat2 p00 p01 p01 p11)
+    I → (mat-id 2)
+    hn → (mat-row2 1.0 0.0)
+    Pnew → (mat-mul (mat-sub I (mat-mul K hn)) P3)
+    xv → (matvec2-values xnew)
+    pvv → (mat2-values Pnew)
+    (K2 (MatVec2Values-a xv) (MatVec2Values-b xv)
+        (Mat2Values-a pvv) (Mat2Values-b pvv) (Mat2Values-d pvv)))

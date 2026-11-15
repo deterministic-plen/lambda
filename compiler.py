@@ -27,6 +27,7 @@ Design summary
 from __future__ import annotations
 
 import math
+import os
 from typing import Dict, List, Optional, Set, Tuple
 
 from lambda_ast import (
@@ -37,7 +38,7 @@ from analysis import IMPURE_PRIMITIVES, PRIM_ARITY, top_level_order
 from errors import CompileError
 from parser import OP_CANON
 from runtime import RUNTIME_IR_DECLS
-from typecheck import BOX, F64, I64, TAdt, TCon, TList, TRecord, TSum, prune, rep_of
+from typecheck import BOX, F64, I64, TAdt, TCon, TFun, TList, TRecord, TSum, prune, rep_of
 
 PRIM_GLOBALS = {
     "add": "@lambda_prim_add",
@@ -277,7 +278,7 @@ class FunctionInfo:
         "lam", "id", "captures", "capture_reps", "capture_types",
         "params", "param_reps", "param_types", "ret_rep", "ret_type",
         "arity", "direct_name", "wrapper_names", "env_type_names",
-        "env_dtors", "generated", "generating", "param_borrows",
+        "raw_name", "raw_loop_name", "env_dtors", "generated", "generating", "param_borrows",
     )
 
     def __init__(self) -> None:
@@ -294,6 +295,8 @@ class FunctionInfo:
         self.arity = 0
         self.param_borrows = []
         self.direct_name = ""
+        self.raw_name = ""
+        self.raw_loop_name = ""
         self.wrapper_names: List[str] = []
         self.env_type_names: List[str] = []
         self.env_dtors: List[str] = []
@@ -403,6 +406,8 @@ class Compiler:
         self.array_meta: Dict[str, Tuple[str, str]] = {}
         self.atomic_rc = False
         self.moves_allowed: bool = True
+        self.inline_lambdas: Dict[int, Lam] = {}
+        self.inline_lambda_names: Dict[str, Lam] = {}
 
         self.string_counter = 0
 
@@ -901,6 +906,8 @@ class Compiler:
         self.scope_stack = []
         self.cleanup_stack = []
         self.terminated = False
+        self.inline_lambdas = {}
+        self.inline_lambda_names = {}
         self.moved_uids = set()
         self.moves_allowed = True
 
@@ -1477,6 +1484,10 @@ class Compiler:
             base.type = rt
             return self.compile_record_field(
                 RecordField(base, rt.name, node.field_name, "", node.loc))
+        if b.uid in self.inline_lambdas or b.name in self.inline_lambda_names:
+            raise CompileError(
+                f"a specialized pure function parameter '{b.name}' can only be called here",
+                node.loc)
         if b.kind == PRIM:
             if OP_CANON.get(b.name) == "argc":
                 res = self.new_reg()
@@ -1529,6 +1540,189 @@ class Compiler:
         val = Val(BOX, st.name, owned=True)
         self.retain(val)
         return val
+
+    def raw_wrapper(self, info: FunctionInfo) -> str:
+        if info.raw_name:
+            return info.raw_name
+        if any(rep.startswith("REC:") for rep in info.capture_reps):
+            raise CompileError("product captures are not supported by raw pmap")
+        info.raw_name = f"@rawpm_{info.id}"
+        ty, fields, cap_idx, _ = self._env_layout(info, 1)
+        b = IRBuilder()
+        b.raw(f"define internal double {info.raw_name}(i8* %env_raw, i64 %i) {{")
+        b.label("entry")
+        env = b.new_reg("env")
+        b.emit(f"{env} = bitcast i8* %env_raw to {ty}*")
+        args = []
+        for idx, cap, rep in zip(cap_idx, info.captures, info.capture_reps):
+            field = self._load_env_field(b, ty, env, idx, self.rep_type(rep))
+            if rep == BOX:
+                b.emit(f"call void @lambda_retain(%Value* {field})")
+                args.append(f"%Value* {field}")
+            elif rep == I64:
+                args.append(f"i64 {field}")
+            elif rep == F64:
+                args.append(f"double {field}")
+            else:
+                raise CompileError("raw pmap capture layout unsupported")
+        args.append("i64 %i")
+        res = b.new_reg("pmres")
+        b.emit(f"{res} = call double {info.direct_name}({', '.join(args)})")
+        b.emit(f"ret double {res}")
+        b.raw("}")
+        self.functions.append(b.render())
+        return info.raw_name
+
+    def raw_loop_wrapper(self, info: FunctionInfo) -> str:
+        if info.raw_loop_name:
+            return info.raw_loop_name
+        if any(rep.startswith("REC:") for rep in info.capture_reps):
+            raise CompileError("product captures are not supported by raw pmap")
+        info.raw_loop_name = f"@rawloop_{info.id}"
+        ty, fields, cap_idx, _ = self._env_layout(info, 1)
+        old_builder, old_ctx = self.builder, self.ctx
+        old_scopes, old_cleanup = self.scope_stack, self.cleanup_stack
+        old_term, old_meta = self.terminated, self.array_meta
+        old_lam = self.current_lam
+        b = IRBuilder()
+        self.builder = b
+        self.ctx = FnContext(F64, info.lam.body.type, 0, [], is_direct=False)
+        self.current_lam = info.lam
+        self.terminated = False
+        self.array_meta = {}
+        scope: Dict[int, Storage] = {}
+        self.scope_stack = [scope]
+        self.cleanup_stack = [[]]
+        b.raw(f"define internal void {info.raw_loop_name}(i8* %env_raw, double* %data, i64 %lo, i64 %hi) {{")
+        b.label("entry")
+        env = b.new_reg("env")
+        b.emit(f"{env} = bitcast i8* %env_raw to {ty}*")
+        for idx, cap, rep in zip(cap_idx, info.captures, info.capture_reps):
+            field = self._load_env_field(b, ty, env, idx, self.rep_type(rep))
+            scope[cap.uid] = Storage(rep, field)
+        i_slot = b.new_alloca("i64")
+        b.emit(f"store i64 %lo, i64* {i_slot}")
+        test = b.new_label("rltest")
+        body = b.new_label("rlbody")
+        exit_l = b.new_label("rlexit")
+        b.emit(f"br label %{test}")
+        b.label(test)
+        iv = b.new_reg("i")
+        b.emit(f"{iv} = load i64, i64* {i_slot}")
+        cond = b.new_reg("c")
+        b.emit(f"{cond} = icmp slt i64 {iv}, %hi")
+        b.emit(f"br i1 {cond}, label %{body}, label %{exit_l}")
+        b.label(body)
+        param = info.params[0]
+        scope[param.uid] = Storage(I64, iv)
+        res = self.compile(info.lam.body, is_tail=False)
+        if res is None:
+            raise CompileError("raw pmap body produced no value", info.lam.loc)
+        res = self.coerce(res, F64, info.lam.body.type)
+        ptr = b.new_reg("p")
+        b.emit(f"{ptr} = getelementptr double, double* %data, i64 {iv}")
+        b.emit(f"store double {res.name}, double* {ptr}")
+        nxt = b.new_reg("n")
+        b.emit(f"{nxt} = add i64 {iv}, 1")
+        b.emit(f"store i64 {nxt}, i64* {i_slot}")
+        b.emit(f"br label %{test}")
+        b.label(exit_l)
+        b.emit("ret void")
+        b.raw("}")
+        self.functions.append(b.render())
+        self.builder, self.ctx = old_builder, old_ctx
+        self.scope_stack, self.cleanup_stack = old_scopes, old_cleanup
+        self.terminated, self.array_meta = old_term, old_meta
+        self.current_lam = old_lam
+        return info.raw_loop_name
+
+    def compile_pmap_inline_into(self, lam: Lam, dst: Val, n: Val) -> Val:
+        info = self.ensure_function(lam)
+        param = info.params[0]
+        i_slot = self.builder.new_alloca("i64")
+        self.emit_inst(f"store i64 0, i64* {i_slot}")
+        chk = self.new_reg()
+        self.emit_inst(f"{chk} = call %Value* @lambda_arrayf_require_len(%Value* {dst.name}, i64 {n.name})")
+        test = self.new_label("pmitest")
+        body = self.new_label("pmibody")
+        exit_l = self.new_label("pmiexit")
+        self.emit_inst(f"br label %{test}")
+        self.builder.label(test)
+        i = self.new_reg("pmi")
+        self.emit_inst(f"{i} = load i64, i64* {i_slot}")
+        cond = self.new_reg("pmic")
+        self.emit_inst(f"{cond} = icmp ult i64 {i}, {n.name}")
+        self.emit_inst(f"br i1 {cond}, label %{body}, label %{exit_l}")
+        self.builder.label(body)
+        self.push_scope()
+        self.scope_stack[-1][param.uid] = Storage(I64, i)
+        res = self.compile(lam.body, is_tail=False)
+        if res is None:
+            raise CompileError("pmap-into body produced no value", lam.loc)
+        res = self.coerce(res, F64, lam.body.type)
+        ptr = self._array_element_ptr(dst, Val(I64, i), "double")
+        self.emit_inst(f"store double {res.name}, double* {ptr}")
+        self.pop_scope()
+        nxt = self.new_reg("pmin")
+        self.emit_inst(f"{nxt} = add i64 {i}, 1")
+        self.emit_inst(f"store i64 {nxt}, i64* {i_slot}")
+        self.emit_inst(f"br label %{test}")
+        self.builder.label(exit_l)
+        return dst
+
+    def compile_pmap_parallel(self, lam: Lam, n: Val) -> Val:
+        info = self.ensure_function(lam)
+        if info.param_reps != [I64] or info.ret_rep != F64 or any(info.param_borrows):
+            raise CompileError("raw parallel pmap requires one Int parameter and Float result")
+        raw = self.raw_loop_wrapper(info)
+        ty, fields, cap_idx, _ = self._env_layout(info, 1)
+        env = self._alloc_env(self.builder, ty, fields, info.env_dtors[0])
+        for idx, cap, rep, ctype in zip(cap_idx, info.captures,
+                                        info.capture_reps, info.capture_types):
+            val = self._capture_value(cap, lam.loc)
+            val = self.coerce(val, rep, ctype)
+            if rep == I64:
+                self._store_env_field(self.builder, ty, env, idx, "i64", val.name)
+            elif rep == F64:
+                self._store_env_field(self.builder, ty, env, idx, "double", val.name)
+            else:
+                val = self.ensure_owned(val)
+                self._store_env_field(self.builder, ty, env, idx, "%Value*", val.name)
+        env_raw = self.new_reg()
+        self.emit_inst(f"{env_raw} = bitcast {ty}* {env} to i8*")
+        code = self.new_reg()
+        self.emit_inst(f"{code} = bitcast ptr {raw} to ptr")
+        res = self.new_reg()
+        self.emit_inst(
+            f"{res} = call %Value* @lambda_arrayf_pmap_raw_loop(i8* {env_raw}, ptr {code}, i64 {n.name})")
+        return Val(BOX, res, owned=True)
+
+    def compile_pmap_raw(self, lam: Lam, n: Val) -> Val:
+        info = self.ensure_function(lam)
+        if info.param_reps != [I64] or info.ret_rep != F64 or any(info.param_borrows):
+            raise CompileError("raw pmap requires one non-borrowed Int parameter and Float result")
+        raw = self.raw_wrapper(info)
+        ty, fields, cap_idx, _ = self._env_layout(info, 1)
+        env = self._alloc_env(self.builder, ty, fields, info.env_dtors[0])
+        for idx, cap, rep, ctype in zip(cap_idx, info.captures,
+                                        info.capture_reps, info.capture_types):
+            val = self._capture_value(cap, lam.loc)
+            val = self.coerce(val, rep, ctype)
+            if rep == I64:
+                self._store_env_field(self.builder, ty, env, idx, "i64", val.name)
+            elif rep == F64:
+                self._store_env_field(self.builder, ty, env, idx, "double", val.name)
+            else:
+                val = self.ensure_owned(val)
+                self._store_env_field(self.builder, ty, env, idx, "%Value*", val.name)
+        env_raw = self.new_reg()
+        self.emit_inst(f"{env_raw} = bitcast {ty}* {env} to i8*")
+        code = self.new_reg()
+        self.emit_inst(f"{code} = bitcast ptr {raw} to ptr")
+        res = self.new_reg()
+        self.emit_inst(
+            f"{res} = call %Value* @lambda_arrayf_pmap_raw(i8* {env_raw}, ptr {code}, i64 {n.name})")
+        return Val(BOX, res, owned=True)
 
     def _capture_value(self, b: Binding, loc) -> Val:
         if b.kind == PRIM:
@@ -2385,21 +2579,118 @@ class Compiler:
             cur = cur.func
         return cur, args
 
+    def pure_function_arg(self, arg: Node) -> bool:
+        if isinstance(arg, Lam):
+            return self.lambda_purity.get(id(arg), False)
+        if isinstance(arg, Var) and arg.binding is not None:
+            b = arg.binding
+            if b.pure:
+                return True
+            if b.is_function and b.lam is not None:
+                return self.lambda_purity.get(id(b.lam), False)
+        return False
+
+    def check_pure_arguments(self, lam: Lam, args, loc) -> None:
+        flags = getattr(lam, "param_pure", [])
+        for i, flag in enumerate(flags):
+            if not flag or i >= len(args):
+                continue
+            if not self.pure_function_arg(args[i]):
+                raise CompileError(
+                    "a parameter declared 'pure' requires a provably pure "
+                    "function argument", getattr(args[i], "loc", loc))
+
     def compile_app(self, node: App, is_tail: bool) -> Optional[Val]:
         head, args = self.flatten_app(node)
         if isinstance(head, Var) and head.binding is not None:
             b = head.binding
+            if b.uid in self.inline_lambdas or b.name in self.inline_lambda_names:
+                actual = self.inline_lambdas.get(b.uid) or self.inline_lambda_names.get(b.name)
+                return self.compile_inline_call(actual, args, node)
             if b.kind == PRIM:
                 return self.compile_prim_app(b, args, node, is_tail)
             if b.is_function and b.lam is not None:
+                self.check_pure_arguments(b.lam, args, node.loc)
+                if b.name == "v2-map" and self.can_inline_v2_map(b.lam, args):
+                    return self.compile_inline_call(b.lam, args, node)
                 return self.compile_named_call(b.lam, args, node, is_tail)
         if isinstance(head, Lam):
+            self.check_pure_arguments(head, args, node.loc)
             return self.compile_named_call(head, args, node, is_tail)
         fn = self.compile(head, is_tail=False)
         if fn is None:
             return None
         fn = self.coerce(fn, BOX, head.type)
         return self.apply_closure_chain(fn, args, node.type, is_tail)
+
+    def inline_lambda_arg(self, arg: Node) -> Optional[Lam]:
+        if isinstance(arg, Lam):
+            return arg
+        if isinstance(arg, Var) and arg.binding is not None:
+            b = arg.binding
+            if b.is_function and b.lam is not None:
+                return b.lam
+        return None
+
+    def can_inline_v2_map(self, lam: Lam, args: List[Node]) -> bool:
+        info = self.lam_infos.get(id(lam))
+        if info is None:
+            info = self.ensure_function(lam)
+        if info is None or len(args) != info.arity or any(info.param_borrows):
+            return False
+        if self.dynamic:
+            return False
+        # Only the known generic vector map is specialized for now.  This
+        # avoids the ownership complexities of a general inliner.
+        for arg, ptype in zip(args, info.param_types):
+            pt = prune(ptype)
+            if isinstance(pt, TFun):
+                actual = self.inline_lambda_arg(arg)
+                if actual is None or not self.lambda_purity.get(id(actual), False):
+                    return False
+            elif not isinstance(arg, (Var, Lit)):
+                return False
+        return True
+
+    def compile_inline_call(self, lam: Lam, args: List[Node], node: Node) -> Optional[Val]:
+        info = self.lam_infos.get(id(lam))
+        if info is None:
+            info = self.ensure_function(lam)
+        if info is None:
+            return None
+        saved = dict(self.inline_lambdas)
+        saved_names = dict(self.inline_lambda_names)
+        boxed_args: List[Val] = []
+        self.push_scope()
+        try:
+            for arg, param, ptype, rep in zip(args, info.params,
+                                              info.param_types, info.param_reps):
+                pt = prune(ptype)
+                if isinstance(pt, TFun):
+                    actual = self.inline_lambda_arg(arg)
+                    if actual is None:
+                        raise CompileError("pure function argument required", node.loc)
+                    self.inline_lambdas[param.uid] = actual
+                    self.inline_lambda_names[param.name] = actual
+                else:
+                    val = self.compile(arg, is_tail=False)
+                    if val is None:
+                        raise CompileError("inline argument produced no value", node.loc)
+                    val = self.coerce(val, rep, arg.type)
+                    if rep == BOX:
+                        boxed_args.append(val)
+                    self.scope_stack[-1][param.uid] = Storage(rep, val.name)
+            res = self.compile(lam.body, is_tail=False)
+            if res is None:
+                raise CompileError("inlined function produced no value", node.loc)
+            res = self.coerce(res, rep_of(node.type), node.type)
+            for v in boxed_args:
+                self.release(v)
+            return res
+        finally:
+            self.pop_scope()
+            self.inline_lambdas = saved
+            self.inline_lambda_names = saved_names
 
     def compile_named_call(self, lam: Lam, args: List[Node], node: Node,
                            is_tail: bool) -> Optional[Val]:
@@ -2583,6 +2874,68 @@ class Compiler:
     # ------------------------------------------------------------------
     # primitives
     # ------------------------------------------------------------------
+    def pmap_inline_lambda(self, arg: Node, ret_rep: str = F64) -> Optional[Lam]:
+        if isinstance(arg, Lam):
+            lam = arg
+        elif isinstance(arg, Var) and arg.binding is not None:
+            lam = arg.binding.lam
+        else:
+            return None
+        if lam is None or len(lam.params) != 1:
+            return None
+        info = self.ensure_function(lam)
+        if info.param_reps != [I64] or info.ret_rep != ret_rep:
+            return None
+        for cap in info.captures:
+            if self.find_storage(cap.uid) is None and cap.uid not in self.inline_lambdas:
+                return None
+        return lam
+
+    def compile_pmap_inline(self, lam: Lam, n: Val, ret_rep: str = F64) -> Val:
+        """Emit a raw i64 loop for a pure one-parameter pmap lambda.
+
+        This removes the boxed index and the per-element closure call.  The
+        lambda body is compiled once inside the loop with the parameter bound
+        to an i64 phi value; captures are read from the caller's scope.
+        """
+        out = self.new_reg("pmout")
+        if ret_rep == I64:
+            self.emit_inst(f"{out} = call %Value* @lambda_arrayi_new_uninit(i64 {n.name})")
+            llty, zero = "i64", "0"
+        else:
+            self.emit_inst(f"{out} = call %Value* @lambda_arrayf_new_uninit(i64 {n.name})")
+            llty, zero = "double", "0.0"
+        outv = Val(BOX, out, owned=True)
+        param = lam.param_bindings[0]
+        i_slot = self.builder.new_alloca("i64")
+        self.emit_inst(f"store i64 0, i64* {i_slot}")
+        test = self.new_label("pmtest")
+        body = self.new_label("pmbody")
+        exit_l = self.new_label("pmexit")
+        self.emit_inst(f"br label %{test}")
+        self.builder.label(test)
+        i = self.new_reg("pmi")
+        self.emit_inst(f"{i} = load i64, i64* {i_slot}")
+        cond = self.new_reg("pmc")
+        self.emit_inst(f"{cond} = icmp ult i64 {i}, {n.name}")
+        self.emit_inst(f"br i1 {cond}, label %{body}, label %{exit_l}")
+        self.builder.label(body)
+        self.push_scope()
+        self.scope_stack[-1][param.uid] = Storage(I64, i)
+        res = self.compile(lam.body, is_tail=False)
+        if res is None:
+            raise CompileError("pmap inline body produced no value", lam.loc)
+        res = self.coerce(res, ret_rep, lam.body.type)
+        ptr = self._array_element_ptr(outv, Val(I64, i), llty)
+        self.emit_inst(f"store {llty} {res.name}, {llty}* {ptr}")
+        self.pop_scope()
+        nxt = self.new_reg("pmn")
+        self.emit_inst(f"{nxt} = add i64 {i}, 1")
+        self.emit_inst(f"store i64 {nxt}, i64* {i_slot}")
+        self.emit_inst(f"br label %{test}")
+        self.builder.label(exit_l)
+        return outv
+
     def compile_prim_app(self, b: Binding, args: List[Node], node: App,
                          is_tail: bool) -> Optional[Val]:
         op = OP_CANON.get(b.name)
@@ -2620,9 +2973,8 @@ class Compiler:
         if op == "arrayf_pmap":
             if len(args) < 2:
                 raise CompileError(
-                    "arrayf-pmap must be applied to a provably pure Int -> Float "
-                    "function and a length", node.loc)
-            self.check_pmap_function(args[0], node.loc)
+                    "arrayf-pmap must be applied to an Int -> Float function "
+                    "and a length", node.loc)
         if op == "arrayi_pmap":
             if len(args) < 2:
                 raise CompileError(
@@ -2673,22 +3025,36 @@ class Compiler:
         clo = self.primitive_global(b)
         return self.apply_closure_chain(clo, args, node.type, is_tail)
 
-    def check_pmap_function(self, arg: Node, loc) -> None:
-        ok = False
+    def pmap_function_pure(self, arg: Node) -> bool:
         if isinstance(arg, Lam):
-            ok = self.lambda_purity.get(id(arg), False)
-        elif isinstance(arg, Var) and arg.binding is not None:
+            return self.lambda_purity.get(id(arg), False)
+        if isinstance(arg, Var) and arg.binding is not None:
             b = arg.binding
+            if b.pure:
+                return True
             if b.is_function and b.lam is not None:
-                ok = self.lambda_purity.get(id(b.lam), False)
-            elif b.kind == PRIM:
+                return self.lambda_purity.get(id(b.lam), False)
+            if b.kind == PRIM:
                 op = OP_CANON.get(b.name)
-                ok = (op is not None and op not in IMPURE_PRIMITIVES
-                      and op not in ("map", "pmap"))
-        if not ok:
+                return (op is not None and op not in IMPURE_PRIMITIVES
+                        and op not in ("map", "pmap"))
+        return False
+
+    def check_pmap_function(self, arg: Node, loc) -> None:
+        if not self.pmap_function_pure(arg):
             raise CompileError(
                 "pmap requires a provably pure function: no printing, terminal "
                 "input, or calls through unknown function values", loc)
+
+    def const_int_value(self, node: Node) -> Optional[int]:
+        """Resolve a literal or a top-level Int literal binding."""
+        if isinstance(node, Lit) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, Var) and node.binding is not None:
+            d = node.binding.def_node
+            if d is not None and isinstance(d.value, Lit) and isinstance(d.value.value, int):
+                return d.value.value
+        return None
 
     def _prim_arg(self, node: Node, rep: str, hint) -> Val:
         val = self.compile(node, is_tail=False)
@@ -3046,12 +3412,12 @@ class Compiler:
             # A literal non-zero divisor (other than the INT64_MIN/-1 edge)
             # can use the native instruction; dynamic divisors keep the
             # checked helper so division by zero remains a clean error.
-            literal = args[1]
-            lit_value = getattr(literal, "value", None)
-            if (isinstance(literal, Lit) and isinstance(lit_value, int)
-                    and lit_value != 0 and lit_value != -1):
+            lit_value = self.const_int_value(args[1])
+            if lit_value is not None and lit_value != 0 and lit_value != -1:
                 inst = "sdiv" if op == "div" else "srem"
-                self.emit_inst(f"{res} = {inst} i64 {a.name}, {b.name}")
+                div = self.new_reg()
+                self.emit_inst(f"{div} = add i64 0, {lit_value}")
+                self.emit_inst(f"{res} = {inst} i64 {a.name}, {div}")
                 return Val(I64, res)
             fn = "lambda_div_i64" if op == "div" else "lambda_mod_i64"
             self.emit_inst(f"{res} = call i64 @{fn}(i64 {a.name}, i64 {b.name})")
@@ -3338,16 +3704,38 @@ class Compiler:
             self.emit_inst(f"{res} = call %Value* @lambda_op_immortalize(%Value* {a.name})")
             return self.coerce(Val(BOX, res, owned=True), self.node_rep(node), node.type)
         if op == "arrayi_pmap":
-            f = self._prim_arg(args[0], BOX, args[0].type)
             n = self._prim_arg(args[1], I64, args[1].type)
+            pure = self.pmap_function_pure(args[0])
+            inline = self.pmap_inline_lambda(args[0], I64) if pure else None
+            if inline is not None:
+                return self.compile_pmap_inline(inline, n, I64)
+            f = self._prim_arg(args[0], BOX, args[0].type)
             res = self.new_reg()
             self.emit_inst(
                 f"{res} = call %Value* @lambda_arrayi_pmap(%Value* {f.name}, i64 {n.name})")
             return Val(BOX, res, owned=True)
-        if op == "arrayf_pmap":
+        if op == "arrayf_pmap_into":
+            n = self._prim_arg(args[2], I64, args[2].type)
+            pure = self.pmap_function_pure(args[0])
+            inline = self.pmap_inline_lambda(args[0], F64) if pure else None
+            dst = self._prim_arg(args[1], BOX, args[1].type)
+            if inline is not None:
+                return self.compile_pmap_inline_into(inline, dst, n)
             f = self._prim_arg(args[0], BOX, args[0].type)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_arrayf_pmap_into(%Value* {f.name}, %Value* {dst.name}, i64 {n.name})")
+            return Val(BOX, res, owned=True)
+        if op == "arrayf_pmap":
             n = self._prim_arg(args[1], I64, args[1].type)
-            gpu = self._gpu_pmap_source(args[0])
+            pure = self.pmap_function_pure(args[0])
+            inline = self.pmap_inline_lambda(args[0]) if pure else None
+            if inline is not None:
+                if os.environ.get("LAMBDA_RAWLOOP"):
+                    return self.compile_pmap_parallel(inline, n)
+                return self.compile_pmap_inline(inline, n, F64)
+            f = self._prim_arg(args[0], BOX, args[0].type)
+            gpu = self._gpu_pmap_source(args[0]) if pure else None
             res = self.new_reg()
             if gpu is not None:
                 source, cap = gpu
@@ -3364,9 +3752,12 @@ class Compiler:
                     self.emit_inst(
                         f"{res} = call %Value* @lambda_gpu_arrayf_pmap("
                         f"%Value* {f.name}, i64 {n.name}, i8* {gid})")
-            else:
+            elif pure:
                 self.emit_inst(
                     f"{res} = call %Value* @lambda_arrayf_pmap(%Value* {f.name}, i64 {n.name})")
+            else:
+                self.emit_inst(
+                    f"{res} = call %Value* @lambda_arrayf_map(%Value* {f.name}, i64 {n.name})")
             return Val(BOX, res, owned=True)
         if op == "arrayi_pmap_chunk":
             f = self._prim_arg(args[0], BOX, args[0].type)
@@ -3398,6 +3789,14 @@ class Compiler:
             res = self.new_reg()
             self.emit_inst(f"{res} = call %Value* {fn}({sig})")
             return Val(BOX, res, owned=True)
+        if op == "arrayf_get_unchecked":
+            a = self._array_borrow(args[0])
+            idx = self._prim_arg(args[1], I64, args[1].type)
+            ptr = self._array_element_ptr(a, idx, "double")
+            raw = self.new_reg()
+            self.emit_inst(f"{raw} = load double, double* {ptr}")
+            self.release(a)
+            return Val(F64, raw)
         if op in ("arrayf_get", "arrayi_get", "arrayb_get",
                   "arrayf_get_ro", "arrayi_get_ro", "arrayb_get_ro"):
             a = self._array_borrow(args[0])
@@ -3419,31 +3818,6 @@ class Compiler:
                 self.emit_inst(f"{raw} = load {llty}, {llty}* {ptr}")
             self.release(a)
             return Val(F64 if llty == "double" else I64, raw)
-        if op == "gray_stripe":
-            vals = [self._prim_arg(args[i], BOX, args[i].type) for i in (0, 1, 2)]
-            w = self._prim_arg(args[3], I64, args[3].type)
-            r = self._prim_arg(args[4], I64, args[4].type)
-            fl = [self._prim_arg(args[i], F64, args[i].type) for i in range(5, 10)]
-            res = self.new_reg()
-            self.emit_inst(
-                f"{res} = call %Value* @lambda_gray_stripe(%Value* {vals[0].name}, "
-                f"%Value* {vals[1].name}, %Value* {vals[2].name}, i64 {w.name}, i64 {r.name}, "
-                f"double {fl[0].name}, double {fl[1].name}, double {fl[2].name}, "
-                f"double {fl[3].name}, double {fl[4].name})")
-            return Val(BOX, res, owned=True)
-        if op == "gray_scott":
-            a = self._move_array_param(args[0])
-            if a is None:
-                a = self._prim_arg(args[0], BOX, args[0].type)
-            n = self._prim_arg(args[1], I64, args[1].type)
-            vals = [self._prim_arg(x, F64, x.type) for x in args[2:7]]
-            steps = self._prim_arg(args[7], I64, args[7].type)
-            res = self.new_reg()
-            self.emit_inst(
-                f"{res} = call %Value* @lambda_gray_scott(%Value* {a.name}, i64 {n.name}, "
-                f"double {vals[0].name}, double {vals[1].name}, double {vals[2].name}, "
-                f"double {vals[3].name}, double {vals[4].name}, i64 {steps.name})")
-            return Val(BOX, res, owned=True)
         if op in ("arrayf_set", "arrayi_set", "arrayb_set"):
             if (isinstance(args[0], Var) and args[0].binding is not None
                     and args[0].binding.borrowed):

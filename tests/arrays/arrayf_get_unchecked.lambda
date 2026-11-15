@@ -1,0 +1,4 @@
+a → (arrayf 3 0.0)
+a1 → (arrayf-set a 0 1.5)
+a2 → (arrayf-set a1 1 2.5)
+[(arrayf-get-unchecked a2 0), (arrayf-get-unchecked a2 1)]

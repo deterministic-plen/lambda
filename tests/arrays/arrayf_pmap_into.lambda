@@ -1,0 +1,3 @@
+a → (arrayf 5 0.0)
+b → (arrayf-pmap-into (λ i. (* (int->float i) (int->float i))) a 5)
+[(arrayf-get b 0), (arrayf-get b 1), (arrayf-get b 2), (arrayf-get b 3), (arrayf-get b 4)]

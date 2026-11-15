@@ -87,7 +87,7 @@ protocol Drone {
 
 ```kappa
 program Main() = scope {
-  w → Pool("workers/drone.lambda", 1, {cpus: 1}).recruit(1)
+  w → Pool("workers/drone_matrix.lambda", 1, {cpus: 1}).recruit(1)
   await call(w, "init", 0.0)
   iterate(200) {
     await call(w, "tick")
@@ -156,6 +156,50 @@ Implemented combinators: `couple_line`, `couple_ring_block`,
 `allreduce(sum|max)`, `split`, and `zip` are available; the rest of the §14
 catalog is planned, not shipped.
 
+### 2D stencil tiles
+
+[`lib/grid_stencil.pi`](lib/grid_stencil.pi) is the reusable 2D pattern:
+`GridTile` owns the halo plumbing, not the simulation.  A `partition(nx, ny,
+rows, cols)` value gives each instance its origin and dimensions; the element
+passes that descriptor to the worker, so the worker never computes its own
+placement.  For each step the element:
+
+1. calls the worker's `step`, which returns the complete updated tile;
+2. extracts the four edges with `halo2`;
+3. sends them to the four neighbours through `couple_grid2d_block`;
+4. receives the neighbours' edges and calls the worker's `patch`.
+
+Adding a new stencil simulation means writing a worker with `init`, `step`,
+`patch`, and `snapshot`; its `step` is an ordinary matrix update.  No element,
+system, channel, or halo code is needed.
+
+[`examples/gray_scott_tiled.pi`](examples/gray_scott_tiled.pi) instantiates a
+2x2 tile grid (four subregion workers), collects their snapshots with
+`snapshot_grid` (collect + stitch in one call), and uses
+[`workers/gray_scott_tile.lambda`](examples/workers/gray_scott_tile.lambda),
+which performs an explicit five-point Laplacian update.  `gray_scott.pi` is
+the single-worker explicit stencil; `gray_scott_multi.pi` is the horizontal-stripe
+version.  None of them uses a domain-specific numerical primitive.
+
+### 2D heat stress test
+
+[`lib/heat_stencil.pi`](lib/heat_stencil.pi) is the one-field version of the
+same pattern.  [`examples/heat2d_tiled.pi`](examples/heat2d_tiled.pi) runs a
+**2048x2048** field on **16 workers** (4x4 subregions of 512x512), seeded with
+a central circle.  Each worker performs an explicit five-point Laplacian
+`u' = u + alpha*dt*lap(u)`; Pi owns the halo exchange.  The whole distributed field is assembled with two calls, not one per tile:
+
+```kappa
+frame → snapshot_grid(g.g, 4, 4, 512, 512)
+```
+
+On the reference machine the 4x4 run (16 workers) takes about 18 s for 20
+explicit steps and writes a 335 MB raw frame sequence; the report keeps a
+120-frame/256 px preview.  The same 2048x2048 field on **one** worker takes
+about 117 s, so the tiled version is roughly 6.5x faster on this workload.
+That is the point of the stress test: the seam is visible, but the partition
+is doing useful work.
+
 ## The Lambda seam
 
 A worker is an ordinary Lambda program compiled with `--input --data`. Pi starts
@@ -176,6 +220,8 @@ file also defines readable `op-<name>` and `error-<name>` constants, so worker
 dispatch says `(== op op-step)` and `error-unknown_op` instead of magic
 integers.
 
+Workers may instead include `tile_shim.lambda`; it owns the request loop and dispatch, and the worker supplies only `init`, `step`, `payload`, `patch`, and `snapshot` hooks. `gray_scott_tile.lambda` and `heat_tile.lambda` are written this way.
+
 `Pool` resources are `{cpus, memory}` plus optional `{gpus: 1}`. A GPU resource
 sets `LAMBDA_GPU=1` for that worker; only `arrayf-pmap` uses it. Multiple GPUs
 and explicit VRAM budgets are rejected as `Unsupported` (a one-GPU extension to
@@ -191,18 +237,39 @@ Pi does not compute with payloads, but it can name them:
 
 ```kappa
 emit_series("temperature", xs, ys)
+emit_points("bodies", xs, ys)
+emit_bars("bond_lengths", centers, counts)
 emit_grid("field", values, 200, 200)
 emit_text("status", "converged")
+emit_animation_frame("density", values, rows, cols)
+
+-- 2D tile assembly helpers used by the generic GridTile element
+halo2(tile, rows, cols, side)   -- one edge: U edge then V edge
+hstack(left, right, rows, cols)
+vstack(top, bottom, rows, cols)
+partition(nx, ny, rows, cols)      -- per-tile [ox, oy, rows, cols, grid_rows, grid_cols]
+snapshot_grid(g.g, nx, ny, rows, cols)  -- collect + stitch the full grid
+collect(g.g, "snapshot")           -- every worker snapshot, row-major
+halo1(tile, rows, cols, side)       -- one scalar-field edge
+stitch_grid(tiles, nx, ny, rows, cols)
 ```
 
 With `--out DIR`:
 
 ```
-DIR/results.json     artifact manifest (names and kinds)
-DIR/<name>.csv       series: x,y; grid: row,col,value
-DIR/<name>.svg       line plot or heatmap (standalone, no dependencies)
-DIR/report.html      one self-contained page
+DIR/results.json            artifact manifest (names and kinds)
+DIR/<name>.csv              series/points/bars: x,y; grid: row,col,value
+DIR/<name>.svg              line/scatter/bar plot or heatmap
+DIR/<name>.frames.bin       full-resolution animation frames
+DIR/frames/<name>_preview_*.bmp  bounded, browser-displayable preview
+DIR/report.html             one page with plots and an animation player
 ```
+
+The report player needs no Pillow, GIF encoder, WebGL, or extra process: it
+switches between local BMP previews with play/pause/step controls. Long runs are
+downsampled to at most 120 frames at 256 px for the report; the full-resolution
+`.frames.bin` remains beside it. `emit_points` and `emit_bars` are generic 2D
+layers, so phase-space scatter plots and histograms do not need a new viewer.
 
 `emit` still prints small values; payloads above 32 values are abbreviated.
 Reporting is off unless `--out` is given, so the coordination path pays nothing
@@ -210,9 +277,9 @@ for it.
 
 ![Gray-Scott, 4 Pi workers](examples/gray_scott_multi_512.gif)
 
-The four-worker Gray-Scott example runs 3000 Euler steps at 512×512 and emits
-one frame every 50 steps.  The GIF above was produced by `gray_scott_multi.pi`
-through the C++ runtime; `gray_scott.pi` is the single-worker GPU variant.
+The four-worker Gray-Scott example runs 600 explicit Euler steps at 512×512
+and emits one frame every 10 steps.  The GIF above is a checked-in illustration
+from the earlier fused run; the current examples use ordinary Lambda stencils.
 
 ## Examples
 
@@ -221,12 +288,11 @@ through the C++ runtime; `gray_scott.pi` is the single-worker GPU variant.
 | `examples/heat.pi` | 1D heat chain, stateful workers, resume/restart, snapshots |
 | `examples/reduce.pi` | pool + `par for` + allreduce over real Lambda workers |
 | `examples/field.pi` | `arrayf-pmap` field, heatmap report |
-| `examples/drone.pi` | simulated drone, scalar Kalman filter, controller |
-| `examples/drone_scheduled.pi` | controller as a periodic `serve @ rate` task |
+| `examples/drone.pi` | simulated drone, matrix Kalman filter, controller |
 | `examples/report_demo.pi` | smallest artifact-producing program |
 | `examples/heat2d_cells.pi` | 4-neighbour halo grid; one local update per cell |
-| `examples/gray_scott.pi` | GPU-backed Gray-Scott, single worker, 512×512 |
-| `examples/gray_scott_multi.pi` | Gray-Scott on four stripe workers, 512×512, 60-frame animation |
+| `examples/gray_scott.pi` | explicit Gray-Scott stencil, single worker, 512×512 |
+| `examples/gray_scott_multi.pi` | explicit Gray-Scott on four stripe workers, 512×512 |
 
 ## C++ runtime
 
@@ -289,7 +355,7 @@ not a proof.
 | `allreduce`, `split`, `zip` | ✅ minimal |
 | result artifacts and HTML/SVG reports | ✅ |
 | animation artifacts (`emit_animation_frame`) | ✅ |
-| GPU-backed Gray-Scott primitive (one device) | ✅ experimental |
+| explicit Gray-Scott stencils in Lambda (no domain primitive) | ✅ |
 | scheduler checks + task table | ✅ static `pi analyze` |
 | AOT linear subset (native C, no Python) | ✅ `pi aot` |
 | C++ AST interpreter (channels/par/serve/par-for/select, systems, collectives, reports) | ✅ `pi cpp` |
@@ -306,8 +372,8 @@ not a proof.
   process handles.
 * **No payload computation.** Pi routes `Payload`; payload arithmetic is a
   runtime fault. Coordination metadata arithmetic is allowed.
-* **One-GPU, one primitive.** GPU is an extension for `arrayf-pmap`, not a GPU
-  language; multi-GPU is not implemented.
+* **GPU is a generic pmap backend only.** There are no domain-specific
+  numerical primitives; multi-GPU is not implemented.
 * **No PING/PONG.** Liveness is process-level; a running call cannot be
   interrupted, only the worker can be killed at scope exit.
 * Python 3.10 is best-effort; target is ≥3.11 (frontend only).

@@ -1,0 +1,8 @@
+include "lib/vec3.lambda"
+include "lib/field.lambda"
+N → 2
+f0 → (field-new 3 N)
+f1 → (field-set f0 3 N 0 2 9.0)
+a → (Vec3 1.0 2.0 3.0)
+b → (Vec3 4.0 5.0 6.0)
+[(field-get f1 3 N 0 2), (v3-dot a b), (Vec3-x (v3-add a b))]

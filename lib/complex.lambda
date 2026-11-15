@@ -61,3 +61,31 @@ Complex::is-finite → (λa: Complex.
   (and (and (== a_re a_re) (== a_im a_im))
        (and (<= (abs a_re) 1.7976931348623157e308)
             (<= (abs a_im) 1.7976931348623157e308))))
+
+
+; ---- planar complex-field helpers -----------------------------------------
+; A field of complex numbers is an ArrayF with two component planes:
+;   [re0 .. re(n-1), im0 .. im(n-1)]
+; `Array<Complex>` is accepted as that planar convention.
+
+c-add → (λ a: Complex b: Complex.
+  (Complex (+ (Complex-re a) (Complex-re b))
+           (+ (Complex-im a) (Complex-im b))))
+
+c-sub → (λ a: Complex b: Complex.
+  (Complex (- (Complex-re a) (Complex-re b))
+           (- (Complex-im a) (Complex-im b))))
+
+c-mul → (λ a: Complex b: Complex.
+  ar → (Complex-re a)
+  ai → (Complex-im a)
+  br → (Complex-re b)
+  bi → (Complex-im b)
+  (Complex (- (* ar br) (* ai bi)) (+ (* ar bi) (* ai br))))
+
+c-conj → (λ a: Complex.
+  (Complex (Complex-re a) (- 0.0 (Complex-im a))))
+
+c-norm2 → (λ a: Complex.
+  (+ (* (Complex-re a) (Complex-re a))
+     (* (Complex-im a) (Complex-im a))))

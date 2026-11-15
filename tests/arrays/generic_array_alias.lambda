@@ -1,0 +1,5 @@
+first → (λ a: Array<Int>. (arrayi-get a 0))
+total → (λ a: Array<Float>. (arrayf-sum a))
+a → (arrayi 3 5)
+b → (arrayf 2 1.5)
+[(int->float (first a)), (total b)]

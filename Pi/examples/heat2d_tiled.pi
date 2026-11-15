@@ -1,0 +1,57 @@
+-- heat2d_tiled.pi : scalar heat diffusion on a 4x4 grid of 512x512 subregions.
+--
+-- 2048x2048 cells, 16 workers.  Each worker updates its own tile with an
+-- explicit five-point Laplacian; Pi extracts and routes the four halo edges.
+protocol HeatTile {
+  op init     : (Int, Int, Int, Int, Int, Int) → ()
+  op step     : () → Shard
+  op patch    : (HaloRing⟨4⟩) → ()
+  op snapshot : () → Shard
+  errors : { 9001: "internal" }
+  purity : Pure
+}
+
+elem HeatGridTile(part) {
+  in  tick      : Chan[()]
+  in  halos_in  : Ring[4]
+  out halos_out : Ring[4]
+  worker gs     : Worker⟨HeatTile⟩
+
+  ctrl loop =
+    await call(gs, "init", part[0], part[1], part[2], part[3], part[4], part[5])
+    serve(tick) { _ ⇒
+      tile → await call(gs, "step")
+      send(halos_out[0], halo1(tile, part[2], part[3], 2))
+      send(halos_out[1], halo1(tile, part[2], part[3], 3))
+      send(halos_out[2], halo1(tile, part[2], part[3], 0))
+      send(halos_out[3], halo1(tile, part[2], part[3], 1))
+      halos → for k in 0..4 { recv(halos_in[k]) }
+      await call(gs, "patch", halos)
+    }
+
+  on_failure {
+    | WorkerDied ⇒ restart(max = 2)
+    | _         ⇒ escalate
+  }
+}
+
+system HeatGrid(nx, ny, rows, cols, layout) {
+  instances {
+    g[i,j] : HeatGridTile(layout[(j * nx + i)]) for i in 0..nx, j in 0..ny using { gs: "workers/heat_tile.lambda" }
+  }
+  couple { couple_grid2d_block(nx, ny, periodic=true) }
+  expose step = <push () into every g's tick channel>
+}
+
+program Main() = scope {
+  layout → partition(4, 4, 512, 512)
+  g → HeatGrid(4, 4, 512, 512, layout)
+
+  iterate(20) {
+    g.step()
+    frame → snapshot_grid(g.g, 4, 4, 512, 512)
+    emit_animation_frame("heat", frame, 2048, 2048)
+  }
+
+  emit_text("heat", "2048x2048, 4x4 subregions, central circle diffused")
+}

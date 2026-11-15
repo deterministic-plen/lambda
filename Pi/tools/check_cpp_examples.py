@@ -53,8 +53,11 @@ def main() -> None:
     run("heat2d_cells", "cell(1,1) after 8 ticks = 0.5", ["report.html"])
     run("reduce", "sum of squares 1..100 = [338350]", ["report.html"])
     run("fault", "b 0", ["report.html"])
-    run("gray_scott", "animation frames: 60", ["gray_scott.frames.bin", "report.html"])
-    run("gray_scott_multi", "animation frames: 60", ["gray_scott.frames.bin", "report.html"])
+    run("points_bars", "points and bars", ["report.html", "scatter.svg", "hist.svg"])
+    run("heat2d_tiled", "2048x2048", ["report.html", "heat.frames.bin"])
+    run("gray_scott_tiled", "500 Euler steps, 2x2 tiles", ["report.html", "gray_scott.frames.bin"])
+    run("gray_scott", "animation frames: 100", ["gray_scott.frames.bin", "report.html", "frames/gray_scott_preview_000000.bmp"])
+    run("gray_scott_multi", "animation frames: 60", ["gray_scott.frames.bin", "report.html", "frames/gray_scott_preview_000000.bmp"])
     run_default("reduce", "sum of squares 1..100 = [338350]")
     print("all C++ example checks passed")
 

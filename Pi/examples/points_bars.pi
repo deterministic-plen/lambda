@@ -1,0 +1,11 @@
+-- points_bars.pi : generic 2D points and bars, no custom viewer.
+--
+-- The C++ runtime turns these into an SVG section in report.html.
+
+program Main() = scope {
+  xs → payload(range(0, 20))
+  ys → payload(range(0, 20))
+  emit_points("scatter", xs, ys)
+  emit_bars("hist", payload(range(0, 5)), payload(range(1, 6)))
+  emit_text("note", "points and bars")
+}

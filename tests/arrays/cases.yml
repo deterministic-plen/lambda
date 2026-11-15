@@ -49,4 +49,63 @@ cases:
   compile_fail: consumed by a destructive array update
 - name: stream_no_data
   compile_fail: binary output is disabled
+- name: vector_grow
+  stdout: '[1.5, 2.5, 3.5]
+
+    '
+- name: vec2_rotate
+  stdout: '[-2.0, -4.0, 1.0, 3.0]
+
+    '
+- name: vec2_impure
+  compile_fail: a parameter declared 'pure' requires a provably pure function argument
+- name: arena_bump
+  stdout: '[0.0, 4.0, 9.0, 1.5, 9.0]
+
+    '
+- name: vec2_scalar
+  stdout: '[7.0, 8.5, 8.5]
+
+    '
+- name: arrayi_pmap_capture
+  stdout: '[7, 8, 11, 16, 23]
+
+    '
+- name: generic_array_alias
+  stdout: '[5.0, 3.0]
+
+    '
+- name: arrayf_pmap_into
+  stdout: '[0.0, 1.0, 4.0, 9.0, 16.0]
+
+    '
+- name: vec2_array_annotation
+  stdout: '[-2.0, -4.0, 1.0, 3.0]
+
+    '
+- name: arrayf_get_unchecked
+  stdout: '[1.5, 2.5]
+
+    '
+- name: array_complex
+  stdout: '[1.0, 3.0, 10.0, -5.0, 10.0]
+
+    '
+- name: array_vec3
+  stdout: '[9.0, 32.0, 5.0]
+
+    '
+- name: matrix_basic
+  stdout: '[19.0, 22.0, 43.0, 50.0, 41.0, 93.0]
+
+    '
+- name: matrix_kalman_step
+  stdout: '[0.66666666666666663, 0.33333333333333331, 0.66666666666666674, 0.33333333333333337, 0.33333333333333337,
+    0.66666666666666674]
+
+    '
+- name: kalman_step
+  stdout: '[0.66666666666666663, 0.33333333333333331, 0.66666666666666674, 0.33333333333333337, 0.66666666666666674]
+
+    '
 strict: true

@@ -1,0 +1,4 @@
+include "lib/vec2.lambda"
+a → (V2 1.5 2.5)
+b → (V2 -2.0 4.0)
+[(v2-dot a b), (v2-norm2 a), (v2-dot a a)]

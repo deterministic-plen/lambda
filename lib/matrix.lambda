@@ -1,0 +1,110 @@
+; matrix.lambda -- dense row-major matrix over ArrayF.
+;
+; Matrices are immutable values.  Operations consume their inputs and return a
+; new matrix, matching Lambda's linear array convention.  All element access
+; goes through checked arrayf-get, and the matrix dimensions are carried with
+; the data so shape errors surface as ordinary bounds failures.
+
+data Matrix = M (rows: Int, cols: Int, data: ArrayF)
+
+mat2 → (λ a b c d. (M 2 2 (arrayf-of [a, b, c, d])))
+matvec2 → (λ a b. (M 2 1 (arrayf-of [a, b])))
+mat11 → (λ a. (M 1 1 (arrayf-of [a])))
+mat-row2 → (λ a b. (M 1 2 (arrayf-of [a, b])))
+
+type MatVec2Values (a: Float, b: Float)
+
+matvec2-values → (λ m: Matrix.
+  match m with M r c d:
+    (MatVec2Values (arrayf-get d 0) (arrayf-get d 1)))
+
+type Mat2Values (a: Float, b: Float, c: Float, d: Float)
+type Mat1Values (a: Float)
+
+mat2-values → (λ m: Matrix.
+  match m with M r c d:
+    (Mat2Values (arrayf-get d 0) (arrayf-get d 1)
+                (arrayf-get d 2) (arrayf-get d 3)))
+
+mat1-values → (λ m: Matrix.
+  match m with M r c d:
+    (Mat1Values (arrayf-get d 0)))
+
+
+mat-zero → (λ r: Int c: Int. (M r c (arrayf (* r c) 0.0)))
+
+mat-get → (λ m: Matrix i: Int j: Int.
+  match m with M r c d:
+    (arrayf-get d (+ (* i c) j)))
+
+mat-set → (λ m: Matrix i: Int j: Int v: Float.
+  match m with M r c d:
+    (M r c (arrayf-set d (+ (* i c) j) v)))
+
+mat-add-shape → (λ ar ac ad bd.
+  n → (* ar ac)
+  (M ar ac
+    (arrayf-pmap (λ p. (+ (arrayf-get ad p) (arrayf-get bd p))) n)))
+
+mat-add → (λ a: Matrix b: Matrix.
+  match a with M ar ac ad:
+    match b with M br bc bd:
+      (mat-add-shape ar ac ad bd))
+
+mat-sub-shape → (λ ar ac ad bd.
+  n → (* ar ac)
+  (M ar ac
+    (arrayf-pmap (λ p. (- (arrayf-get ad p) (arrayf-get bd p))) n)))
+
+mat-sub → (λ a: Matrix b: Matrix.
+  match a with M ar ac ad:
+    match b with M br bc bd:
+      (mat-sub-shape ar ac ad bd))
+
+mat-scale-shape → (λ ar ac ad s.
+  n → (* ar ac)
+  (M ar ac (arrayf-pmap (λ p. (* (arrayf-get ad p) s)) n)))
+
+mat-scale → (λ a: Matrix s: Float.
+  match a with M ar ac ad:
+    (mat-scale-shape ar ac ad s))
+
+mat-transpose-shape → (λ ar ac ad.
+  (M ac ar
+    (arrayf-pmap (λ p.
+      i → (/ p ar)
+      j → (% p ar)
+      (arrayf-get ad (+ (* j ac) i))) (* ar ac))))
+
+mat-transpose → (λ a: Matrix.
+  match a with M ar ac ad:
+    (mat-transpose-shape ar ac ad))
+
+mat-id → (λ n: Int.
+  (M n n
+    (arrayf-pmap (λ p. if (== (/ p n) (% p n)) then 1.0 else 0.0) (* n n))))
+
+dot → (λ da db inner bcols i j kk acc.
+  if (>= kk inner) then acc
+  else
+    (dot da db inner bcols i j (+ kk 1)
+      (+ acc (* (arrayf-get da (+ (* i inner) kk))
+                (arrayf-get db (+ (* kk bcols) j))))))
+
+mat-mul-shape → (λ ar ac ad br bc bd.
+  (M ar bc
+    (arrayf-pmap (λ p.
+      i → (/ p bc)
+      j → (% p bc)
+      (dot ad bd ac bc i j 0 0.0)) (* ar bc))))
+
+mat-mul → (λ a: Matrix b: Matrix.
+  match a with M ar ac ad:
+    match b with M br bc bd:
+      (mat-mul-shape ar ac ad br bc bd))
+
+mat-scalar → (λ m: Matrix.
+  match m with M r c d: (arrayf-get d 0))
+
+mat-clone → (λ m: Matrix.
+  match m with M r c d: (M r c (arrayf-clone d)))

@@ -1,0 +1,45 @@
+-- heat_stencil.pi : reusable 2D scalar-field tile element.
+--
+-- The element owns only halo routing.  A simulation supplies a worker with
+-- init/step/patch/snapshot; its step is an ordinary matrix update.
+
+protocol HeatTile {
+  op init     : (Int, Int, Int, Int, Int, Int) → ()
+  op step     : () → Shard
+  op patch    : (HaloRing⟨4⟩) → ()
+  op snapshot : () → Shard
+  errors : { 9001: "internal" }
+  purity : Pure
+}
+
+elem HeatGridTile(part) {
+  in  tick      : Chan[()]
+  in  halos_in  : Ring[4]
+  out halos_out : Ring[4]
+  worker gs     : Worker⟨HeatTile⟩
+
+  ctrl loop =
+    await call(gs, "init", part[0], part[1], part[2], part[3], part[4], part[5])
+    serve(tick) { _ ⇒
+      tile → await call(gs, "step")
+      send(halos_out[0], halo1(tile, part[2], part[3], 2))
+      send(halos_out[1], halo1(tile, part[2], part[3], 3))
+      send(halos_out[2], halo1(tile, part[2], part[3], 0))
+      send(halos_out[3], halo1(tile, part[2], part[3], 1))
+      halos → for k in 0..4 { recv(halos_in[k]) }
+      await call(gs, "patch", halos)
+    }
+
+  on_failure {
+    | WorkerDied ⇒ restart(max = 2)
+    | _         ⇒ escalate
+  }
+}
+
+system HeatGrid(nx, ny, rows, cols, layout) {
+  instances {
+    g[i,j] : HeatGridTile(layout[(j * nx + i)]) for i in 0..nx, j in 0..ny using { gs: "workers/heat_tile.lambda" }
+  }
+  couple { couple_grid2d_block(nx, ny, periodic=true) }
+  expose step = <push () into every g's tick channel>
+}

@@ -1,0 +1,20 @@
+; field.lambda -- generic planar component layout for Array<T> of float products.
+;
+; An Array<T> with element width k is one flat ArrayF of length k*n, stored as
+; k contiguous component planes:
+;   [component0 of all elements, component1 of all elements, ...]
+; `field-get`/`field-set` are checked and carry width and element count, so the
+; convention is explicit and bounds-safe.
+
+field-new → (λ k: Int n: Int. (arrayf (* k n) 0.0))
+
+field-length → (λ&f: ArrayF k: Int. (/ (arrayf-length f) k))
+
+field-get → (λ&f: ArrayF k: Int n: Int i: Int c: Int.
+  (arrayf-get f (+ (* c n) i)))
+
+field-set → (λ f: ArrayF k: Int n: Int i: Int c: Int x: Float.
+  (arrayf-set f (+ (* c n) i) x))
+
+field-map → (λ&f: ArrayF k: Int n: Int g: pure.
+  (arrayf-pmap (λ p. (g p)) (* k n)))

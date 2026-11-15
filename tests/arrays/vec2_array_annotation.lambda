@@ -1,0 +1,9 @@
+include "lib/vec2.lambda"
+rotate → (λ v: Array<Vec2> n: Int. (v2-rotate90 v n))
+v0 → (arrayf 4 0.0)
+v1 → (arrayf-set v0 0 1.0)
+v2 → (arrayf-set v1 1 3.0)
+v3 → (arrayf-set v2 2 2.0)
+v4 → (arrayf-set v3 3 4.0)
+r → (rotate v4 2)
+[(arrayf-get r 0), (arrayf-get r 1), (arrayf-get r 2), (arrayf-get r 3)]

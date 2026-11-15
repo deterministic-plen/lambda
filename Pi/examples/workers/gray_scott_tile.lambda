@@ -1,0 +1,182 @@
+; gray_scott_tile.lambda -- one 2D tile of a Gray-Scott field.
+;
+; Protocol dispatch, request parsing, replies and the worker loop come from the
+; generic tile_shim; this file defines only the state hooks.
+;
+; The worker owns U and V for its tile plus the four neighbouring halo rows
+; and columns.  `step` performs an explicit five-point Laplacian update and
+; returns the complete tile; Pi extracts the four edges and routes them.
+;
+; Protocol GrayTile:
+;   0 init(ox, oy, rows, cols, global_rows, global_cols)
+;   1 step()       -> combined tile [U..., V...]
+;   2 patch(halos) -> ()       four edge payloads, each [U edge..., V edge...]
+;   3 snapshot()   -> V tile
+;
+; The tile layout is planar: U at 0 .. n-1, V at n .. 2n-1.
+
+include "tile_shim.lambda"
+include "pi_schema_GrayTile.lambda"
+
+data GrayState = GS (rows: Int, cols: Int, uv: ArrayF,
+                    ht: ArrayF, hb: ArrayF, hl: ArrayF, hr: ArrayF)
+
+DU → 0.16
+DV → 0.08
+FEED → 0.055
+KILL → 0.062
+DT → 1.0
+SEED → 128
+
+; ---- state construction ----------------------------------------------------
+
+fill-u → (λ i n uv.
+  if (>= i n) then uv
+  else (fill-u (+ i 1) n (arrayf-set uv i 1.0)))
+
+vseed → (λ gx gy.
+  (+ 0.25 (* 0.04 (+ (sin (* 0.13 (int->float gx))) (cos (* 0.17 (int->float gy)))))))
+
+seed → (λ ox oy rows cols n k uv.
+  if (>= k (* SEED SEED)) then uv
+  else
+    gx → (+ 192 (% k SEED))
+    gy → (+ 192 (/ k SEED))
+    inside →
+      if (or (< gx ox) (>= gx (+ ox cols))) then 0
+      else if (or (< gy oy) (>= gy (+ oy rows))) then 0
+      else 1
+    if (== inside 0) then (seed ox oy rows cols n (+ k 1) uv)
+    else
+      lx → (- gx ox)
+      ly → (- gy oy)
+      p → (+ (* ly cols) lx)
+      (seed ox oy rows cols n (+ k 1)
+        (arrayf-set (arrayf-set uv p 0.5) (+ n p) (vseed gx gy))))
+
+; ---- edges ----------------------------------------------------------------
+
+top-halo → (λ uv n cols.
+  (arrayf-pmap (λ j.
+    if (< j cols) then (arrayf-get uv j)
+    else (arrayf-get uv (+ n (- j cols)))) (* 2 cols)))
+
+bottom-halo → (λ uv n rows cols.
+  base → (* (- rows 1) cols)
+  (arrayf-pmap (λ j.
+    if (< j cols) then (arrayf-get uv (+ base j))
+    else (arrayf-get uv (+ (+ n base) (- j cols)))) (* 2 cols)))
+
+left-halo → (λ uv n rows cols.
+  (arrayf-pmap (λ j.
+    if (< j rows) then (arrayf-get uv (* j cols))
+    else (arrayf-get uv (+ n (* (- j rows) cols)))) (* 2 rows)))
+
+right-halo → (λ uv n rows cols.
+  col → (- cols 1)
+  (arrayf-pmap (λ j.
+    if (< j rows) then (arrayf-get uv (+ (* j cols) col))
+    else (arrayf-get uv (+ n (+ (* (- j rows) cols) col)))) (* 2 rows)))
+
+; ---- neighbour access ----------------------------------------------------
+
+u-at → (λ uv ht hb hl hr rows cols y x.
+  if (== y (- 0 1)) then (arrayf-get ht x)
+  else if (== y rows) then (arrayf-get hb x)
+  else if (== x (- 0 1)) then (arrayf-get hl y)
+  else if (== x cols) then (arrayf-get hr y)
+  else (arrayf-get uv (+ (* y cols) x)))
+
+v-at → (λ uv ht hb hl hr rows cols y x.
+  n → (* rows cols)
+  if (== y (- 0 1)) then (arrayf-get ht (+ cols x))
+  else if (== y rows) then (arrayf-get hb (+ cols x))
+  else if (== x (- 0 1)) then (arrayf-get hl (+ rows y))
+  else if (== x cols) then (arrayf-get hr (+ rows y))
+  else (arrayf-get uv (+ n (+ (* y cols) x))))
+
+; ---- explicit five-point update -------------------------------------------
+
+clamp01 → (λ x.
+  if (< x 0.0) then 0.0
+  else if (> x 1.0) then 1.0
+  else x)
+
+u-new → (λ uv ht hb hl hr rows cols p.
+  y → (/ p cols)
+  x → (% p cols)
+  u → (u-at uv ht hb hl hr rows cols y x)
+  v → (v-at uv ht hb hl hr rows cols y x)
+  lap → (- (+ (+ (u-at uv ht hb hl hr rows cols y (- x 1))
+                 (u-at uv ht hb hl hr rows cols y (+ x 1)))
+              (+ (u-at uv ht hb hl hr rows cols (- y 1) x)
+                 (u-at uv ht hb hl hr rows cols (+ y 1) x)))
+           (* 4.0 u))
+  uvv → (* u (* v v))
+  (clamp01 (+ u (* DT (+ (- (* DU lap) uvv) (* FEED (- 1.0 u)))))))
+
+v-new → (λ uv ht hb hl hr rows cols p.
+  y → (/ p cols)
+  x → (% p cols)
+  u → (u-at uv ht hb hl hr rows cols y x)
+  v → (v-at uv ht hb hl hr rows cols y x)
+  lap → (- (+ (+ (v-at uv ht hb hl hr rows cols y (- x 1))
+                 (v-at uv ht hb hl hr rows cols y (+ x 1)))
+              (+ (v-at uv ht hb hl hr rows cols (- y 1) x)
+                 (v-at uv ht hb hl hr rows cols (+ y 1) x)))
+           (* 4.0 v))
+  uvv → (* u (* v v))
+  (clamp01 (+ v (* DT (+ (+ (* DV lap) uvv) (* (- FEED KILL) v))))))
+
+compute → (λ uv ht hb hl hr rows cols.
+  n → (* rows cols)
+  (arrayf-pmap (λ j.
+    if (< j n) then (u-new uv ht hb hl hr rows cols j)
+    else (v-new uv ht hb hl hr rows cols (- j n))) (* 2 n)))
+
+slice-v → (λ uv rows cols.
+  n → (* rows cols)
+  (arrayf-pmap (λ j. (arrayf-get uv (+ n j))) n))
+
+; ---- halo patch -----------------------------------------------------------
+
+copy-range → (λ a start count.
+  (arrayf-pmap (λ j. (arrayf-get a (+ start j))) count))
+
+; ---- hooks supplied to the shared shim ---------------------------------
+
+gt-init → (λ ox: Int oy: Int rows: Int cols: Int grows: Int gcols: Int.
+  n → (* rows cols)
+  uv0 → (fill-u 0 n (arrayf (* 2 n) 0.0))
+  uv → (seed ox oy rows cols n 0 uv0)
+  ht → (top-halo uv n cols)
+  hb → (bottom-halo uv n rows cols)
+  hl → (left-halo uv n rows cols)
+  hr → (right-halo uv n rows cols)
+  (GS rows cols uv ht hb hl hr))
+
+gt-step → (λs: GrayState.
+  match s with GS rows cols uv ht hb hl hr:
+    (GS rows cols (compute uv ht hb hl hr rows cols) ht hb hl hr))
+
+gt-patch → (λs: GrayState a: ArrayF.
+  match s with GS rows cols uv ht hb hl hr:
+    r2 → (* 2 rows)
+    c2 → (* 2 cols)
+    hl2 → (copy-range a 1 r2)
+    hr2 → (copy-range a (+ 2 r2) r2)
+    ht2 → (copy-range a (+ 3 (* 2 r2)) c2)
+    hb2 → (copy-range a (+ 4 (+ (* 2 r2) c2)) c2)
+    (GS rows cols uv ht2 hb2 hl2 hr2))
+
+gt-payload → (λs: GrayState.
+  match s with GS rows cols uv ht hb hl hr:
+    uv)
+
+gt-snapshot → (λs: GrayState.
+  match s with GS rows cols uv ht hb hl hr:
+    (slice-v uv rows cols))
+
+(tile-shim op-init op-step op-patch op-snapshot error-internal
+           schema-hi schema-lo 2 (gt-init 0 0 0 0 0 0)
+           gt-init gt-step gt-payload gt-patch gt-snapshot)

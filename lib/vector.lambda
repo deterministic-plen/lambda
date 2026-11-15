@@ -1,0 +1,48 @@
+; vector.lambda -- a growable flat Float vector built from ArrayF.
+;
+; Layout:
+;   [length, capacity, v0, v1, ...]
+;
+; This is deliberately a library, not a primitive: it keeps the storage flat
+; and contiguous, grows by doubling, and never allocates a node per element.
+; A future epoch/arena can replace the copy-on-grow step with a bump pointer
+; without changing this API.
+
+vec-new → (λ cap: Int.
+  if (< cap 0) then (vec-new 0)
+  else (arrayf-set (arrayf (+ 2 cap) 0.0) 1 (int->float cap)))
+
+vec-length → (λ v: ArrayF. (float->int (arrayf-get v 0)))
+vec-capacity → (λ v: ArrayF. (float->int (arrayf-get v 1)))
+
+vec-get → (λ v: ArrayF i: Int. (arrayf-get v (+ 2 i)))
+
+vec-set → (λ v: ArrayF i: Int x: Float.
+  (arrayf-set v (+ 2 i) x))
+
+vec-copy → (λ src: ArrayF dst: ArrayF n: Int i: Int.
+  if (>= i n) then dst
+  else (vec-copy src (arrayf-set dst (+ 2 i) (arrayf-get src (+ 2 i))) n (+ i 1)))
+
+vec-grow → (λ v: ArrayF len: Int cap: Int.
+  newcap → (if (== cap 0) then 1 else (* cap 2))
+  nv → (vec-new newcap)
+  nv1 → (vec-copy v nv len 0)
+  (arrayf-set (arrayf-set nv1 0 (int->float len)) 1 (int->float newcap)))
+
+vec-push → (λ v: ArrayF x: Float.
+  len → (vec-length v)
+  cap → (vec-capacity v)
+  if (< len cap)
+  then
+    (arrayf-set
+      (arrayf-set (vec-set v len x) 0 (int->float (+ len 1)))
+      1 (int->float cap))
+  else
+    v2 → (vec-grow v len cap)
+    (arrayf-set
+      (arrayf-set (vec-set v2 len x) 0 (int->float (+ len 1)))
+      1 (int->float (vec-capacity v2))))
+
+vec-to-array → (λ v: ArrayF.
+  (arrayf-pmap (λ i. (vec-get v i)) (vec-length v)))

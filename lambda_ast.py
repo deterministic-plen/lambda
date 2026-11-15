@@ -97,6 +97,7 @@ class Lam(Node):
 
     __slots__ = (
         "params", "body", "param_bindings", "param_annotations", "param_borrows",
+        "param_pure",
         "is_parallel", "info", "captures", "capture_set", "param_types",
     )
 
@@ -106,6 +107,7 @@ class Lam(Node):
         self.body = body
         self.param_bindings: List["Binding"] = []
         self.param_annotations: List[Optional[str]] = [None] * len(params)
+        self.param_pure: List[bool] = [False] * len(params)
         self.param_borrows: List[bool] = [False] * len(params)
         self.is_parallel = False
         self.captures: List["Binding"] = []
@@ -360,7 +362,7 @@ class Binding:
 
     __slots__ = (
         "uid", "name", "kind", "def_node", "lam", "scheme", "type", "loc",
-        "borrowed",
+        "borrowed", "pure",
     )
 
     _next_uid = 0
@@ -377,6 +379,7 @@ class Binding:
         self.type = None     # Type for parameters
         self.loc = loc
         self.borrowed = False
+        self.pure = False
 
     @property
     def is_function(self) -> bool:
