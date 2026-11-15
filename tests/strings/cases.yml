@@ -4,4 +4,40 @@ cases:
   stdout: 'hi
 
     '
+- name: str_bytes_codepoints
+  stdout: '[7, 65, 240, 159, 3, 65, 128512, 233, 1]
+
+    '
+- name: str_utf16_units
+  stdout: '[3, 65, 55357, 56832]
+
+    '
+- name: str_utf16_roundtrip
+  stdout: 'A😀
+
+    '
+- name: str_invalid_utf8
+  stdout: '[0, 2, -1, 65]
+
+    '
+- name: fsm_member
+  stdout: '[1, 0, 1]
+
+    '
+- name: str_utf16_bytes_units
+  stdout: '[6, 65, 0, 0, 222]
+
+    '
+- name: str_utf16_bytes_roundtrip
+  stdout: 'A😀
+
+    '
+- name: str_utf8_offsets
+  stdout: '[65, 128512, 233, -1]
+
+    '
+- name: str_aliases
+  stdout: '[65, 128512, 240]
+
+    '
 strict: true

@@ -1,1 +1,16 @@
-data token
+include "lambda_ast.lambda"
+enum Kind (LambdaPar, Lam, Arrow, Larrow, PPipe, Pipe, Range, Punct, Borrow, Float, Int, Kwrd, Ident,EOF)
+type Token = (kind:Kind, value:[Int])
+;Scheme
+
+decode_string → (λ string.
+    n → (arrayb-length string)
+    go → (λ str iter.
+        if(>= iter n) 
+    )
+)
+
+tokenize → (λsource:String start:Int.
+    n → (str-len source)
+
+)

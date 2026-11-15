@@ -7,6 +7,7 @@ import glob
 import json
 import os
 import sys
+import subprocess
 from typing import List
 
 from . import syntax as S
@@ -113,6 +114,21 @@ def cmd_run(a) -> int:
         return 1
 
 
+def cmd_view(a) -> int:
+    """Open the universal WebGL viewer for a Pi output directory or data file."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    viewer = os.path.join(root, "tools", "viewer.py")
+    if not os.path.exists(viewer):
+        print(f"pi view: viewer not found at {viewer}", file=sys.stderr)
+        return 1
+    cmd = [sys.executable, viewer, a.path]
+    if a.no_open:
+        cmd.append("--no-open")
+    if a.port:
+        cmd += ["--port", str(a.port)]
+    return subprocess.call(cmd)
+
+
 def cmd_test(a) -> int:
     """Run every `*.pi` program named test_* / *_test under the given paths (each must exit 0)."""
     files: List[str] = []
@@ -202,6 +218,12 @@ def main(argv=None) -> int:
     p.add_argument("--keep-plan", action="store_true", dest="keep_plan", help="keep generated plan JSON")
     common(p)
     p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("view", help="open the universal WebGL viewer for output/data")
+    p.add_argument("path", help="Pi output directory, CSV, JSON, text, or LMB1 file")
+    p.add_argument("--no-open", action="store_true", dest="no_open", help="do not open a browser")
+    p.add_argument("--port", type=int, default=0, help="port (0 chooses a free port)")
+    p.set_defaults(fn=cmd_view)
 
     p = sub.add_parser("test", help="run .pi test programs")
     p.add_argument("paths", nargs="+")

@@ -30,3 +30,16 @@ append → (λxs ys.
   if (empty? xs)
   then ys
   else (cons (head xs) (append (tail xs) ys)))
+
+
+; Membership test for a finite list.  This is the concise equivalent of
+; Python's ``x in (a, b, c)`` for an ordinary Lambda list.
+member → (λ x xs.
+  if (empty? xs)
+  then false
+  else if (== x (head xs))
+  then true
+  else (member x (tail xs)))
+
+; Python-style membership spelling, e.g. (in? c [a, b, c]).
+in? → member

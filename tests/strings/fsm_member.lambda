@@ -1,0 +1,4 @@
+include "lib/list.lambda"
+include "lib/string.lambda"
+s → "a1"
+[(if (member (str-byte-at s 0) [97, 98]) then 1 else 0), (if (member 120 [97, 98]) then 1 else 0), (if (ascii-digit? (str-byte-at s 1)) then 1 else 0)]

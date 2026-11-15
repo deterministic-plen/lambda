@@ -28,4 +28,8 @@ cases:
   stdout: '[3, 3, 2, 6]
 
     '
+- name: member_in
+  stdout: '[1, 0, 1]
+
+    '
 strict: true

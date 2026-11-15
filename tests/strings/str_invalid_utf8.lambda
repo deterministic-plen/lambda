@@ -1,0 +1,2 @@
+bad → (arrayb->str (arrayb-of [255, 65]))
+[(if (str-valid-utf8 bad) then 1 else 0), (str-byte-length bad), (str-codepoint-at bad 0), (str-codepoint-at bad 1)]

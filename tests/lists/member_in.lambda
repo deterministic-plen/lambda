@@ -1,0 +1,2 @@
+include "lib/list.lambda"
+[(if (in? 2 [1, 2, 3]) then 1 else 0), (if (in? 9 [1, 2, 3]) then 1 else 0), (if (member "b" ["a", "b"]) then 1 else 0)]

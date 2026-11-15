@@ -53,7 +53,11 @@ PRIMITIVES = {
     # strings
     "str->int", "int->str", "str->list", "str-len", "str-append",
     "str->arrayb", "arrayb->str",
-    "read-file", "write-file",
+    "str-byte-at", "str-byte-length", "str-valid-utf8",
+    "str-utf8-at", "str-codepoint-at", "str-codepoint-length",
+    "str->utf16le", "utf16le->str",
+    "str->utf16le-bytes", "utf16le-bytes->str",
+    "read-file", "read-file-bytes", "write-file",
     # process arguments
     "argc", "argv",
     # io / misc
@@ -108,6 +112,13 @@ OP_CANON = {
     "str->int": "str_to_int", "int->str": "int_to_str",
     "str->list": "str_to_list", "str-len": "str_len",
     "str->arrayb": "str_to_arrayb", "arrayb->str": "arrayb_to_str",
+    "str-byte-at": "str_byte_at", "str-byte-length": "str_byte_length",
+    "str-valid-utf8": "str_valid_utf8",
+    "str-utf8-at": "str_utf8_at", "str-codepoint-at": "str_codepoint_at",
+    "str-codepoint-length": "str_codepoint_length",
+    "str->utf16le": "str_to_utf16le", "utf16le->str": "utf16le_to_str",
+    "str->utf16le-bytes": "str_to_utf16le_bytes", "utf16le-bytes->str": "utf16le_bytes_to_str",
+    "read-file-bytes": "read_file_bytes",
     "argc": "argc", "argv": "argv",
     "str-append": "str_append", "read-file": "read_file", "write-file": "write_file",
     "print": "print", "println": "println", "not": "not",

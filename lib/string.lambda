@@ -1,0 +1,27 @@
+; string.lambda -- small helpers for byte/code-point oriented scanners.
+;
+; Lambda strings are raw bytes tagged String.  Literals and read-line produce
+; UTF-8, but read-file preserves arbitrary bytes.  These helpers deliberately
+; work on bytes so lexers can scan non-UTF-8 input losslessly; use the
+; str-codepoint-* primitives when Unicode scalar values are wanted.
+
+ascii-digit? → (λ c: Int. (and (>= c 48) (<= c 57)))
+ascii-upper? → (λ c: Int. (and (>= c 65) (<= c 90)))
+ascii-lower? → (λ c: Int. (and (>= c 97) (<= c 122)))
+ascii-alpha? → (λ c: Int. (or (ascii-upper? c) (ascii-lower? c)))
+ascii-space? → (λ c: Int. (or (== c 32) (or (== c 9) (or (== c 10) (== c 13)))))
+ascii-hex? → (λ c: Int.
+  (or (ascii-digit? c)
+      (or (and (>= c 65) (<= c 70)) (and (>= c 97) (<= c 102)))))
+
+; The code point at a *character* index (not a byte offset).
+string-code → (λ s: String i: Int. (str-codepoint-at s i))
+
+; Compare a code point without allocating a one-character string.
+code-is? → (λ s: String i: Int want: Int. (== (str-codepoint-at s i) want))
+
+
+; Convenient aliases.  `(str-at s i)` is the Unicode scalar at scalar index i;
+; `(str-byte-at s i)` is the raw byte at byte offset i.  Neither consumes s.
+str-at → (λ s: String i: Int. (str-codepoint-at s i))
+str-bytes-at → (λ s: String i: Int. (str-byte-at s i))

@@ -1,3 +1,5 @@
+; euler.lambda -- one value per step; pipe into tools/viewer.py for a plot.
+;   euler.exe > euler.txt && python tools/viewer.py euler.txt
 deltaT → 0.01
 omega → 1.0
 

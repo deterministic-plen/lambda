@@ -1,0 +1,2 @@
+s → "A😀é"
+[(str-utf8-at s 0), (str-utf8-at s 1), (str-utf8-at s 5), (str-utf8-at s 100)]

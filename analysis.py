@@ -22,7 +22,7 @@ from errors import CompileError
 from parser import OP_CANON, PRIMITIVES
 
 IMPURE_PRIMITIVES = {
-    "print", "println", "read_file", "read_line", "read_int", "read_float",
+    "print", "println", "read_file", "read_file_bytes", "read_line", "read_int", "read_float",
     "fix", "immortalize",
     "map", "pmap",
     # Arrays are a controlled low-level effect: a set consumes and mutates its
@@ -46,6 +46,10 @@ PRIM_ARITY = {
     "str_to_int": 1, "int_to_str": 1, "str_to_list": 1, "str_len": 1,
     "str_append": 2, "read_file": 1, "print": 1, "println": 1, "not": 1,
     "str_to_arrayb": 1, "arrayb_to_str": 1, "argc": 0, "argv": 1,
+    "str_byte_at": 2, "str_byte_length": 1, "str_valid_utf8": 1,
+    "str_utf8_at": 2, "str_codepoint_at": 2, "str_codepoint_length": 1,
+    "str_to_utf16le": 1, "utf16le_to_str": 1,
+    "str_to_utf16le_bytes": 1, "utf16le_bytes_to_str": 1, "read_file_bytes": 1,
     "fix": 1,
     "int_to_float": 1, "float_to_int": 1, "str_to_float": 1, "float_to_str": 1,
     "sqrt": 1, "sin": 1, "cos": 1, "tan": 1, "asin": 1, "acos": 1, "atan": 1,

@@ -1376,6 +1376,274 @@ Value *lambda_op_int_to_str(Value *v) {
     return lambda_string_new_len(tmp, n);
 }
 
+/* ------------------------------------------------------------------ */
+/* lossless / Unicode string inspection                                */
+/* ------------------------------------------------------------------ */
+
+/* Decode one UTF-8 scalar at byte offset.  Returns -1 for invalid or
+   truncated input and advances next by one byte in that case. */
+static int64_t utf8_decode_one(const unsigned char *s, int64_t len,
+                               int64_t off, int64_t *next) {
+    if (off < 0 || off >= len) { if (next) *next = off + 1; return -1; }
+    unsigned char b0 = s[off];
+    if (b0 < 0x80) { if (next) *next = off + 1; return b0; }
+    if (b0 >= 0xC2 && b0 <= 0xDF) {
+        if (off + 1 >= len || (s[off+1] & 0xC0) != 0x80) {
+            if (next) *next = off + 1; return -1;
+        }
+        if (next) *next = off + 2;
+        return ((int64_t)(b0 & 0x1F) << 6) | (s[off+1] & 0x3F);
+    }
+    if (b0 >= 0xE0 && b0 <= 0xEF) {
+        if (off + 2 >= len) { if (next) *next = off + 1; return -1; }
+        unsigned char b1 = s[off+1], b2 = s[off+2];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) {
+            if (next) *next = off + 1; return -1;
+        }
+        if ((b0 == 0xE0 && b1 < 0xA0) || (b0 == 0xED && b1 >= 0xA0)) {
+            if (next) *next = off + 1; return -1;
+        }
+        if (next) *next = off + 3;
+        return ((int64_t)(b0 & 0x0F) << 12) |
+               ((int64_t)(b1 & 0x3F) << 6) | (b2 & 0x3F);
+    }
+    if (b0 >= 0xF0 && b0 <= 0xF4) {
+        if (off + 3 >= len) { if (next) *next = off + 1; return -1; }
+        unsigned char b1 = s[off+1], b2 = s[off+2], b3 = s[off+3];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 ||
+            (b3 & 0xC0) != 0x80) {
+            if (next) *next = off + 1; return -1;
+        }
+        if ((b0 == 0xF0 && b1 < 0x90) || (b0 == 0xF4 && b1 >= 0x90)) {
+            if (next) *next = off + 1; return -1;
+        }
+        if (next) *next = off + 4;
+        return ((int64_t)(b0 & 0x07) << 18) |
+               ((int64_t)(b1 & 0x3F) << 12) |
+               ((int64_t)(b2 & 0x3F) << 6) | (b3 & 0x3F);
+    }
+    if (next) *next = off + 1;
+    return -1;
+}
+
+int64_t lambda_str_byte_length(Value *s) {
+    if (!s || s->tag != TAG_STRING) fail_type("String", s);
+    return s->i;
+}
+
+int64_t lambda_str_byte_at(Value *s, int64_t i) {
+    if (!s || s->tag != TAG_STRING) fail_type("String", s);
+    if (i < 0 || i >= s->i) return -1;
+    return ((const unsigned char *)s->p)[i];
+}
+
+int64_t lambda_str_utf8_at(Value *s, int64_t byte_off) {
+    if (!s || s->tag != TAG_STRING) fail_type("String", s);
+    int64_t next = 0;
+    return utf8_decode_one((const unsigned char *)s->p, s->i, byte_off, &next);
+}
+
+int64_t lambda_str_codepoint_at(Value *s, int64_t index) {
+    if (!s || s->tag != TAG_STRING) fail_type("String", s);
+    if (index < 0) return -1;
+    int64_t off = 0, count = 0;
+    while (off < s->i) {
+        int64_t next = 0;
+        int64_t cp = utf8_decode_one((const unsigned char *)s->p, s->i, off, &next);
+        if (count == index) return cp;
+        count++;
+        off = next > off ? next : off + 1;
+    }
+    return -1;
+}
+
+int64_t lambda_str_codepoint_length(Value *s) {
+    if (!s || s->tag != TAG_STRING) fail_type("String", s);
+    int64_t off = 0, count = 0;
+    while (off < s->i) {
+        int64_t next = 0;
+        (void)utf8_decode_one((const unsigned char *)s->p, s->i, off, &next);
+        count++;
+        off = next > off ? next : off + 1;
+    }
+    return count;
+}
+
+int64_t lambda_str_valid_utf8(Value *s) {
+    if (!s || s->tag != TAG_STRING) fail_type("String", s);
+    int64_t off = 0;
+    while (off < s->i) {
+        int64_t next = 0;
+        int64_t cp = utf8_decode_one((const unsigned char *)s->p, s->i, off, &next);
+        if (cp < 0) return 0;
+        off = next > off ? next : off + 1;
+    }
+    return 1;
+}
+
+Value *lambda_str_to_utf16le(Value *s) {
+    if (!s || s->tag != TAG_STRING) fail_type("String", s);
+    int64_t units = 0, off = 0;
+    while (off < s->i) {
+        int64_t next = 0;
+        int64_t cp = utf8_decode_one((const unsigned char *)s->p, s->i, off, &next);
+        if (cp < 0) cp = 0xFFFD;
+        units += cp > 0xFFFF ? 2 : 1;
+        off = next > off ? next : off + 1;
+    }
+    Value *out = lambda_arrayi_new(units, 0);
+    int64_t *d = (int64_t *)out->p, k = 0;
+    off = 0;
+    while (off < s->i) {
+        int64_t next = 0;
+        int64_t cp = utf8_decode_one((const unsigned char *)s->p, s->i, off, &next);
+        if (cp < 0) cp = 0xFFFD;
+        if (cp > 0xFFFF) {
+            cp -= 0x10000;
+            d[k++] = 0xD800 + (cp >> 10);
+            d[k++] = 0xDC00 + (cp & 0x3FF);
+        } else {
+            d[k++] = cp;
+        }
+        off = next > off ? next : off + 1;
+    }
+    return out;
+}
+
+Value *lambda_utf16le_to_str(Value *v) {
+    if (!v || v->tag != TAG_ARRAYI) fail_type("ArrayI", v);
+    int64_t *u = (int64_t *)v->p, n = v->i;
+    char *buf = (char *)xmalloc((size_t)n * 4 + 1);
+    int64_t out = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t unit = u[i] & 0xFFFF;
+        int64_t cp;
+        if (unit >= 0xD800 && unit <= 0xDBFF && i + 1 < n) {
+            int64_t lo = u[i+1] & 0xFFFF;
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((unit - 0xD800) << 10) + (lo - 0xDC00);
+                i++;
+            } else cp = 0xFFFD;
+        } else if (unit >= 0xD800 && unit <= 0xDFFF) cp = 0xFFFD;
+        else cp = unit;
+        if (cp <= 0x7F) buf[out++] = (char)cp;
+        else if (cp <= 0x7FF) {
+            buf[out++] = (char)(0xC0 | (cp >> 6));
+            buf[out++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp <= 0xFFFF) {
+            buf[out++] = (char)(0xE0 | (cp >> 12));
+            buf[out++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            buf[out++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            buf[out++] = (char)(0xF0 | (cp >> 18));
+            buf[out++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            buf[out++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            buf[out++] = (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    Value *r = lambda_string_new_len(buf, out);
+    free(buf);
+    lambda_release(v);
+    return r;
+}
+
+/* UTF-16LE byte-buffer conversions, useful for non-UTF-8 files. */
+Value *lambda_str_to_utf16le_bytes(Value *s) {
+    Value *u = lambda_str_to_utf16le(s);
+    Value *b = lambda_arrayb_new(u->i * 2, 0);
+    unsigned char *d = (unsigned char *)b->p;
+    int64_t *units = (int64_t *)u->p;
+    for (int64_t i = 0; i < u->i; i++) {
+        d[2*i] = (unsigned char)(units[i] & 0xFF);
+        d[2*i+1] = (unsigned char)((units[i] >> 8) & 0xFF);
+    }
+    lambda_release(u);
+    return b;
+}
+
+Value *lambda_utf16le_bytes_to_str(Value *b) {
+    if (!b || b->tag != TAG_ARRAYB) fail_type("ArrayB", b);
+    int64_t n = b->i / 2;
+    Value *u = lambda_arrayi_new(n, 0);
+    int64_t *units = (int64_t *)u->p;
+    const unsigned char *d = (const unsigned char *)b->p;
+    for (int64_t i = 0; i < n; i++) units[i] = (int64_t)d[2*i] | ((int64_t)d[2*i+1] << 8);
+    lambda_release(b);
+    return lambda_utf16le_to_str(u);
+}
+
+Value *lambda_op_str_to_utf16le_bytes(Value *s) {
+    Value *b = lambda_str_to_utf16le_bytes(s);
+    lambda_release(s);
+    return b;
+}
+
+Value *lambda_op_utf16le_bytes_to_str(Value *b) {
+    return lambda_utf16le_bytes_to_str(b);
+}
+
+/* Raw file bytes without any Unicode interpretation. */
+Value *lambda_read_file_bytes_raw(Value *pathv) {
+    if (!pathv || pathv->tag != TAG_STRING) fail_type("String", pathv);
+    FILE *f = fopen((const char *)pathv->p, "rb");
+    if (!f) {
+        lambda_release(pathv);
+        return lambda_arrayb_new(0, 0);
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    if (size < 0) size = 0;
+    fseek(f, 0, SEEK_SET);
+    Value *a = lambda_arrayb_new((int64_t)size, 0);
+    size_t got = fread(a->p, 1, (size_t)size, f);
+    fclose(f);
+    a->i = (int64_t)got;
+    lambda_release(pathv);
+    return a;
+}
+
+Value *lambda_op_str_byte_at(Value *s, Value *i) {
+    int64_t x = lambda_str_byte_at(s, as_int(i));
+    lambda_release(s); lambda_release(i);
+    return lambda_box_int(x);
+}
+Value *lambda_op_str_utf8_at(Value *s, Value *i) {
+    int64_t x = lambda_str_utf8_at(s, as_int(i));
+    lambda_release(s); lambda_release(i);
+    return lambda_box_int(x);
+}
+Value *lambda_op_str_codepoint_at(Value *s, Value *i) {
+    int64_t x = lambda_str_codepoint_at(s, as_int(i));
+    lambda_release(s); lambda_release(i);
+    return lambda_box_int(x);
+}
+Value *lambda_op_str_byte_length(Value *s) {
+    int64_t x = lambda_str_byte_length(s);
+    lambda_release(s);
+    return lambda_box_int(x);
+}
+Value *lambda_op_str_codepoint_length(Value *s) {
+    int64_t x = lambda_str_codepoint_length(s);
+    lambda_release(s);
+    return lambda_box_int(x);
+}
+Value *lambda_op_str_valid_utf8(Value *s) {
+    int64_t x = lambda_str_valid_utf8(s);
+    lambda_release(s);
+    return lambda_box_bool(x);
+}
+Value *lambda_op_str_to_utf16le(Value *s) {
+    Value *r = lambda_str_to_utf16le(s);
+    lambda_release(s);
+    return r;
+}
+Value *lambda_op_utf16le_to_str(Value *v) {
+    return lambda_utf16le_to_str(v);
+}
+Value *lambda_op_read_file_bytes(Value *path) {
+    return lambda_read_file_bytes_raw(path);
+}
+
 Value *lambda_op_str_to_int(Value *v) {
     const char *s = string_data(v);
     errno = 0;
@@ -3025,6 +3293,27 @@ declare %Value* @lambda_op_str_len(%Value*)
 declare %Value* @lambda_op_str_append(%Value*, %Value*)
 declare %Value* @lambda_op_read_file(%Value*)
 declare %Value* @lambda_op_str_to_arrayb(%Value*)
+declare i64 @lambda_str_byte_length(%Value*)
+declare i64 @lambda_str_byte_at(%Value*, i64)
+declare i64 @lambda_str_utf8_at(%Value*, i64)
+declare i64 @lambda_str_codepoint_at(%Value*, i64)
+declare i64 @lambda_str_codepoint_length(%Value*)
+declare i64 @lambda_str_valid_utf8(%Value*)
+declare %Value* @lambda_str_to_utf16le(%Value*)
+declare %Value* @lambda_utf16le_to_str(%Value*)
+declare %Value* @lambda_str_to_utf16le_bytes(%Value*)
+declare %Value* @lambda_utf16le_bytes_to_str(%Value*)
+declare %Value* @lambda_op_str_to_utf16le_bytes(%Value*)
+declare %Value* @lambda_op_utf16le_bytes_to_str(%Value*)
+declare %Value* @lambda_op_read_file_bytes(%Value*)
+declare %Value* @lambda_op_str_byte_at(%Value*, %Value*)
+declare %Value* @lambda_op_str_utf8_at(%Value*, %Value*)
+declare %Value* @lambda_op_str_codepoint_at(%Value*, %Value*)
+declare %Value* @lambda_op_str_byte_length(%Value*)
+declare %Value* @lambda_op_str_codepoint_length(%Value*)
+declare %Value* @lambda_op_str_valid_utf8(%Value*)
+declare %Value* @lambda_op_str_to_utf16le(%Value*)
+declare %Value* @lambda_op_utf16le_to_str(%Value*)
 declare %Value* @lambda_op_arrayb_to_str(%Value*)
 declare i64 @lambda_op_argc()
 declare %Value* @lambda_op_argc_prim()

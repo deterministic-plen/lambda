@@ -63,6 +63,7 @@ On Linux/macOS use `./pi` (a thin `python -m pilang` wrapper).
 | `pi build FILE` | compile the Lambda workers a program names |
 | `pi run FILE [--out DIR]` | execute through the C++ AST runtime |
 | `pi test PATHS` | run `.pi` test programs |
+| `pi view PATH` | open the universal WebGL viewer for output/data |
 | `pi analyze FILE` | schemas, recovery capability, static ops, scheduler table |
 | `pi aot FILE -o EXE` | compile the linear subset to a native C executable |
 | `pi cpp FILE` | alias for the C++ runtime |
@@ -272,7 +273,10 @@ downsampled to at most 120 frames at 256 px for the report; the full-resolution
 layers, so phase-space scatter plots and histograms do not need a new viewer.
 
 `emit` still prints small values; payloads above 32 values are abbreviated.
-Reporting is off unless `--out` is given, so the coordination path pays nothing
+For interactive use, `pi view DIR` opens the universal WebGL viewer
+(see [docs/viewer.md](docs/viewer.md)); `report.html` remains a compatibility
+artifact.  Reporting is off unless `--out` is given, so the coordination path
+pays nothing
 for it.
 
 ![Gray-Scott, 4 Pi workers](examples/gray_scott_multi_512.gif)
@@ -390,6 +394,7 @@ docs/protocol.md      Lambda–Pi wire format
 docs/worker.md        minimal worker guide
 docs/aot.md           native AOT subset
 docs/embedded.md      WCET/cyclic-executive plan
+docs/viewer.md        universal WebGL viewer
 ../pispec.md          Pi Specification v2.0
 ```
 
@@ -426,4 +431,5 @@ server is needed.  Pygments users can import `pi_lexer.PiLexer`; validate with
 
 * [Pi Specification v2.0](../pispec.md) — normative design.
 * [Embedded/WCET plan](docs/embedded.md) — interpreter limits and AOT target.
+* [Universal viewer](docs/viewer.md) — one WebGL renderer for every data run.
 * [Lambda README](../../README.md) — the compute language.

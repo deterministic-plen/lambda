@@ -245,6 +245,32 @@ fill → (λi a.
 xs → (fill 0 (arrayf 100 0.0))
 ```
 
+### Strings and Unicode
+
+A `String` is a length-tagged byte buffer. Literals are UTF-8, while
+`read-file` preserves raw bytes. Non-consuming inspection is available:
+
+```lambda
+s → "A😀é"
+[(str-byte-length s), (str-byte-at s 0), (str-codepoint-length s),
+ (str-codepoint-at s 1), (str-utf8-at s 1), (str-valid-utf8 s)]
+```
+
+`str->utf16le` / `utf16le->str` convert to/from an `ArrayI` of UTF-16 code
+units; `str->utf16le-bytes` / `utf16le-bytes->str` work on UTF-16LE byte
+buffers, and `read-file-bytes` reads arbitrary files without a UTF-8
+interpretation.
+
+For FSMs, `(str-byte-at s i)`, `(str-at s i)`, or
+`(str-codepoint-at s i)` returns an Int.
+`member` / `in?` from `lib/list.lambda` are membership tests over finite lists:
+
+```lambda
+(in? c [43, 45])   ; + or -
+```
+
+See [`docs/strings.md`](docs/strings.md) for the full byte/UTF-8/UTF-16 API.
+
 ### Matrices
 
 `lib/matrix.lambda` provides a row-major dense matrix type over `ArrayF`:
@@ -354,6 +380,13 @@ selection, and lexical `Let`/`Var` via compile-time substitution, and uses the
 recursive ADT plus the generic list library. It is the
 first compiler-shaped prototype written in Lambda itself.
 
+### Universal viewer
+
+`python tools/viewer.py PATH` (or `pi view PATH`) opens the shared WebGL
+viewer for a Pi output directory, CSV, plain numeric text, LMB1 stream, or
+`.frames.bin` file. The renderer is one static HTML/JS app; no plotting code is
+embedded in Lambda runs. See [`Pi/docs/viewer.md`](Pi/docs/viewer.md).
+
 ## Runtime and compiler
 
 * `Int`/`Bool` are unboxed `i64`; `Float` is an LLVM `double`.
@@ -409,15 +442,34 @@ the kernel source does not compile, it falls back to the CPU pool.
 `--data` enables `write-bytes`, `write-f64s`, `write-i64s` on stdout.  The
 `lib/stream.lambda` framing (`LMB1`) is used by
 [`tools/plot_svg.py`](tools/plot_svg.py) and
-[`tools/stream_plot.py`](tools/stream_plot.py) to plot or export arrays; no
-third-party package is needed for SVG.
+[`tools/stream_plot.py`](tools/stream_plot.py) for static SVG/CSV export.  For
+interactive work use the universal WebGL viewer:
+
+```powershell
+python lambda.py simulations/euler.lambda -o euler.exe
+./euler.exe > euler.txt
+python tools/viewer.py euler.txt
+# or: ./euler.exe | python tools/viewer.py -
+```
+
+The viewer reads plain numeric text, CSV, LMB1 streams, Pi output directories,
+and `.frames.bin` animations; `pi view PATH` is the Pi shortcut.  See
+[`Pi/docs/viewer.md`](Pi/docs/viewer.md).
+
+![Universal viewer series](tools/viewer/preview-euler.png)
 
 ## Libraries
 
 | file | purpose |
 | --- | --- |
 | `lib/bigint.lambda` | arbitrary-precision unsigned integers over `arrayi`; Karatsuba/Toom-3 |
-| `lib/complex.lambda` | complex arithmetic |
+| `lib/complex.lambda` | complex arithmetic and planar complex fields |
+| `lib/vec2.lambda`, `lib/vec3.lambda` | first-class vectors and planar vector fields |
+| `lib/field.lambda` | width-aware planar component access for `Array<T>` |
+| `lib/matrix.lambda` | row-major dense matrices over `ArrayF` |
+| `lib/kalman.lambda` | 2D constant-velocity Kalman filter |
+| `lib/vector.lambda` | growable flat Float vector |
+| `lib/arena.lambda` | flat bump allocator with explicit cursor |
 | `lib/numerics.lambda` | integer powers and numerical differentiation |
 | `lib/statistics.lambda` | mean, variance, min/max |
 | `lib/list.lambda` | list utilities |

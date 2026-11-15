@@ -1,0 +1,2 @@
+a → (str->utf16le "A😀")
+[(arrayi-length a), (arrayi-get a 0), (arrayi-get a 1), (arrayi-get a 2)]

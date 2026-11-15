@@ -496,6 +496,28 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TSTR], TARRAYB))
     if name == "arrayb->str":
         return mono(tfun([TARRAYB], TSTR))
+    if name == "str-byte-at":
+        return mono(tfun([TSTR, TINT], TINT))
+    if name == "str-byte-length":
+        return mono(tfun([TSTR], TINT))
+    if name == "str-valid-utf8":
+        return mono(tfun([TSTR], TBOOL))
+    if name == "str-utf8-at":
+        return mono(tfun([TSTR, TINT], TINT))
+    if name == "str-codepoint-at":
+        return mono(tfun([TSTR, TINT], TINT))
+    if name == "str-codepoint-length":
+        return mono(tfun([TSTR], TINT))
+    if name == "str->utf16le":
+        return mono(tfun([TSTR], TARRAYI))
+    if name == "utf16le->str":
+        return mono(tfun([TARRAYI], TSTR))
+    if name == "str->utf16le-bytes":
+        return mono(tfun([TSTR], TARRAYB))
+    if name == "utf16le-bytes->str":
+        return mono(tfun([TARRAYB], TSTR))
+    if name == "read-file-bytes":
+        return mono(tfun([TSTR], TARRAYB))
     if name == "argc":
         return mono(TINT)
     if name == "argv":

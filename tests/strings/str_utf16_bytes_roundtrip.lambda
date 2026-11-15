@@ -1,0 +1,2 @@
+b → (str->utf16le-bytes "A😀")
+(utf16le-bytes->str b)

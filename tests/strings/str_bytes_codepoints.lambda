@@ -1,0 +1,2 @@
+s → "A😀é"
+[(str-byte-length s), (str-byte-at s 0), (str-byte-at s 1), (str-byte-at s 2), (str-codepoint-length s), (str-codepoint-at s 0), (str-codepoint-at s 1), (str-codepoint-at s 2), (if (str-valid-utf8 s) then 1 else 0)]

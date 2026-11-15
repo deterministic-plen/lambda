@@ -106,6 +106,16 @@ OP_FN = {
     "str_to_arrayb": "@lambda_op_str_to_arrayb",
     "arrayb_to_str": "@lambda_op_arrayb_to_str",
     "str_append": "@lambda_op_str_append", "read_file": "@lambda_op_read_file",
+    "str_byte_at": "@lambda_op_str_byte_at", "str_utf8_at": "@lambda_op_str_utf8_at",
+    "str_codepoint_at": "@lambda_op_str_codepoint_at",
+    "str_byte_length": "@lambda_op_str_byte_length",
+    "str_codepoint_length": "@lambda_op_str_codepoint_length",
+    "str_valid_utf8": "@lambda_op_str_valid_utf8",
+    "str_to_utf16le": "@lambda_op_str_to_utf16le",
+    "utf16le_to_str": "@lambda_op_utf16le_to_str",
+    "str_to_utf16le_bytes": "@lambda_op_str_to_utf16le_bytes",
+    "utf16le_bytes_to_str": "@lambda_op_utf16le_bytes_to_str",
+    "read_file_bytes": "@lambda_op_read_file_bytes",
     "argc": "@lambda_op_argc_prim",
     "write_file": "@lambda_op_write_file",
     "print": "@lambda_op_print", "println": "@lambda_op_println",
@@ -3508,6 +3518,52 @@ class Compiler:
             boxed = self.box(a, args[0].type)
             res = self.new_reg()
             self.emit_inst(f"{res} = call %Value* @lambda_op_int_to_str(%Value* {boxed.name})")
+            return Val(BOX, res, owned=True)
+        if op in ("str_byte_at", "str_utf8_at", "str_codepoint_at"):
+            a = self._array_borrow(args[0])
+            idx = self._prim_arg(args[1], I64, args[1].type)
+            fn = {"str_byte_at": "@lambda_str_byte_at",
+                  "str_utf8_at": "@lambda_str_utf8_at",
+                  "str_codepoint_at": "@lambda_str_codepoint_at"}[op]
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call i64 {fn}(%Value* {a.name}, i64 {idx.name})")
+            self.release(a)
+            return Val(I64, res)
+        if op in ("str_byte_length", "str_codepoint_length", "str_valid_utf8"):
+            a = self._array_borrow(args[0])
+            fn = {"str_byte_length": "@lambda_str_byte_length",
+                  "str_codepoint_length": "@lambda_str_codepoint_length",
+                  "str_valid_utf8": "@lambda_str_valid_utf8"}[op]
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call i64 {fn}(%Value* {a.name})")
+            self.release(a)
+            return Val(I64, res)
+        if op == "str_to_utf16le":
+            a = self._array_borrow(args[0])
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_str_to_utf16le(%Value* {a.name})")
+            self.release(a)
+            return Val(BOX, res, owned=True)
+        if op == "str_to_utf16le_bytes":
+            a = self._array_borrow(args[0])
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_str_to_utf16le_bytes(%Value* {a.name})")
+            self.release(a)
+            return Val(BOX, res, owned=True)
+        if op == "utf16le_bytes_to_str":
+            a = self._prim_arg(args[0], BOX, args[0].type)
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_utf16le_bytes_to_str(%Value* {a.name})")
+            return Val(BOX, res, owned=True)
+        if op == "utf16le_to_str":
+            a = self._prim_arg(args[0], BOX, args[0].type)
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_utf16le_to_str(%Value* {a.name})")
+            return Val(BOX, res, owned=True)
+        if op == "read_file_bytes":
+            a = self._prim_arg(args[0], BOX, args[0].type)
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_op_read_file_bytes(%Value* {a.name})")
             return Val(BOX, res, owned=True)
         if op == "str_to_int":
             a = self._prim_arg(args[0], BOX, args[0].type)

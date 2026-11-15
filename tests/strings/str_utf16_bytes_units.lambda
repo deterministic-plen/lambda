@@ -1,0 +1,2 @@
+b → (str->utf16le-bytes "A😀")
+[(arrayb-length b), (arrayb-get b 0), (arrayb-get b 1), (arrayb-get b 4), (arrayb-get b 5)]
