@@ -4,13 +4,18 @@ type Token = (kind:Kind, value:[Int])
 ;Scheme
 
 decode_string → (λ string.
-    n → (arrayb-length string)
+    n → (str-len string)
     go → (λ str iter.
         if(>= iter n) 
     )
 )
 
-tokenize → (λsource:String start:Int.
+tokenize → (λsource:String.
     n → (str-len source)
+    loop \to (\lambda source:String ptr:Int.
+
+    
+    )
+
 
 )
