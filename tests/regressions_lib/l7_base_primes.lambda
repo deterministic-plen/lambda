@@ -1,0 +1,3 @@
+include "lib/prime.lambda"
+[(base-primes 0), (base-primes 1), (base-primes 2), (base-primes 3),
+ (base-primes 5), (base-primes 30)]

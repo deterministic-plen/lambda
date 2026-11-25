@@ -1,0 +1,3 @@
+include "lib/numerics"
+[(iexp 2 10), (iexp 2 62), (iexp 3 5), (iexp 7 0), (iexp 7 1),
+ (iexp -2 3), (iexp 1 100), (iexp 2 64)]

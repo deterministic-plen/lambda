@@ -1,0 +1,10 @@
+include "lib/arena.lambda"
+a0 → (arena-new 4)
+a1 → (arena-set a0 0 0 0.0)
+a2 → (arena-set a1 0 1 1.0)
+a3 → (arena-set a2 0 2 2.0)
+a4 → (arena-set a3 0 3 3.0)
+g → (arena-reserve a4 4 4)
+[(int->float (arrayf-length g)), (arena-get g 0 0), (arena-get g 0 1),
+ (arena-get g 0 2), (arena-get g 0 3),
+ (int->float (arena-offset (arena-alloc 4 1 (arrayf-length g))))]

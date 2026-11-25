@@ -1,0 +1,4 @@
+include "lib/list.lambda"
+[(append [] []), (append [1] []), (append [] [1]), (append [1, 2] [3, 4]),
+ (reverse [1, 2, 3]), (filter (λx. (> x 2)) [1, 2, 3, 4]),
+ (filter (λx. false) [1, 2]), (filter (λx. true) [])]

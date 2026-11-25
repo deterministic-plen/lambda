@@ -1,0 +1,3 @@
+include "lib/field.lambda"
+f → (field-new 2 3)
+(field-length f 0)

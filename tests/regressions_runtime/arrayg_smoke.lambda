@@ -1,0 +1,5 @@
+; Smoke test for the boxed generic Array<T> runtime (PR.md Task 10).
+; Array<String> uses the boxed generic representation: array-of moves the
+; element references out of the list, printing walks the slots, and the array
+; itself is one reference-counted value.
+(array-of ["x", "y", "z"])

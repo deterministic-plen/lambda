@@ -30,11 +30,14 @@ cases:
       41
   - name: typeerror
     compile_fail: type error   # substring of compiler stderr
-    flags: [--strict]
+  - name: zcombinator
+    flags: [--allow-dynamic]  # explicit fallback for an untypeable program
 ```
 
 Every successful run also enables the runtime allocation statistics and
-requires ``live=0``, so reference-counting leaks fail the suite.
+requires ``live=0``, so reference-counting leaks fail the suite.  Type checking
+is always on; a compiler that silently falls back to the boxed backend fails a
+case unless that case passes ``--allow-dynamic``.
 
 Usage
 -----
@@ -79,11 +82,19 @@ class Case:
     flags: List[str] = field(default_factory=list)
     stdin: Optional[str] = None
     fail_substr: Optional[str] = None
-    strict: bool = True
+    stderr_contains: Optional[str] = None
+    runtime_fail: Optional[str] = None
+    compile_only: bool = False
+    env: dict = field(default_factory=dict)
+    run_stderr_contains: Optional[str] = None
 
     @property
     def label(self) -> str:
         return f"{self.group}/{self.name}"
+
+    @property
+    def allow_dynamic(self) -> bool:
+        return "--allow-dynamic" in self.flags
 
 
 # Compiler diagnostics that must never appear in a passing run.  These are the
@@ -147,15 +158,15 @@ def discover(paths: Optional[Iterable[str]] = None) -> List[Case]:
                 if stdout is not None and fail is None:
                     text = str(stdout)
                     expected = bytes.fromhex(text.strip()) if binary else text
-                manifest_strict = True
-                if manifest is not None:
-                    manifest_strict = bool(
-                        (_read_manifest(manifest) or {}).get("strict", True))
                 explicit.append(Case(
                     name=name, source=source, group=group, expected=expected,
                     binary=binary, flags=[str(f) for f in (spec.get("flags") or [])],
                     stdin=spec.get("stdin"), fail_substr=fail,
-                    strict=bool(spec.get("strict", manifest_strict))))
+                    stderr_contains=spec.get("stderr_contains"),
+                    runtime_fail=spec.get("runtime_fail"),
+                    compile_only=bool(spec.get("compile_only", False)),
+                    env={str(k): str(v) for k, v in (spec.get("env") or {}).items()},
+                    run_stderr_contains=spec.get("run_stderr_contains")))
             elif os.path.isdir(full):
                 roots.append(full)
             else:
@@ -200,7 +211,11 @@ def discover(paths: Optional[Iterable[str]] = None) -> List[Case]:
                     flags=[str(f) for f in (entry.get("flags") or [])],
                     stdin=entry.get("stdin"),
                     fail_substr=fail,
-                    strict=bool(entry.get("strict", data.get("strict", True))),
+                    stderr_contains=entry.get("stderr_contains"),
+                    runtime_fail=entry.get("runtime_fail"),
+                    compile_only=bool(entry.get("compile_only", False)),
+                    env={str(k): str(v) for k, v in (entry.get("env") or {}).items()},
+                    run_stderr_contains=entry.get("run_stderr_contains"),
                 ))
     return cases + explicit
 
@@ -229,13 +244,21 @@ def run_case(case: Case, workdir: str) -> tuple[bool, str]:
     if proc.returncode != 0:
         return False, f"compilation failed:\n{proc.stderr}"
 
-    if case.strict:
+    if case.stderr_contains is not None and case.stderr_contains not in proc.stderr:
+        return False, (
+            f"expected '{case.stderr_contains}' in compiler stderr, got:\n"
+            f"{proc.stderr}")
+
+    if not case.allow_dynamic:
         bad = suspicious_markers(proc.stderr)
         if bad:
             return False, (
                 "compiler emitted a fallback diagnostic "
-                f"({', '.join(bad)}); fix the type error or mark the case "
-                f"strict: false:\n{proc.stderr.strip()}")
+                f"({', '.join(bad)}); fix the type error or pass "
+                f"--allow-dynamic explicitly:\n{proc.stderr.strip()}")
+
+    if case.compile_only:
+        return True, f"compile-only ok ({compile_time:.2f}s)"
 
     if sys.platform == "win32" and not exe.lower().endswith(".exe"):
         exe += ".exe"
@@ -243,6 +266,7 @@ def run_case(case: Case, workdir: str) -> tuple[bool, str]:
         return False, "compiler did not produce an executable"
 
     env = dict(os.environ)
+    env.update(case.env)
     env["LAMBDA_STATS"] = "1"
     run_start = time.time()
     try:
@@ -264,6 +288,20 @@ def run_case(case: Case, workdir: str) -> tuple[bool, str]:
     if not case.binary:
         stdout = stdout.replace("\r\n", "\n")
 
+    if case.runtime_fail is not None:
+        if run.returncode == 0:
+            return False, f"expected runtime failure ({case.runtime_fail})"
+        if case.runtime_fail not in stderr:
+            return False, (
+                f"expected '{case.runtime_fail}' in program stderr, got:\n"
+                f"{stderr}")
+        return True, (f"runtime-fail ok ({compile_time:.2f}s compile, "
+                      f"{run_time:.2f}s run)")
+    if (case.run_stderr_contains is not None
+            and case.run_stderr_contains not in stderr):
+        return False, (
+            f"expected '{case.run_stderr_contains}' in program stderr, got:\n"
+            f"{stderr}")
     if run.returncode != 0:
         return False, f"runtime exited {run.returncode}:\n{stderr}"
     if stdout != case.expected:
@@ -279,6 +317,11 @@ def run_case(case: Case, workdir: str) -> tuple[bool, str]:
 
 
 def main(argv=None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("paths", nargs="*",
                     help="test directories, manifest paths or single .lambda files")

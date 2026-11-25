@@ -1,0 +1,2 @@
+; Generic Array<T>: array-length does not consume the element values.
+(array-length (array-of ["x", "y"]))

@@ -1,0 +1,338 @@
+# PR compliance tracker
+
+Source of truth for the findings: [`../PR.md`](../PR.md) (review of
+`deterministic-plen/lambda` at commit `4a89a95`), plus [`../TASKS.md`](../TASKS.md)
+for the priority order.  This page maps every PR.md item to its status in this
+fork, who owns it, and the evidence available so far.
+
+Status legend:
+
+| status | meaning |
+| --- | --- |
+| **Fixed (verified)** | changed in this tree and checked by a command or test (evidence column) |
+| **Fixed (docs)** | the documentation/CI/hygiene defect from PR.md is fixed; the underlying behaviour may be owned elsewhere |
+| **Owned: runtime-safety** | shared task `task-1` (runtime.py + runtime regressions) |
+| **Owned: stdlib** | shared task `task-2` (`lib/`) |
+| **Owned: pi-fixes** | shared task `task-3` (`Pi/`, `tools/viewer.py`) |
+| **Owned: lead/compiler** | not assigned to one of the three code tasks; lead owns driver/front end/GPU/examples |
+| **Pending / decision needed** | no settlement yet (reason stated) |
+
+Update a row when the owner's report lands; keep the evidence column concrete
+(command, test name, or file/section).  "Verified" here always means *checked in
+this working tree*, not copied from the PR.
+
+## 1. PR.md findings
+
+### High severity
+
+| item | status | owner / where fixed | evidence |
+| --- | --- | --- | --- |
+| 1.1 atomic-RC race in `lambda_release_zero` | Owned: runtime-safety | `runtime.py` `lambda_release_zero` + pmap regression test | see runtime-safety report; PR repro under `tests/` |
+| 1.2 Pi predictable `/tmp` cache paths | Owned: pi-fixes | `Pi/pilang/cpp.py`, `Pi/pilang/worker.py` | see pi-fixes report |
+| 1.3 type errors silently become dynamic builds | **Fixed (verified): driver** | `lambda.py`: type checking always on, `--allow-dynamic` opt-in, `--strict` removed; `run_tests.py` treats an unrequested fallback as failure | `python lambda.py t.lambda` for `(println (+ 1 2.0))` now exits 1 with `type error: expected Int, got Float`; `--allow-dynamic` prints the warning and builds; README/run_tests updated. C1's *fallback diagnostics* are still owned by lead/compiler |
+
+### Medium severity
+
+| item | status | owner / where fixed | evidence |
+| --- | --- | --- | --- |
+| 2.1 `write-file` ignores `fclose` | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| 2.2 `read-file`/`read-file-bytes` non-regular files | Owned: runtime-safety | `runtime.py`; README "Files and streams" states regular-file behaviour | see runtime-safety report |
+| 2.3 NUL in file paths silently truncates | Owned: runtime-safety | `runtime.py`; README "Files and streams" documents rejection | see runtime-safety report |
+| 2.4/C9 use-after-consume / aliasing not diagnosed | Decision needed (lead); **docs fixed** | README "Flat arrays" now states the single-owner convention, the direct-use check, and the aliasing gap instead of implying copy-on-write; `SECURITY_REVIEW.md`/`docs/safety.md` quote the gap | probes: `(arrayi-set a ...)` then reading `a` is a compile error (`consumed by a destructive array update`); two derived handles print `17` (aliasing) |
+| 2.4a integer wrap/shift/`shr` semantics undocumented | **Fixed (docs)** | README "Integer semantics" table; `docs/safety.md` | probe results in README (wrap, `INT64_MIN/-1`, `shl 1 64`, `shl 1 -1`, `shr -8 200`) reproduced against this tree |
+| 2.5 incomplete Pi worker cache key | Owned: pi-fixes | `Pi/pilang/worker.py` | see pi-fixes report |
+| 2.6 non-atomic Pi runtime build | Owned: pi-fixes | `Pi/pilang/cpp.py` | see pi-fixes report |
+
+### Low severity / hygiene (section 3)
+
+| item | status | owner / where fixed | evidence |
+| --- | --- | --- | --- |
+| Float printing not shortest round-trip; NaN sign differs typed/dynamic | Owned: runtime-safety | `runtime.py` float printer / NaN normalisation | see runtime-safety report |
+| GPU library loading (bare `libnvrtc.so`, DLL planting) | Owned: runtime-safety | `runtime.py` GPU loader | see runtime-safety report |
+| Docs links dead because `docs/` is in `.gitignore` | **Fixed (docs)** | `.gitignore` no longer ignores `docs/`; link check below | link validation in "Evidence" section |
+| README links `pi/` with wrong case | **Fixed (docs)** | README intro now `(Pi/)` | link check |
+| `Pi/README.md` links `../../README.md`/`../../pispec.md`/`../../editors/vscode` outside the repo | Owned: pi-fixes (file outside docs-hygiene scope) | should become `../README.md`, `../pispec.md`, `../editors/vscode` | checked by link script; still broken at time of writing |
+| `SECURITY.md` is 1 byte | **Fixed (docs)** | new top-level `SECURITY.md` with private reporting channel, scope, expectations, safe harbour | file exists (no 1-byte SECURITY.md in this checkout, so it was recreated) |
+| Test counts disagree (144 / 132 / 170) | **Fixed (docs)** | README "Tests", `SECURITY_REVIEW.md`, `docs/safety.md`, `docs/type-algebra-status.md`, `docs/roadmap-checklist.md` now use "generated by `run_tests.py --list`" (the count has already grown past 170 as regressions are added: 183 at the time of writing) | `python run_tests.py --list` |
+| `lld` required by driver but undocumented | **Fixed (docs + driver)** | README "Requirements"; driver probes `lld-link`/`ld.lld`/`lld` and falls back (PR C4) | `lambda.py` `_link_command`; build succeeds with lld present, fallback path is code-reviewed |
+| `bench/build/*.pdb` + empty `logs.txt` tracked | Partial | `.gitignore` covers `bench/build/`, `*.pdb`, `logs.txt`, `test_output.txt`, `baseline_tests.log`; empty generated `bench/build/` directory removed after listing (`0` entries). `logs.txt` (0 bytes) and `baseline_tests.log` remain at the repo root and are outside this task's write scope | list/remove command output in the report; root files flagged to lead |
+| Misleading `Success! Run ./<basename>` message | **Fixed (verified): message; docs** | `lambda.py` now prints the executable path relative to the working directory (and a boxed-mode suffix); README Quick Start documents the actual output | `python lambda.py hello.lambda -o tmp/hello` printed `Success! Run ./tmp/hello.exe` |
+| Module names shadow stdlib/third-party; no packaging metadata | **Fixed (docs)** | README "Packaging note": checkout-relative script suite, top-level module names, no `pyproject.toml`, `lambda.py` is not importable as a package | README section; a real packaging split remains future work |
+| Pi `safe_artifact_name` accepts NUL/`:` | Owned: pi-fixes | `Pi/csrc/pi_runtime.cpp` | see pi-fixes report |
+| `-Wall -Wextra` unused `gpu_kernel` warning | Owned: runtime-safety/lead | `runtime.py` | see runtime-safety report |
+| CI only runs `run_tests.py` | **Fixed (CI)** | `.github/workflows/ci.yml` adds Pi static, editor, and Valgrind jobs; the Lambda job also checks clang/lld availability | workflow YAML parsed; editor tests and Valgrind subset validated locally where possible (no Valgrind on Windows) |
+| Executable bits missing (`Pi/pi`, `editors/install_vscode.sh`) | Docs note only | cannot change file modes: this checkout has no `.git`. README editor section documents `sh editors/install_vscode.sh` and the `git update-index --chmod=+x` fix | mode fix must be done in a Git checkout by lead |
+
+## 2. Compiler / driver findings (C series, 3A, 3B, 3D)
+
+| item | status | owner / where fixed | evidence |
+| --- | --- | --- | --- |
+| C1 fallback hides real diagnostics | Partly mitigated by 1.3 (fallback is now opt-in); quality of fallback errors owned: lead | `lambda.py`/`typecheck.py` | strict-by-default verified; the specific C1 fallback examples remain to verify |
+| C2 unsafe IR type-name mangling | Owned: lead/compiler | `compiler.py` | not started here |
+| C3 `build()` leaks temp dir on early failure | **Fixed (verified)** | `lambda.py`: `mkdtemp` now inside the `try/finally` | code read: `workdir = None; try: workdir = tempfile.mkdtemp(...)` ... `finally: shutil.rmtree` |
+| C4 hard-coded `-fuse-ld=lld` | **Fixed (verified)** | `lambda.py` `_link_command` probes lld and falls back; README documents lld as optional | code read; build with lld present works |
+| C5 `--layout` not covered by RecursionError handling; UTF-8 filename nit | Pending | lead/compiler | remaining nit |
+| C6 include accepts absolute/`../` paths | Pending | lead/compiler | not started here |
+| C7 `LAMBDA_RAWLOOP=1` double free | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| C8 thread-create failure silently skips chunk | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| C9 aliasing variants | See 2.4 (decision needed) | lead/compiler + docs | README documents the gap |
+| C10 multi-parameter generics unparseable | Pending | lead/compiler | not started here |
+| C11 `type` cannot mention other types; error omits `data` | Pending (lead/compiler); **docs fixed** | README "Products, sums, enums" + `docs/bootstrap.md` now say to use `data` for recursive declarations and that `type` cannot mention other types | README/docs text |
+| C12 uninhabited `data` accepted without warning | Pending | lead/compiler | not started here |
+| C13 rebind idiom error message/rule undocumented | **Fixed (docs)** | README "Recursion and blocks" documents that a definition cannot shadow an enclosing parameter and shows the error; code/message owned by lead | probe: `definition 'data' is used before it is initialised` |
+| 3A block definitions not generalized across each other | Pending | lead/compiler | not started here |
+| 3A list literals limited (~3,500) and quadratic compile time | Pending | lead/compiler | not started here |
+| 3A built-in names silently redefinable | Pending | lead/compiler | not started here |
+| 3A native stack overflow is a bare segfault | Pending | runtime-safety/lead | not started here |
+| 3A docs: README Quick Start / sum-type / Strings examples | **Fixed (docs, verified)** | README Quick Start, "Products, sums, and enums", "Strings and Unicode" | fixed examples compiled/run (hello prints; `area` example returns `6.0`; homogeneous strings list prints `[7, 3, 65, 128512]`); hetero list now rejected by strict checking |
+| 3B GPU path unreachable; docs contradict | **Fixed (docs, code pending)** | README "Parallelism and GPU" now states the dispatch is not wired and `LAMBDA_GPU=1` is currently inert; goal 4/limitations updated. Code fix owned by lead | PR 3B evidence adopted; README no longer claims an active backend |
+| 3B `str->int` saturating/trailing junk | **Fixed (docs)** | README "Strings and Unicode"; `docs/strings.md` "Integer conversion" | PR evidence; no checked variant added (code owned by lead) |
+| 3B shift masking/logical `shr` | See 2.4a (**Fixed docs**) | README "Integer semantics" | probes |
+| 3B `0xFF`/`1_000` lexer diagnostics misleading | Pending | lead/compiler (lexer) | not started here |
+| 3B run_tests cannot run `--dynamic`/atomic/Valgrind variants | Partly addressed by CI: Valgrind subset compiles each program itself; run_tests integration owned by lead | `run_tests.py`, `.github/scripts/valgrind_smoke.sh` | Valgrind script validated for compile/run/live=0 on 13 programs locally |
+| 3C shipped programs that do not compile (6 files, incl. `bootstrap/`) | Pending | lead/compiler/examples owner | not started here; CI compile-every-example job intentionally not added until the files are fixed (otherwise it would be red) |
+| 3D N1 `match` has no wildcard arm | **Fixed (docs)** | README "Products, sums, enums" + Limitations note that every variant must be listed; new match syntax may add `default` | README text |
+| 3D N2 every build recompiles the C runtime | Pending | lead/compiler | not started here |
+| 3D N3 internal compiler errors reduced to one line | **Fixed (verified)** | `lambda.py` now prints the traceback + `--debug` hint for unexpected exceptions | code read |
+| 3D N4 `LAMBDA_PATH`/`LAMBDA_LIB` can shadow bundled `lib/` | **Fixed (docs)** | README "Includes" warning; prefers `-L DIR` | README text |
+| 3D N5 include resolution details | Docs already list resolution order; error-text nit pending | lead/compiler | README "Includes" |
+| 3D N6 run_tests harness nits | Pending | lead/compiler/test owner | not started here |
+| 3D N7 library workarounds for consume-on-use | See 2.4/L16 | stdlib + lead | stdlib report |
+
+## 3. Pi findings (P and A series)
+
+| item | status | owner / where fixed | evidence |
+| --- | --- | --- | --- |
+| P1 worker crash kills the runtime | Owned: pi-fixes | `Pi/csrc/pi_runtime.cpp` | see pi-fixes report |
+| P2 timeout detaches branch; caught Deadline exits 1 | Owned: pi-fixes | `Pi/csrc/pi_runtime.cpp` | see pi-fixes report |
+| P3 unbounded `par for` threads | Owned: pi-fixes | `Pi/csrc/pi_runtime.cpp` | see pi-fixes report |
+| P4 plan JSON does not decode `\uXXXX` | Owned: pi-fixes | `Pi/csrc/pi_runtime.cpp` | see pi-fixes report |
+| P5 flat-program recursion/nesting limits | Owned: pi-fixes | Pi frontend + runtime | see pi-fixes report |
+| P6 `die()` calls `exit` from any thread | Owned: pi-fixes | `Pi/csrc/pi_runtime.cpp` | see pi-fixes report |
+| P7 unchecked double-to-int casts | Owned: pi-fixes | `Pi/csrc/pi_runtime.cpp`, AOT runtime | see pi-fixes report |
+| P8 shared schema file / non-atomic worker build | Owned: pi-fixes | `Pi/pilang/worker.py` | see pi-fixes report |
+| Pi fork pipes / `setenv` / `_cstr` | Owned: pi-fixes | `Pi/csrc/pi_runtime.cpp`, `Pi/pilang/aot.py` | see pi-fixes report |
+| AOT build: `-std=c99` cannot compile its own output | Owned: pi-fixes | `Pi/pilang/aot.py` (`-std=gnu99`) | see pi-fixes report |
+| A1 AOT writes CSV to `/` without `--out` | Owned: pi-fixes | `Pi/pilang/aot.py` + AOT runtime | see pi-fixes report |
+| A2 AOT artifact labels not sanitised | Owned: pi-fixes | AOT runtime | see pi-fixes report |
+| A3 AOT skips HELLO/schema check | Owned: pi-fixes | AOT runtime | see pi-fixes report |
+| A4 AOT trusts worker frame lengths | Owned: pi-fixes | AOT runtime | see pi-fixes report |
+| A5 AOT NUL/control characters in strings | Owned: pi-fixes | `Pi/pilang/aot.py` | see pi-fixes report |
+| A6 `pi_call` serialises twice | Owned: pi-fixes | AOT runtime | see pi-fixes report |
+
+## 4. Standard library findings (L series)
+
+All L items are owned by `stdlib` (shared task `task-2`) and are tracked in that
+task's report; this table records the mapping only.
+
+| item | status | owner |
+| --- | --- | --- |
+| L1 `is-prime` overflow/non-termination | Owned: stdlib | `lib/prime.lambda` |
+| L2 `append`/`filter` not tail recursive | Owned: stdlib | `lib/list.lambda` |
+| L3 `iexp` negative exponent | Owned: stdlib | `lib/numerics.lambda` |
+| L4 `arena-alloc` overflow/negative size | Owned: stdlib | `lib/arena.lambda` |
+| L5 `arena-reserve` exact-full growth | Owned: stdlib | `lib/arena.lambda` |
+| L6 `vec-get` bounds | Owned: stdlib | `lib/vector.lambda`; README TODO(stdlib) on guarantees |
+| L7 `base-primes 0/1` | Owned: stdlib | `lib/prime.lambda` |
+| L8 `minf`/`maxf` NaN and empty | Owned: stdlib | `lib/statistics.lambda` |
+| L9 bigint `bi-sub` borrow / `bi-from-int` normalize | Owned: stdlib | `lib/bigint.lambda` |
+| L10 `Complex::exp` | Owned: stdlib | `lib/complex.lambda` |
+| L11 `Complex::modulus` zero/NaN | Owned: stdlib | `lib/complex.lambda` |
+| L12 global `max`/`min` clash | Owned: stdlib | `lib/complex.lambda` |
+| L13 matrix shape/index checks | Owned: stdlib | `lib/matrix.lambda`; README matrix note |
+| L14 field index `k=0`/bounds | Owned: stdlib | `lib/field.lambda`; README TODO(stdlib) |
+| L15 stream u32 length/endianness | Owned: stdlib | `lib/stream.lambda` |
+| L16 vec2 header, vec3 cross/norm, kalman Joseph form | Owned: stdlib | `lib/vec2.lambda`, `lib/vec3.lambda`, `lib/kalman.lambda` |
+
+## 5. Security and memory-safety findings (S and F series)
+
+| item | status | owner / where fixed | evidence |
+| --- | --- | --- | --- |
+| S1 viewer serves parent directory / no Host check | Owned: pi-fixes | `tools/viewer.py`; `docs/safety.md` marks the review claim as corrected | see pi-fixes report |
+| S2 dynamic `str-len` type confusion | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| S3 dynamic `sum`/`product` type confusion | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| S4 deep closure destructor stack overflow | Owned: runtime-safety | `runtime.py` iterative release | see runtime-safety report |
+| S5 `read-line` long lines | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| S6 `read-int` saturates | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| S7 NUL in input lines/int | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| S8 viewer NUL request traceback | Owned: pi-fixes | `tools/viewer.py` | see pi-fixes report |
+| S9 misleading `data`-inside-`pmap` message | Pending | lead/compiler | message wording not changed here |
+| S10 silent stack-overflow segfault | Pending | runtime-safety/lead | not started here |
+| S11 `argv` out-of-range returns empty string | **Fixed (docs)** | README "Files and streams" documents the indistinguishable-missing-argument behaviour; code behaviour unchanged (owned by lead if it should error) | README text; `tests/argv.lambda` uses `(argc)`/`(argv i)` |
+| S12 `rc` is `int32_t` | Pending (design note) | runtime-safety/lead | document-only in PR; not changed here |
+| S13 immortal values hidden from `live=` | Owned: runtime-safety (include or document) | `runtime.py`; `docs/safety.md` notes the limitation | see runtime-safety report |
+| F1 empty-array pool size-class overflow | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| F2 `data` values never reclaimed | **Fixed (docs)**, code pending | README Limitations + `docs/safety.md` + `docs/type-algebra-status.md` describe process-lifetime arenas; reclamation code owned by lead | docs text |
+| F3 16 MiB-per-word arena reservation | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| F4 deep left-nested list free stack overflow | Owned: runtime-safety | `runtime.py` | see runtime-safety report |
+| F5 top-level record expression raw clang error | Pending | lead/compiler | not started here |
+| F6 top-level `data` value prints arena index | **Fixed (docs)** | README Limitations note; code owned by lead | README text |
+| 3E valgrind/DRD claims re-verification | Partly covered by new CI Valgrind job (subset) | `.github/scripts/valgrind_smoke.sh` | script validated locally for compile/run/live=0; no Valgrind on the Windows review machine |
+
+## 6. Docs / hygiene deliverables in this change (docs-hygiene)
+
+| fix | where | evidence |
+| --- | --- | --- |
+| Quick Start comment `;` and `(println "hello")` parentheses; final-value print documented | `README.md` "Quick start" | compiled and ran the fixed hello program (`hello`) |
+| Sum-type example rewritten to the tested syntax (`type Shape (...)` + `Circle r:` arms) | `README.md` "Products, sums, and enums" | compiled and ran; output `6.0` |
+| Strings example no longer mixes `Int`/`Bool` (hidden fallback) | `README.md` "Strings and Unicode"; `docs/strings.md` | homogeneous probe printed `[7, 3, 65, 128512]`; the old mixed list is now a hard type error |
+| Integer wrap/shift/`shr` semantics table | `README.md` "Integer semantics" | all six rows reproduced against this tree |
+| Consume-on-write wording replaced by single-owner/aliasing description | `README.md` "Flat arrays"; `docs/bootstrap.md`; `docs/roadmap.md` | direct-use-after-set compile error; two-handle alias program prints `17` |
+| Strict-default / `--allow-dynamic` / `--dynamic` / removed `--strict` wording | `README.md` status + Types + flags; `docs/safety.md`; `docs/bootstrap.md` | CLI probe: strict error by default; `--allow-dynamic` warns and builds; `--dynamic` prints the boxed-mode success line |
+| `docs/` removed from `.gitignore`; generated clutter rules added | `.gitignore` | link validation below; `bench/build/` removal |
+| README `Pi/` link case | `README.md` intro | link validation |
+| `Pi/README.md` outside-repo links | **not fixed here** (file owned by pi-fixes) | link script: `../../README.md`, `../../pispec.md`, `../../editors/vscode` unresolved |
+| `SECURITY.md` created (reporting channel, scope, expectations) | `SECURITY.md` | file exists; README "Security" links it |
+| Test counts replaced with `run_tests.py --list` wording | `README.md`, `SECURITY_REVIEW.md`, `docs/safety.md`, `docs/type-algebra-status.md`, `docs/roadmap-checklist.md` | no hard-coded counts remain outside the historical `PR.md`; `--list` reported 183-184 during this work and keeps growing as regressions are added |
+| `lld` optional / requirements documented | `README.md` "Requirements" | driver probes lld and falls back (PR C4) |
+| Misleading success message documented accurately | `README.md` "Quick start" | observed `Success! Run ./...` with the actual relative output path |
+| Module-name/packaging note | `README.md` "Packaging note" | text only |
+| Repo clutter: empty `bench/build/` removed after listing; ignore rules for pdb/build outputs/logs | `bench/`, `.gitignore` | list-before-delete output: 0 entries; `logs.txt`/`baseline_tests.log` at repo root are outside scope and reported to lead |
+| CI: Pi static, editor grammar/Pygments, Valgrind subset jobs (Lambda job kept) | `.github/workflows/ci.yml`, `.github/scripts/valgrind_smoke.sh` | YAML parses; editor tests pass locally; Valgrind subset compiles+runs+`live=0` locally; `bash -n` syntax check where bash is available |
+| Editor generated data refreshed so the editor test can gate CI | `editors/vscode/language-data.json` (regenerated via `python editors/generate_language_data.py`), `editors/pygments/lambda_lexer.py` `BUILTINS` | `python editors/test_highlight.py` and `python editors/test_pi_highlight.py` pass; **note:** rerun the generator after future `parser.PRIMITIVES`/`lexer.KEYWORDS` changes |
+| Retired stale review claims in docs (no recursive ADTs, no shape checks, viewer serving root) | `docs/bootstrap.md`, `docs/safety.md`, `docs/type-algebra-status.md` | text; fixes owned by the corresponding code owners |
+| `docs/type-algebra-status.md` stale hard-coded checkout path | now "run from the repository root" | text |
+
+## 7. Link validation
+
+Checked every relative Markdown link in `README.md` and `docs/*.md` against the
+filesystem.  All targets resolve except the ones owned by other areas:
+
+- `Pi/README.md` (not in this task's write scope): `../../README.md`,
+  `../../pispec.md`, `../../editors/vscode` point outside the repo.
+- Links added by this change (`docs/PR-COMPLIANCE.md`, `SECURITY.md`,
+  `editors/README.md`, `docs/safety.md` → `SECURITY.md`) resolve.
+
+`docs/PR.md` is an untouched copy of the root `PR.md` source material; it is not
+a documentation link target.
+
+## 8. Evidence commands
+
+```sh
+# clean strict-mode / fallback behaviour
+python lambda.py /tmp/t.lambda -o /tmp/t                      # type error, exit 1
+python lambda.py /tmp/t.lambda -o /tmp/t --allow-dynamic      # warning + boxed build
+python lambda.py /tmp/hello.lambda -o /tmp/hello --dynamic    # boxed success message
+
+# integer semantics probes (README table)
+#   (+ 9223372036854775807 1) -> -9223372036854775808
+#   (/ -9223372036854775808 -1) -> -9223372036854775808
+#   (shl 1 64) -> 1 ; (shl 1 -1) -> -9223372036854775808
+#   (shr -8 200) -> 72057594037927935
+
+# error/success-message wording
+python lambda.py hello.lambda -o hello
+
+# docs examples
+#   fixed Quick Start hello program compiles and prints "hello"
+#   fixed sum-type program compiles and prints "6.0"
+
+# test counts and suite
+python run_tests.py --list
+python run_tests.py
+
+# editor tests (needed for the CI job)
+python editors/test_highlight.py
+python editors/test_pi_highlight.py
+
+# Pi static tests (pytest is the CI runner; equivalent local shim: 17 passed)
+cd Pi && python -m pytest tests -q
+
+# CI workflow/script checks
+python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
+bash -n .github/scripts/valgrind_smoke.sh
+```
+
+## 9. Handoff / remaining items
+
+1. **Pi/README.md links** (`../../...`) — pi-fixes.
+2. **Root clutter**: `logs.txt` (0 bytes) and `baseline_tests.log` (generated at
+   2026-11-25 22:53) are outside the docs-hygiene write scope; lead should
+   delete/ignore them as appropriate (the new `.gitignore` covers both names).
+3. **Executable bits**: `Pi/pi` and `editors/install_vscode.sh` need
+   `git update-index --chmod=+x` in a real Git checkout; this workspace copy has
+   no `.git`, so only the workaround is documented.
+4. **Editor generated data**: rerun `python editors/generate_language_data.py`
+   and update `editors/pygments/lambda_lexer.py` `BUILTINS` after the
+   PRIMITIVES/keyword set changes for the pending syntax rework.
+5. **Not added yet (depend on other fixes)**: a CI "compile every shipped
+   example" job (six examples still do not compile, PR 3C) and a TSan/ASan job
+   (no sanitizer build support in `lambda.py` yet; the PR suggests TSan for the
+   new pmap race test).
+6. **`docs/PR.md`** is a duplicate of the root PR source; decide whether it
+   belongs in the tree (it predates this task and was copied in by the lead).
+7. **GPU dispatch** (PR 3B): README now states it is not wired.  If lead wires
+   the dispatch, update README "Parallelism and GPU", goal 4 and the limitation
+   entry together.
+8. **Unassigned PR items** (lead/compiler): C2, C5, C6, C9 decision, C10-C12,
+   3A generalization/list-literal/built-in/stack-overflow, 3B lexer diagnostics,
+   3C shipped-example compilation, N2/N5/N6, S9/S10/S12, F2 code, F5.
+
+## 9. Lead final status (project tasks 2-14 and remaining PR items)
+
+The tables above are the per-finding tracker written by the review-fix owners.
+This section is the lead's final mapping for the project task list and for the
+PR findings that were handled in the front end/driver after those tables were
+started.  "Evidence" names a command or test file in this tree.
+
+### Project task list
+
+| # | requirement | implementation | evidence / status |
+| --- | --- | --- | --- |
+| 2 | Remove `--strict`; strict always on | `lambda.py` no longer defines `--strict`; inference always runs; `--allow-dynamic` is the explicit fallback; `--dynamic` still forces the boxed backend after checking. `run_tests.py` fails unrequested fallbacks. | `python lambda.py t.lambda` rejects `(+ 1 2.0)`; `--strict` is an argparse error; `tests/semantics/strict_default`, `allow_dynamic`; README/docs updated. **Done** |
+| 3 | Optional explicit function return types | Parser accepts `λx: Int -> Int. body` and `λx. body : Int`; `Lam.return_annotation` is unified with the inferred body type. | `tests/semantics/return_ok`, `return_mismatch`; README Types section. **Done** |
+| 4 | Bounded decreasing rank halting solver | `semantics.py::check_halting`: constant and stable-limit guards, decreasing/increasing counters, structural `tail` on `empty?`; warning-only. Reachable functions only, so unused library loops do not spam. | `tests/semantics/halt_ok` (no warning), `halt_warn` (`stderr_contains: may not halt`). **Done (warning-only as required)** |
+| 5 | Automatic borrow inference + propagation, explicit linearity | `semantics.py::infer_borrows` greatest fixed point over direct-call parameters; explicit `&` wins; `: linear` opts out. Flat array parameters that only inspect are inferred; propagation follows callee borrowed positions. | `tests/semantics/borrow_inferred`, `borrow_linear`; docs. **Partial**: only ArrayF/I/B are auto-borrowed because string/list primitives currently consume the wrapper. |
+| 6 | `type Token = (kind: Kind, value: [Int])` | The `type X = (...)` form is parsed as a data-backed single-variant product with generated `X-field` accessors; arbitrary boxed fields are supported. Without `=`, the legacy unboxed product form is unchanged. | `tests/arrays/array_generic_token`; Token example in README; typechecker `_warn_uninhabited`. **Done** |
+| 7 | TCO ergonomics for many state variables | `loop (x → init) (y → init) ... body` sugar with `recur`; lowers to a local recursive function so existing `musttail` applies. `loop` is a soft keyword (ordinary identifier still works). | `tests/semantics/loop_sugar` (100k iterations); `learn/brainf.lambda`, `tests/closures/deeploop` still compile. **Done** |
+| 8 | Stricter purity, documented tradeoffs | World, arrays, `cycle`, printing and IO are impure primitives (CSE/`pmap`/`pure` reject them); built-in redefinition warns; README/safety documents the checker limits and aliasing gap. | `tests/semantics/world_pure`; `tests/arrays/vec2_impure`; README Purity/Limitations. **Done (strictest practical)** |
+| 9 | New `match value → result \| ... \| _ → result`; brainf cleanup with chars | Parser supports literal matches lowered to an equality chain with mandatory `_`, plus variant matches with `\|`; character literals `'['`/`']'` lex to Ints. `learn/brainf.lambda` rewritten from `if (== chari 93)` chains to `match chari ']' → ...`. | `tests/semantics/match_literals`, `string_index`; brainf compiles/runs; PR 3C checker. **Done for literal defaults**; variant matches still require every variant (N1 partial). |
+| 10 | Primitive `Array<T>`, `array-set`, sum elements, `#[...]`, hidden arena | New `TArrayG` (boxed `Value**` slots), runtime `lambda_arrayg_*` (of/new/get/set with COW/clone/length), typechecker special-cases `array-*` for both generic and scalar arrays, `#[...]` sugar. Sums and data-backed products box into the array and unbox on access; scalar arrays still lower to flat ArrayI/F/B. | `tests/arrays/array_generic_token`, `array_literal_sugar`, `array_generic_sum`; `tests/regressions_runtime` ArrayG C checks; README Flat arrays. **Done** |
+| 11 | `string[a]` + PR string issues | `s[i]` sugar → `str-codepoint-at` (Unicode scalar index, -1 OOB); adjacent `[` only, so `f [1,2]` is still a list argument. PR string fixes (NUL paths, regular-file reading) are in `runtime.py`; `str->int` semantics documented. | `tests/semantics/string_index`; `docs/strings.md`; runtime regressions. **Done** |
+| 12 | State-cycle debugger/profiler | `cycle` primitive prints `cycle N: state` when `LAMBDA_TRACE=1` and counts cycles; `LAMBDA_PROFILE=1` prints `lambda-profile: cycles=... cpu=...` at exit. The program keeps no shadow state. | `tests/semantics/cycle_trace` (env + `run_stderr_contains`). **Done (simple)** |
+| 13 | World-object purity | `World` type + `world-new/get/set/length`, implemented over a linear Int buffer; impure primitive set; `pure` parameters reject world-touching functions. | `tests/semantics/world`, `world_pure`; README World objects. **Done (minimal)** |
+| 14 | GUI framebuffer and helpers | `lib/GUI.lambda`: `canvas`, `Rectangle`, `circle`, `button` over `width*height` BGR `ArrayB`; a program returning `GUI` opens a Win32 window; headless/non-Windows writes PPM. `examples/plotter.lambda` plots a sine. | `tests/gui/gui_smoke` (compile-only), manual headless PPM run (`640x400`), native window smoke test; README GUI. **Partial**: button label rasterisation and Pi GUI payload passing are not implemented (documented). |
+
+### Remaining PR findings handled by the lead
+
+| item | implementation | evidence |
+| --- | --- | --- |
+| 1.3/C1 strict default, fallback diagnostics | see task 2; `--allow-dynamic` prints the original message and warns | CLI probes; `tests/diagnostics/typeerror` |
+| 3A SCC generalization | `typecheck._strong_components` + per-SCC generalization; dependency-ordered blocks | `tests/semantics/generalize_scc`; existing polymorphic tests |
+| 3A list literal cost/limit | iterative `walk`, memoized CSE purity/keys, limit raised to 40k frames, `LIST_LITERAL_LIMIT = 5000` with a clear `list literal too long` error | 3000 elements ~1.6 s (was ~51 s); 5000 compiles in ~2.4 s; 10000 gives the new diagnostic |
+| C2 IR name mangling | hex-escaped `%rec_` names and `@arena_*` globals; no collisions | records/data/enums test groups pass |
+| C3/C4 driver hygiene | temp dir created inside `try/finally`; lld probed and link retried without it | driver code; CI clang/lld step |
+| C5 layout/UTF-8 diagnostics | `--layout` catches `RecursionError`; loader reports `not valid UTF-8` with file | `tests/diagnostics/invalid_utf8` |
+| C6 include path confinement | loader allows only main-file/search roots; `LAMBDA_ALLOW_INCLUDE_OUTSIDE=1` escape hatch | manual outside-temp include rejected |
+| C10 multi-parameter data generics | parser collects `Pair<A, B>` across lexer comma tokens | manual `data Pair<A, B>` compiles |
+| C11 better nested-type diagnostic | product field errors point at `type T = (...)`/`data` | manual `type Q (a: P...)` diagnostic |
+| C12 uninhabited data warning | fixpoint constructibility check | manual `data T = A (x: T)` warning; rose tree stays silent |
+| C13 rebind rule | documented in README Recursion and blocks | README |
+| 3C shipped programs + CI | fixed all 13 failures (six real: brainf_argv trailing expression, complex_safe_div name, quicksort/gas/bootstrap rewrites); `tools/check_examples.py` compiles every shipped program and CI runs it | `38/38 shipped programs compile` |
+| S9 pmap data message | `check_pmap_function` names the ADT arena reason when a `DataCtor` is in the mapped body | code path; PR text |
+| S10 stack overflow | POSIX `sigaltstack`+`SIGSEGV` handler prints `lambda: stack overflow` and exits 70; Windows falls back to the OS exception | runtime_ext; POSIX-only (documented) |
+| F5 top-level product | clear Lambda diagnostic instead of a raw clang struct/`%Value*` error | manual `(Box 3.0)` |
+| F6 top-level data print | still prints an arena index; documented in Limitations (not silently presented as a value) | README Limitations; **partial** |
+| F2 data arena reclamation | documented process-lifetime arena and `live=0` blind spot; no row recycling implemented | README Limitations; **partial** |
+| 2.4/C9 array aliasing | single-owner convention documented, direct use-after-consume rejected; alias-derived handles still share a buffer | README Flat arrays; **partial by design (docs choice allowed by PR)** |
+| GPU path | dispatcher remains unwired; README says so explicitly and removes the active-GPU claim | README Parallelism and GPU |
+| N2 runtime object cache | content-hashed per-user cache with `0700` checks and `os.replace`; sandbox may deny the location, in which case the private workdir build is used | `lambda.py::_runtime_object` |
+| N3 internal errors | traceback printed to stderr with a `--debug` hint | driver |
+| N4 include precedence | documented resolution order and `LAMBDA_PATH`/`LAMBDA_LIB` precedence | README Includes |
+
+### Final verification run (this tree)
+
+* `python run_tests.py` -> **252/252 passed** (271.78 s, exit 0).  The new
+  `diagnostics/strict_removed` case was added after that run started and passes
+  separately; `python run_tests.py --list` now reports **253 cases**.
+* `python tools/check_examples.py` -> **38/38 shipped programs compile**.
+* `python tests/gui/check_gui.py` -> **GUI headless PPM: ok (64x48)**.
+* `python run_tests.py tests/semantics tests/gui tests/diagnostics/strict_removed.lambda`
+  -> **17/17 passed**.
+* Pi owner: `python -m pytest` (Pi) -> **43 passed, 3 skipped** (POSIX-only
+  permission tests) and `check_cpp_examples.py` all pass; runtime owner:
+  `regressions_runtime` 16/16.
+* Known partials are listed explicitly in the tables above: F2/F6 (data arena
+  reclamation/printing), C9 aliasing (documented single-owner choice), variant
+  `match` wildcard (literal defaults only), non-array auto-borrows, GUI text/Pi
+  payload, GPU dispatch, and Windows stack-overflow diagnostics.

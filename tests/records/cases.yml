@@ -24,6 +24,3 @@ cases:
   compile_fail: product-typed functions cannot be captured
 - name: record_mix
   compile_fail: numeric operator expects Int or Float
-  flags:
-  - --strict
-strict: true

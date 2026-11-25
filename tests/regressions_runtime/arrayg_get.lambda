@@ -1,0 +1,2 @@
+; Generic Array<T>: array-get returns a retained element (here index 1).
+(array-get (array-of ["x", "y"]) 1)

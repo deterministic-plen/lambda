@@ -2,6 +2,12 @@
 
 Date: 2026-11-14
 
+> **Historical review.**  This page records the audit as it stood on
+> 2026-11-14, before the `PR.md` fix cycle.  Fix status for every finding is
+> tracked in [`docs/PR-COMPLIANCE.md`](docs/PR-COMPLIANCE.md); test counts are
+> not hard-coded here (`python run_tests.py --list` prints the current count).
+> Several claims below were corrected by the later review (marked).
+
 ## Scope
 
 - Pi frontend (`pilang/`) and C++ runtime (`pi/csrc/pi_runtime.cpp`).
@@ -33,6 +39,8 @@ build frontend only. `pi test` and all examples execute through the C++ runtime.
 - Validate coupling dimensions, positions, ring sizes, and empty instance
   binding ranges.
 - Sanitize artifact names so `../`/absolute names cannot escape `--out`.
+  (The later review found NUL and `:` are still accepted -- PR P8/artifact
+  names; fix owned by the Pi owner.)
 - Add a top-level runtime error handler that still calls `finish()`.
 
 ### Lifecycle/concurrency
@@ -42,6 +50,7 @@ build frontend only. `pi test` and all examples execute through the C++ runtime.
 - Serialized worker spawning to avoid inheriting another worker's pipes and to
   make `LAMBDA_GPU` set/restore atomic.
 - Fixed timeout thread lifetime by moving wait state to the heap.
+  (The later review found this did not cancel the branch; see PR P2.)
 - Bounded `push` waits (30 s) and react to stopped/failed controllers.
 - `close` terminates instance workers, closes tick/ring channels, and joins
   controllers.
@@ -84,6 +93,8 @@ regenerated. `runtime_stripe.c/.o` duplicates were removed.
   user-function calls (without making enum/constants recursive).
 - Replaced the predictable `/tmp` runtime-object cache with a private per-build
   object and remove the build workdir in `finally`.
+  (The later review found Pi still had the same predictable-cache problem; see
+  PR 1.2.)
 - Fixed `read-file` purity spelling; treat `fix` and `immortalize` as impure for
   CSE/pmap purposes.
 - Reject non-finite float literals and out-of-range integer literals.
@@ -91,11 +102,14 @@ regenerated. `runtime_stripe.c/.o` duplicates were removed.
 
 ## Verification
 
+These were the review-time results; the checked-in counts are generated now:
+
 ```text
-Pi static tests:   17/17
+Pi static tests:   17/17 at review time
 Pi C++ examples:   field, drone, heat, heat2d_cells, reduce, fault,
-                   gray_scott, gray_scott_multi
-Lambda tests:      132/132
+                   gray_scott, gray_scott_multi (review-time list)
+Lambda tests:      full run_tests.py suite passed at review time; run
+                   `python run_tests.py --list` for the current case count
 Editor tests:      grammar, language data, Pygments
 ```
 
@@ -104,10 +118,13 @@ Editor tests:      grammar, language data, Pygments
 - Lambda parser/resolver recursion can still raise `RecursionError` on
   pathological nesting; it is reported as a compile failure, not a sandbox.
 - Lambda atomic-RC tail release has a latent race in an uncommon shared-tail
-  scenario; not reproduced in the suite.
+  scenario; not reproduced in the suite.  (The later review reproduced it
+  easily; PR 1.1, fix owned by the runtime owner.)
 - GPU/NVRTC objects are process-lifetime and failed kernels are not freed.
 - Pi timeout cancellation cannot force a worker call to stop; the worker I/O
   mutex serializes the abandoned call, but a deadline may be observed late.
+  (See PR P2: the branch thread is detached, and a caught `Deadline` still
+  exits 1.)
 - Restart replay can still block on ring channels if a failed iteration already
   filled them; the shipped examples do not hit this ordering.
 

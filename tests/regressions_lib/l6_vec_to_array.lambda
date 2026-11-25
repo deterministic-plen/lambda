@@ -1,0 +1,6 @@
+include "lib/vector.lambda"
+v0 → (vec-new 1)
+v1 → (vec-push v0 1.5)
+v2 → (vec-push v1 2.5)
+a → (vec-to-array v2)
+[(int->float (arrayf-length a)), (arrayf-get a 0), (arrayf-get a 1)]

@@ -1,5 +1,26 @@
+# Python bytecode and local environments
 __pycache__/
-docs/
+*.py[cod]
 .venv/
+.pytest_cache/
+
+# Native build outputs and generated IR
 *.exe
+*.o
+*.obj
+*.ll
+*.pdb
 Pi/out/
+bench/build/
+
+# Generated logs and test artifacts
+logs.txt
+test_output.txt
+baseline_tests.log
+tmp_*
+_dbg_*
+
+# NOTE: docs/ must stay tracked.  An earlier revision of this file listed
+# `docs/`, which made every docs/... link in README.md and Pi/README.md dead
+# for a fresh clone (PR docs defect).  Documentation, benchmark results and
+# READMEs are source files, not build outputs.

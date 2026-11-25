@@ -1,0 +1,6 @@
+include "lib/bigint.lambda"
+a → (bi-from-int 4 2000000000)
+b → (bi-from-int 4 999999999)
+d → (bi-sub a b 4)
+e → (bi-sub (bi-from-int 4 7) (bi-from-int 4 2) 4)
+[(bi-len d), (bi-get d 0), (bi-get d 1), (bi-len e), (bi-get e 0)]

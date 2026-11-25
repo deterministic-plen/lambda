@@ -1,0 +1,2 @@
+include "lib/stream.lambda"
+(emit-bytes 7 (arrayb-of [1, 2, 255]))

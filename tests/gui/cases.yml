@@ -1,0 +1,4 @@
+﻿description: 'GUI framebuffer: a program returning GUI opens a window (or writes PPM headless)'
+cases:
+- name: gui_smoke
+  compile_only: true

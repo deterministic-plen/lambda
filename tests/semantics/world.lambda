@@ -1,0 +1,8 @@
+﻿; World objects are explicit, linear, in-place state.  A function receives the
+; world, reads the state it still needs, then consumes it with world-set.
+step → (λw: World i.
+  if (== i 0) then (world-get w 0)
+  else cur → (world-get w 0)
+       (step (world-set w 0 (+ i cur)) (- i 1)))
+w → (world-new 2)
+[(step w 10), (world-length w)]

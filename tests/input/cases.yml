@@ -29,4 +29,3 @@ cases:
     '
 - name: input_disabled
   compile_fail: terminal input is disabled
-strict: true

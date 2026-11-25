@@ -1,0 +1,3 @@
+﻿sum-arr → (λa: ArrayI. (go 0 0 a))
+go → (λi acc &b. if (>= i (arrayi-length b)) then acc else (go (+ i 1) (+ acc (arrayi-get b i)) b))
+(sum-arr (arrayi-of [1, 2, 3, 4]))

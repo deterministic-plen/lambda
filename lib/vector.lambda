@@ -7,6 +7,13 @@
 ; and contiguous, grows by doubling, and never allocates a node per element.
 ; A future epoch/arena can replace the copy-on-grow step with a bump pointer
 ; without changing this API.
+;
+; Index access is checked against the vector's own length, not just the
+; backing array: the header slots are part of that array, so an unchecked
+; `(vec-get v -1)` used to return the capacity (element -1 -> slot 1) and
+; `(vec-get v -2)` the length.  Invalid indices stop the program; the language
+; has no dedicated panic primitive, so the library uses the generic empty-list
+; failure.
 
 vec-new → (λ cap: Int.
   if (< cap 0) then (vec-new 0)
@@ -15,10 +22,19 @@ vec-new → (λ cap: Int.
 vec-length → (λ v: ArrayF. (float->int (arrayf-get v 0)))
 vec-capacity → (λ v: ArrayF. (float->int (arrayf-get v 1)))
 
-vec-get → (λ v: ArrayF i: Int. (arrayf-get v (+ 2 i)))
+vec-get → (λ v: ArrayF i: Int.
+  if (or (< i 0) (>= i (vec-length v)))
+  then (head nil)
+  else (arrayf-get v (+ 2 i)))
 
+; `vec-get` is a pure read: 0 <= i < length.  `vec-set` may also target the
+; first free slot (i == length), which is how vec-push appends; a set at
+; i > length or i < 0 is invalid.  The backing array's own bounds check still
+; rejects i == length when the vector is at capacity.
 vec-set → (λ v: ArrayF i: Int x: Float.
-  (arrayf-set v (+ 2 i) x))
+  if (or (< i 0) (> i (vec-length v)))
+  then (head nil)
+  else (arrayf-set v (+ 2 i) x))
 
 vec-copy → (λ src: ArrayF dst: ArrayF n: Int i: Int.
   if (>= i n) then dst

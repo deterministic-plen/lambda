@@ -1,0 +1,5 @@
+﻿; #[] Array literal sugar, scalar and boxed elements.
+a → #[10, 20, 30]
+s → #["a", "b"]
+[(int->str (array-length a)), (int->str (array-get a 1)),
+ (int->str (array-length s)), (array-get s 0)]

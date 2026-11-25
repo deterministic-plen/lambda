@@ -1,0 +1,2 @@
+﻿go → (λn acc. if (== n 0) then acc else (go (- n 1) (cycle (+ acc 1))))
+(go 3 0)

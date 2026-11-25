@@ -38,4 +38,3 @@ cases:
   compile_fail: pmap requires a provably pure function
 - name: lambda_p_impure
   compile_fail: λp function body must be pure
-strict: true

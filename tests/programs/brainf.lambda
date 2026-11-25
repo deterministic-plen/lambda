@@ -1,0 +1,58 @@
+; A minimal implementation of Brain**** in lambda
+; Based on Rosetta Code's Execute_Brain**** task
+; Brainf's syntax:
+; > ptr increment
+; < ptr decrement
+; + increment cell
+; - decrement cell
+; . output character
+; , read character
+; [ jump to next ] if the cell value is 0
+; ] jump to [ if cell value is 0
+
+; Character literals ('[' is 91, ']' is 93, ...) keep the dispatch readable.
+skipf → (λ source source-ptr depth.
+    if (>= source-ptr (arrayb-length source)) then source-ptr
+    else
+        chari → (arrayb-get source source-ptr)
+        match chari
+          '[' → (skipf source (+ source-ptr 1) (+ depth 1))
+        | ']' → if (== depth 0) then source-ptr
+                 else (skipf source (+ source-ptr 1) (- depth 1))
+        | _   → (skipf source (+ source-ptr 1) depth)
+)
+skipb → (λ source source-ptr depth.
+    if (< source-ptr 0) then 0
+    else
+        chari → (arrayb-get source source-ptr)
+        match chari
+          ']' → (skipb source (- source-ptr 1) (+ depth 1))
+        | '[' → if (== depth 0) then source-ptr
+                 else (skipb source (- source-ptr 1) (- depth 1))
+        | _   → (skipb source (- source-ptr 1) depth)
+)
+
+bf → (λ source tape source-ptr ptr.
+    if (< ptr 0) then (bf source tape source-ptr 0) else
+    if (>= source-ptr (arrayb-length source)) then tape
+    else
+    chari → (arrayb-get source source-ptr)
+    cell → (arrayb-get tape ptr)
+    next → (+ source-ptr 1)
+    match chari
+      '>' → (bf source tape next (+ ptr 1))
+    | '<' → (bf source tape next (- ptr 1))
+    | '+' → (bf source (arrayb-set tape ptr (+ cell 1)) next ptr)
+    | '-' → (bf source (arrayb-set tape ptr (- cell 1)) next ptr)
+    | '[' → (bf source tape (if (== 0 cell) then (skipf source next 0) else next) ptr)
+    | ']' → (bf source tape (if (== 0 cell) then next else (skipb source (- source-ptr 1) 0)) ptr)
+    | '.' → a → (write-bytes (arrayb-of [cell]))
+            (bf source tape next ptr)
+    | ',' → a → (read-int "> ")
+            (bf source (arrayb-set tape ptr (% a 255)) next ptr)
+    | _   → tape
+)
+
+prog → (arrayb-of ['>', '+', '+', '+', '+', '+', '+', '+', '+', '[', '<', '+', '+', '+', '+', '+', '+', '+', '+', '+', '>', '-', ']', '<', '.', '>', '+', '+', '+', '+', '[', '<', '+', '+', '+', '+', '+', '+', '+', '>', '-', ']', '<', '+', '.', '+', '+', '+', '+', '+', '+', '+', '.', '.', '+', '+', '+', '.', '>', '>', '+', '+', '+', '+', '+', '+', '[', '<', '+', '+', '+', '+', '+', '+', '+', '>', '-', ']', '<', '+', '+', '.', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '.', '>', '+', '+', '+', '+', '+', '+', '[', '<', '+', '+', '+', '+', '+', '+', '+', '+', '+', '>', '-', ']', '<', '+', '.', '<', '.', '+', '+', '+', '.', '-', '-', '-', '-', '-', '-', '.', '-', '-', '-', '-', '-', '-', '-', '-', '.', '>', '>', '>', '+', '+', '+', '+', '[', '<', '+', '+', '+', '+', '+', '+', '+', '+', '>', '-', ']', '<', '+', '.', '>', '+', '+', '+', '+', '+', '+', '+', '+', '[', '<', '+', '+', '+', '+', '+', '+', '+', '+', '+', '>', '-', ']', '<', '.', '>', '+', '+', '+', '+', '[', '<', '+', '+', '+', '+', '+', '+', '+', '>', '-', ']', '<', '+', '.', '+', '+', '+', '+', '+', '+', '+', '.', '.', '+', '+', '+', '.', '>', '>'])
+tape → (bf prog (arrayb 32000 0) 0 0)
+0

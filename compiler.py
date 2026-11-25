@@ -38,10 +38,27 @@ from analysis import IMPURE_PRIMITIVES, PRIM_ARITY, top_level_order
 from errors import CompileError
 from parser import OP_CANON
 from runtime import RUNTIME_IR_DECLS
-from typecheck import BOX, F64, I64, TAdt, TCon, TFun, TList, TRecord, TSum, prune, rep_of
+from typecheck import (
+    BOX, F64, I64, TAdt, TArrayG, TCon, TFun, TList, TRecord, TSum, prune,
+    rep_of,
+)
 
-PRIM_GLOBALS = {
-    "add": "@lambda_prim_add",
+def _scalar_array_kind(t) -> Optional[str]:
+    """Return 'i'/'f'/'b' when *t* can use a specialized flat array."""
+    if t is None:
+        return None
+    t = prune(t)
+    if isinstance(t, TCon):
+        if t.name == "Int":
+            return "i"
+        if t.name == "Float":
+            return "f"
+        if t.name == "Bool":
+            return "b"
+    return None
+
+
+PRIM_GLOBALS = {    "add": "@lambda_prim_add",
     "sub": "@lambda_prim_sub",
     "mul": "@lambda_prim_mul",
     "div": "@lambda_prim_div",
@@ -520,11 +537,11 @@ class Compiler:
             if adt.layout != "arena":
                 continue
             width = max((len(fields) for _, _, fields in adt.variants), default=0)
-            g = f"@arena_{name}"
+            g = self.global_name("arena", name)
             self.adt_arenas[name] = g
             self.adt_widths[name] = width
             self.top_globals.append(f"{g} = internal global %AdtArena* null")
-            wg = f"@arena_words_{name}"
+            wg = self.global_name("arena_words", name)
             self.adt_words[name] = wg
             self.top_globals.append(f"{wg} = internal global i64* null")
         for name, rec in sorted(self.record_schemas.items()):
@@ -551,6 +568,13 @@ class Compiler:
         self._drain_functions()
 
         parts: List[str] = [RUNTIME_IR_DECLS]
+        parts.append(
+            "\ndeclare %Value* @lambda_box_record_bytes(i8*, i64)"
+            "\ndeclare i8* @lambda_record_bytes(%Value*)"
+            "\ndeclare %Value* @lambda_cycle(%Value*)"
+            "\ndeclare void @lambda_profile_report()"
+            "\ndeclare void @lambda_stack_guard()")
+        parts.append("\ndeclare void @lambda_gui_show(%Value*)")
         parts.append("\n; ---- LLVM types ----")
         parts.extend(self.type_defs)
         parts.append("\n; ---- primitive globals ----")
@@ -748,8 +772,26 @@ class Compiler:
 
     @staticmethod
     def record_llvm_name(name: str) -> str:
-        return "%rec_" + "".join(
-            c if c.isalnum() or c == "_" else "_" for c in name)
+        # Non-alphanumeric characters are hex-escaped rather than replaced by
+        # '_' so that distinct source names (T? vs T_, A-b vs A_b) cannot
+        # collide in the IR.  The emitted name is always pure ASCII.
+        safe = []
+        for c in name:
+            if c.isascii() and (c.isalnum()):
+                safe.append(c)
+            else:
+                safe.append("_" + format(ord(c), "x") + "_")
+        return "%rec_" + "".join(safe)
+
+    @staticmethod
+    def global_name(kind: str, name: str) -> str:
+        safe = []
+        for c in name:
+            if c.isascii() and (c.isalnum()):
+                safe.append(c)
+            else:
+                safe.append("_" + format(ord(c), "x") + "_")
+        return "@" + kind + "_" + "".join(safe)
 
     def rep_type(self, rep: str) -> str:
         if rep == I64:
@@ -1009,16 +1051,41 @@ class Compiler:
                     getattr(type_hint, "loc", None))
             return self.unbox(val, type_hint)
         if target.startswith("REC:"):
+            if val.rep == BOX:
+                return self._unbox_record(val, target)
             raise CompileError(
                 "cannot implicitly convert to a product type",
                 getattr(type_hint, "loc", None))
         raise CompileError(f"cannot coerce {val.rep} to {target}")
 
+    def _rec_size(self, rep: str, type_hint) -> int:
+        t = getattr(type_hint, "type", None)
+        if isinstance(t, TSum):
+            return (1 + t.max_words) * 8
+        rec = self.record_schemas.get(rep[4:])
+        if isinstance(rec, TSum):
+            return (1 + rec.max_words) * 8
+        if isinstance(rec, TRecord):
+            return len(rec.fields) * 8
+        # Data-backed arena/boxed values already use I64/BOX, not REC.
+        return 8
+
     def box(self, val: Val, type_hint) -> Val:
         if val.rep.startswith("REC:"):
-            raise CompileError(
-                "product values cannot be boxed/first-class yet",
-                getattr(type_hint, "loc", None))
+            # Copy the inline struct into an ArrayB value so it can live in a
+            # list or generic array.  All fields are scalar words, so bytes are
+            # a complete value copy and the normal ArrayB RC/free path applies.
+            ty = self.rep_type(val.rep)
+            slot = self.builder.new_alloca(ty)
+            self.emit_inst(f"store {ty} {val.name}, {ty}* {slot}")
+            raw = self.new_reg()
+            self.emit_inst(f"{raw} = bitcast {ty}* {slot} to i8*")
+            size = self._rec_size(val.rep, type_hint)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_box_record_bytes(i8* {raw}, "
+                f"i64 {size})")
+            return Val(BOX, res, owned=True)
         if val.rep == BOX:
             return val
         if val.rep == F64:
@@ -1029,6 +1096,21 @@ class Compiler:
         res = self.new_reg()
         self.emit_inst(f"{res} = call %Value* {fn}(i64 {val.name})")
         return Val(BOX, res, owned=True)
+
+    def _unbox_record(self, val: Val, target: str) -> Val:
+        ty = self.rep_type(target)
+        raw = self.new_reg()
+        self.emit_inst(f"{raw} = call i8* @lambda_record_bytes(%Value* {val.name})")
+        ptr = self.new_reg()
+        self.emit_inst(f"{ptr} = bitcast i8* {raw} to {ty}*")
+        res = self.new_reg()
+        self.emit_inst(f"{res} = load {ty}, {ty}* {ptr}")
+        if val.owned:
+            # The boxed bytes were only needed for the load; the value is now
+            # an inline copy.  Release the box so array/list elements do not
+            # leak when they are matched or projected.
+            self.release(val)
+        return Val(target, res)
 
     def unbox(self, val: Val, type_hint) -> Val:
         if val.rep == I64:
@@ -2157,11 +2239,13 @@ class Compiler:
                 bind_fields(idx, fields)
                 value = self.compile(arm, is_tail=True)
                 if not self.terminated:
-                    # Fields bound from the arena/list are owned.  A tail
-                    # return bypasses pop_scope's cleanup; release them before
-                    # returning unless the returned value is the field itself.
+                    # Fields bound from the arena/list are owned.  Reading a
+                    # field for the return value retains it (compile_var), so
+                    # the binding's own reference can be released here even
+                    # when the arm returns that field.  A tail return bypasses
+                    # pop_scope's cleanup, hence the explicit loop.
                     for nm, immortal in reversed(self.cleanup_stack[-1]):
-                        if not immortal and (value is None or nm != value.name):
+                        if not immortal:
                             emit_release_ir(self.builder, nm, self.atomic_rc)
                     self.cleanup_stack[-1].clear()
                     self.emit_return(value, arm.type)
@@ -2221,7 +2305,7 @@ class Compiler:
             raise CompileError("match subject produced no value", node.subject.loc)
         rep = "REC:" + rec.name
         if subject.rep != rep:
-            raise CompileError("sum match subject is not unboxed", node.subject.loc)
+            subject = self.coerce(subject, rep, node.subject.type)
         ty = self.rep_type(rep)
         tag = self.new_reg()
         self.emit_inst(f"{tag} = extractvalue {ty} {subject.name}, 0")
@@ -2957,6 +3041,13 @@ class Compiler:
         if op in ("read_line", "read_int", "read_float") and not self.allow_input:
             raise CompileError(
                 "terminal input is disabled; recompile with --input", node.loc)
+        if op == "cycle":
+            if len(args) != 1:
+                raise CompileError("cycle takes exactly one state value", node.loc)
+            v = self._prim_arg(args[0], BOX, args[0].type)
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_cycle(%Value* {v.name})")
+            return Val(BOX, res, owned=True)
         if op in ("write_bytes", "write_f64s", "write_i64s"):
             if not self.allow_data:
                 raise CompileError(
@@ -3052,6 +3143,15 @@ class Compiler:
 
     def check_pmap_function(self, arg: Node, loc) -> None:
         if not self.pmap_function_pure(arg):
+            lam = arg if isinstance(arg, Lam) else None
+            if lam is None and isinstance(arg, Var) and arg.binding is not None:
+                lam = arg.binding.lam
+            if lam is not None and any(
+                    isinstance(n, DataCtor) for n in walk(lam.body)):
+                raise CompileError(
+                    "pmap cannot allocate a `data` value: the ADT arena is "
+                    "shared and not thread-safe. Allocate data outside the "
+                    "mapped function, or use lists/arrays of scalars", loc)
             raise CompileError(
                 "pmap requires a provably pure function: no printing, terminal "
                 "input, or calls through unknown function values", loc)
@@ -3824,6 +3924,123 @@ class Compiler:
                 f"{res} = call %Value* @lambda_arrayi_pmap_chunk("
                 f"%Value* {f.name}, i64 {n.name}, i64 {chunk.name})")
             return Val(BOX, res, owned=True)
+        if op in ("array_of", "array_new"):
+            if op == "array_of":
+                elem_t = args[0].type
+                lty = prune(elem_t)
+                elem = lty.elem if isinstance(lty, TList) else None
+                scalar = _scalar_array_kind(elem)
+                if scalar is not None:
+                    lst = self._prim_arg(args[0], BOX, args[0].type)
+                    fn = {"i": "@lambda_arrayi_of", "f": "@lambda_arrayf_of",
+                          "b": "@lambda_arrayb_of"}[scalar]
+                    res = self.new_reg()
+                    self.emit_inst(f"{res} = call %Value* {fn}(%Value* {lst.name})")
+                    return Val(BOX, res, owned=True)
+                lst = self._prim_arg(args[0], BOX, args[0].type)
+                res = self.new_reg()
+                self.emit_inst(
+                    f"{res} = call %Value* @lambda_arrayg_of(%Value* {lst.name})")
+                return Val(BOX, res, owned=True)
+            elem = args[1].type
+            scalar = _scalar_array_kind(elem)
+            n = self._prim_arg(args[0], I64, args[0].type)
+            if scalar is not None:
+                if scalar == "f":
+                    init = self._prim_arg(args[1], F64, args[1].type)
+                    fn, sig = "@lambda_arrayf_new", f"i64 {n.name}, double {init.name}"
+                else:
+                    init = self._prim_arg(args[1], I64, args[1].type)
+                    fn = "@lambda_arrayi_new" if scalar == "i" else "@lambda_arrayb_new"
+                    sig = f"i64 {n.name}, i64 {init.name}"
+                res = self.new_reg()
+                self.emit_inst(f"{res} = call %Value* {fn}({sig})")
+                return Val(BOX, res, owned=True)
+            init = self._prim_arg(args[1], BOX, args[1].type)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_arrayg_new(i64 {n.name}, %Value* {init.name})")
+            return Val(BOX, res, owned=True)
+        if op in ("array_get", "array_set", "array_length", "array_clone"):
+            aty = prune(args[0].type)
+            if not isinstance(aty, TArrayG):
+                if isinstance(aty, TCon) and aty.name in ("ArrayI", "ArrayF", "ArrayB"):
+                    suffix = {"ArrayI": "i", "ArrayF": "f", "ArrayB": "b"}[aty.name]
+                    op = f"array{suffix}_" + op.split("_", 1)[1]
+                else:
+                    raise CompileError(
+                        f"array operation requires Array<T>, got {aty!r}",
+                        node.loc)
+            else:
+                if op == "array_set":
+                    if (isinstance(args[0], Var) and args[0].binding is not None
+                            and args[0].binding.borrowed):
+                        raise CompileError(
+                            "cannot mutate a borrowed array parameter",
+                            args[0].loc)
+                    a = self._move_array_param(args[0])
+                    if a is None:
+                        a = self._prim_arg(args[0], BOX, args[0].type)
+                    idx = self._prim_arg(args[1], I64, args[1].type)
+                    v = self._prim_arg(args[2], BOX, args[2].type)
+                    res = self.new_reg()
+                    self.emit_inst(
+                        f"{res} = call %Value* @lambda_arrayg_set("
+                        f"%Value* {a.name}, i64 {idx.name}, %Value* {v.name})")
+                    return Val(BOX, res, owned=True)
+                a = self._array_borrow(args[0])
+                if op == "array_get":
+                    idx = self._prim_arg(args[1], I64, args[1].type)
+                    res = self.new_reg()
+                    self.emit_inst(
+                        f"{res} = call %Value* @lambda_arrayg_get("
+                        f"%Value* {a.name}, i64 {idx.name})")
+                    self.release(a)
+                    return Val(BOX, res, owned=True)
+                if op == "array_length":
+                    res = self.new_reg()
+                    self.emit_inst(
+                        f"{res} = call i64 @lambda_arrayg_length(%Value* {a.name})")
+                    self.release(a)
+                    return Val(I64, res)
+                res = self.new_reg()
+                self.emit_inst(
+                    f"{res} = call %Value* @lambda_arrayg_clone(%Value* {a.name})")
+                self.release(a)
+                return Val(BOX, res, owned=True)
+        if op == "world_new":
+            n = self._prim_arg(args[0], I64, args[0].type)
+            res = self.new_reg()
+            self.emit_inst(f"{res} = call %Value* @lambda_arrayi_new(i64 {n.name}, i64 0)")
+            return Val(BOX, res, owned=True)
+        if op == "world_get":
+            a = self._array_borrow(args[0])
+            idx = self._prim_arg(args[1], I64, args[1].type)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call i64 @lambda_arrayi_get(%Value* {a.name}, i64 {idx.name})")
+            self.release(a)
+            return Val(I64, res)
+        if op == "world_set":
+            if (isinstance(args[0], Var) and args[0].binding is not None
+                    and args[0].binding.borrowed):
+                raise CompileError("cannot mutate a borrowed world", args[0].loc)
+            a = self._move_array_param(args[0])
+            if a is None:
+                a = self._prim_arg(args[0], BOX, args[0].type)
+            idx = self._prim_arg(args[1], I64, args[1].type)
+            v = self._prim_arg(args[2], I64, args[2].type)
+            self.emit_inst(
+                f"call void @lambda_arrayi_set(%Value* {a.name}, i64 "
+                f"{idx.name}, i64 {v.name})")
+            return Val(BOX, a.name, owned=True)
+        if op == "world_length":
+            a = self._array_borrow(args[0])
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call i64 @lambda_arrayi_length(%Value* {a.name})")
+            self.release(a)
+            return Val(I64, res)
         if op in ("arrayf_of", "arrayi_of", "arrayb_of"):
             lst = self._prim_arg(args[0], BOX, args[0].type)
             fn = {"arrayf_of": "@lambda_arrayf_of",
@@ -3989,6 +4206,7 @@ class Compiler:
         self.builder.raw("define i32 @main(i32 %argc, i8** %argv) {")
         self.builder.label("entry")
         self.emit_inst("call void @lambda_runtime_init()")
+        self.emit_inst("call void @lambda_stack_guard()")
         # Capture process arguments so argc/argv work on every platform.
         argc_ty = self.new_reg()
         self.emit_inst(f"{argc_ty} = sext i32 %argc to i64")
@@ -4056,7 +4274,14 @@ class Compiler:
             raise CompileError("program produced no value", program.body.loc)
         rep = self.node_rep(program.body)
         result = self.coerce(result, rep, program.body.type)
-        if self.exit_code:
+        body_type = prune(program.body.type)
+        is_gui = isinstance(body_type, TAdt) and body_type.name == "GUI"
+        if is_gui:
+            result = self.coerce(result, BOX, program.body.type)
+            self.emit_inst(
+                f"call void @lambda_gui_show(%Value* {result.name})")
+            self.release(result)
+        elif self.exit_code:
             if rep != I64:
                 raise CompileError("--exit-code requires the program result to be Int", program.body.loc)
         elif self.allow_data:
@@ -4069,6 +4294,14 @@ class Compiler:
                 self.emit_inst(f"call void @lambda_print_i64(i64 {result.name})")
         elif rep == F64:
             self.emit_inst(f"call void @lambda_print_float(double {result.name})")
+        elif rep.startswith("REC:"):
+            # Top-level product/sum values have no boxed print representation
+            # yet.  Report that as a Lambda diagnostic instead of emitting a
+            # call with a struct where %Value* is required (raw clang error).
+            raise CompileError(
+                f"a top-level {rep[4:]} value cannot be printed; bind it to a "
+                f"name and pass it to a function, or project its fields",
+                program.body.loc)
         else:
             self.emit_inst(f"call void @lambda_print_ln(%Value* {result.name})")
             self.release(result)
@@ -4097,6 +4330,7 @@ class Compiler:
             reg = self.new_reg()
             self.emit_inst(f"{reg} = load %AdtArena*, %AdtArena** {g}")
             self.emit_inst(f"call void @lambda_arena_free(%AdtArena* {reg})")
+        self.emit_inst("call void @lambda_profile_report()")
         self.emit_inst("call void @lambda_flush()")
         self.emit_inst("call void @lambda_stats()")
         if self.exit_code:

@@ -1,0 +1,4 @@
+﻿; A `pure` parameter may not receive a function that touches a World.
+use-pure → (λf: pure. (f 1))
+bad → (λx: Int. (world-get (world-new 1) 0))
+(use-pure bad)

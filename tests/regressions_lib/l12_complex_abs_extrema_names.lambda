@@ -1,0 +1,6 @@
+include "lib/complex.lambda"
+max → (λa: Int b: Int. if (> a b) then a else b)
+min → (λa: Int b: Int. if (< a b) then a else b)
+[(int->float (max 1 5)), (int->float (min 1 5)),
+ (cabs-max 3.0 (- 0.0 4.0)), (cabs-min 3.0 (- 0.0 4.0)),
+ (Complex::modulus (Complex 3.0 4.0))]

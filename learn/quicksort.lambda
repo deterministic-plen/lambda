@@ -1,28 +1,14 @@
-partition → (λ data lo hi.
-piv → (arrayi-get data hi)
-go → (λ data i j.
-if (>= (- j 1) (arrayi-length data)) then data
-else
-if (<= (arrayi-get data j) pivot) then
-a → (arrayi-get data i)
-b → (arrayi-get data j)
-data → (arrayi-set data j a)
-data → (arrayi-set data i b)
-go data (+ i 1) (+ j 1)
-else
-go data i (+ j 1)
-)
-go data (- lo 1) lo
-a → (arrayi-get data (- lo 1))
-b → (arrayi-get data hi)
-data → (arrayi-set data hi a)
-data → (arrayi-set data (- lo 1) b)
-data
-)
+; Quicksort over persistent lists.  Lists are immutable, so the functional
+; version is shorter and safer than the half-finished in-place prototype that
+; used to live here; an array-based quicksort is in tests/arrays/arrayi_loop.
+include "lib/list.lambda"
 
-quicksort → (λ data lo hi.
- if (or (>= lo hi) (< lo 0)) then
- data
- 
-)
+qsort → (λxs.
+  if (empty? xs) then []
+  else pivot → (head xs)
+       rest → (tail xs)
+       smaller → (filter (λx. (<= x pivot)) rest)
+       larger → (filter (λx. (> x pivot)) rest)
+       (append (qsort smaller) (cons pivot (qsort larger))))
 
+(qsort [3, 1, 4, 1, 5, 9, 2, 6])

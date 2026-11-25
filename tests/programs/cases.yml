@@ -48,4 +48,9 @@ cases:
   stdout: '1299709
 
     '
-strict: true
+
+- name: brainf
+  compile_only: true
+  flags:
+  - --data
+  - --input

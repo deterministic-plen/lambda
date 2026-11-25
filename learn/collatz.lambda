@@ -1,0 +1,19 @@
+; Does the following function halt for any given input n?
+collatz-step → (λ x:Int. 
+if (== (% x 2) 0) then / x 2 else (+ (* 3 x) 1)
+)
+; simple wrapper to compute the number of steps required...
+collatz → (λ x:Int steps:Int. 
+if (== x 1) then steps else (collatz (collatz-step x) (+ steps 1))
+)
+
+main → (λ r:Int. 
+if (> r 100) then 0 
+else 
+b → (print (int->str r))
+c → (print ": ")
+a → (println (collatz r 0))
+main (+ r 1)
+)
+
+(main 1) 

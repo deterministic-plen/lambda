@@ -10,7 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  lambda-tests:
+    name: Lambda regression suite
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository code
@@ -24,15 +25,92 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install --upgrade pip pyyaml
 
-      - name: Verify Clang is available
-        run: clang --version
+      - name: Verify clang and linker
+        run: |
+          clang --version
+          if command -v lld >/dev/null || command -v ld.lld >/dev/null \
+             || command -v lld-link >/dev/null; then
+            echo "lld found: the driver will use -fuse-ld=lld"
+          else
+            echo "lld not found: the driver falls back to the default linker"
+          fi
 
-      - name: Run tests
+      - name: Run Lambda tests
         run: python -u run_tests.py | tee test_output.txt
+
+      - name: Compile every shipped example (PR 3C)
+        run: python tools/check_examples.py
+
+      - name: GUI headless PPM smoke test
+        run: python tests/gui/check_gui.py
 
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-output
+          name: lambda-test-output
           path: test_output.txt
+
+  # The PR review found these files were never run in CI (PR docs item:
+  # "CI coverage").  Each job is intentionally independent so one tool can
+  # fail without hiding the others.
+  pi-static-tests:
+    name: Pi static tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run Pi static tests
+        working-directory: Pi
+        run: python -m pytest tests -q
+
+  editor-tests:
+    name: Editor grammar and lexer tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pygments
+        run: python -m pip install --upgrade pip pygments
+
+      - name: Run Lambda editor tests
+        run: python editors/test_highlight.py
+
+      - name: Run Pi editor tests
+        run: python editors/test_pi_highlight.py
+
+  valgrind-smoke:
+    name: Valgrind smoke subset
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify clang
+        run: clang --version
+
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Compile and run a regression subset under Valgrind
+        run: bash .github/scripts/valgrind_smoke.sh

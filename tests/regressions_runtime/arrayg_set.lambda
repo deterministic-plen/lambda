@@ -1,0 +1,2 @@
+; Generic Array<T>: array-set replaces slot 1 (consuming the array handle).
+(array-set (array-of ["x", "y"]) 1 "z")

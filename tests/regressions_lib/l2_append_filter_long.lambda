@@ -1,0 +1,7 @@
+include "lib/list.lambda"
+r1 → (range 0 300000)
+a → (append r1 (range 0 10))
+r2 → (range 0 300000)
+f → (filter (λx. (== 0 (% x 2))) r2)
+[(length a), (head a), (head (reverse a)),
+ (length f), (head f), (head (reverse f))]

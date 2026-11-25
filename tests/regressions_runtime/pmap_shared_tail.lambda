@@ -1,0 +1,17 @@
+; Regression for PR.md 1.1: lambda_release_zero decremented cons tails with a
+; plain read-modify-write, so two pmap workers freeing lists that share a tail
+; lost reference-count updates and corrupted memory.
+;
+; Every pmap result element is (sum (cons i t)): the new cons shares the same
+; tail t, and freeing the result concurrently decrements t->rc from several
+; workers.  The outer loop repeats the race internally so one process run is
+; enough to catch it (reproducing it used to need dozens of process runs).
+mk → (λn.
+  t → (range 0 50)
+  f → (λi. (sum (cons i t)))
+  spin → (λk acc.
+    if (== k 0)
+    then acc
+    else (spin (- k 1) (+ acc (sum (pmap f (range 0 4000))))))
+  (spin n 0))
+(mk 40)

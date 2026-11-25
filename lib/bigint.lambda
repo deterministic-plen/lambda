@@ -24,12 +24,27 @@ bi-trim → (λa n.
   then (bi-trim a (- n 1))
   else (arrayi-set a 0 n))
 
+; Build a bigint for a non-negative Int.  `x` is split into base-1e9 limbs
+; (the old code stored the whole value in limb 0, so 2000000000 produced an
+; unnormalised limb and -5 produced a negative limb).  A negative value has no
+; unsigned representation and a value needing more than `cap` limbs does not
+; fit, so both stop the program instead of silently corrupting the number.
+; `cap` is threaded through `go` as a parameter rather than captured: the boxed
+; backend consumes a captured boxed value when the array is built, which made
+; the closure cannot-touch-after-capture rule reject the captured read.
 bi-from-int → (λcap x.
-  if (== x 0)
-  then (bi-zero cap)
+  if (< x 0)
+  then (head nil)
+  else if (< cap 0)
+  then (head nil)
   else
-    r → (bi-zero cap)
-    (arrayi-set (arrayi-set r 1 x) 0 1))
+    go → (λcap x i r.
+      if (== x 0)
+      then (bi-trim r i)
+      else if (>= i cap)
+      then (head nil)
+      else (go cap (/ x base) (+ i 1) (bi-set r i (% x base))))
+    (go cap x 0 (bi-zero cap)))
 
 bi-add → (λa b cap.
   al → (bi-len a)
@@ -65,35 +80,53 @@ bi-add! → (λa b.
       (go (+ i 1) (/ s base) (arrayi-set r (+ i 1) (% s base))))
   (go 0 0 a))
 
+; Unsigned subtraction.  There is no negative result: a final borrow (or a
+; second operand with more limbs than the first) means a < b, which used to
+; produce a wrapped one-limb value such as 999999998 for 5 - 7.  It now stops
+; the program.  Both operands must be normalised (bi-len is the real length),
+; which every bi-* operation guarantees.
 bi-sub → (λa b cap.
   al → (bi-len a)
   bl → (bi-len b)
-  go → (λi borrow r.
-    if (>= i al)
-    then (bi-trim r al)
-    else
-      av → (arrayi-get a (+ i 1))
-      bv → (if (< i bl) then (arrayi-get b (+ i 1)) else 0)
-      d → (- (- av bv) borrow)
-      if (< d 0)
-      then (go (+ i 1) 1 (arrayi-set r (+ i 1) (+ d base)))
-      else (go (+ i 1) 0 (arrayi-set r (+ i 1) d)))
-  (go 0 0 (bi-zero cap)))
+  if (> bl al)
+  then (head nil)
+  else
+    go → (λi borrow r.
+      if (>= i al)
+      then
+        if (== borrow 0)
+        then (bi-trim r al)
+        else (head nil)
+      else
+        av → (arrayi-get a (+ i 1))
+        bv → (if (< i bl) then (arrayi-get b (+ i 1)) else 0)
+        d → (- (- av bv) borrow)
+        if (< d 0)
+        then (go (+ i 1) 1 (arrayi-set r (+ i 1) (+ d base)))
+        else (go (+ i 1) 0 (arrayi-set r (+ i 1) d)))
+    (go 0 0 (bi-zero cap)))
 
+; In-place variant of bi-sub; the same underflow rules apply.
 bi-sub! → (λa b.
   al → (bi-len a)
   bl → (bi-len b)
-  go → (λi borrow r.
-    if (>= i al)
-    then (bi-trim r al)
-    else
-      av → (arrayi-get r (+ i 1))
-      bv → (if (< i bl) then (arrayi-get b (+ i 1)) else 0)
-      d → (- (- av bv) borrow)
-      if (< d 0)
-      then (go (+ i 1) 1 (arrayi-set r (+ i 1) (+ d base)))
-      else (go (+ i 1) 0 (arrayi-set r (+ i 1) d)))
-  (go 0 0 a))
+  if (> bl al)
+  then (head nil)
+  else
+    go → (λi borrow r.
+      if (>= i al)
+      then
+        if (== borrow 0)
+        then (bi-trim r al)
+        else (head nil)
+      else
+        av → (arrayi-get r (+ i 1))
+        bv → (if (< i bl) then (arrayi-get b (+ i 1)) else 0)
+        d → (- (- av bv) borrow)
+        if (< d 0)
+        then (go (+ i 1) 1 (arrayi-set r (+ i 1) (+ d base)))
+        else (go (+ i 1) 0 (arrayi-set r (+ i 1) d)))
+    (go 0 0 a))
 
 bi-slice → (λa start count cap.
   go → (λi r.

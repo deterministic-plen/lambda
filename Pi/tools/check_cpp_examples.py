@@ -14,6 +14,11 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
+# This checkout keeps the Lambda compiler next to Pi/; use it unless the caller
+# points at a different compiler checkout.
+LAMBDA_HOME = os.environ.get("LAMBDA_HOME") or os.path.dirname(ROOT)
+if not os.path.exists(os.path.join(LAMBDA_HOME, "lambda.py")):
+    LAMBDA_HOME = os.environ.get("LAMBDA_HOME", r"C:\Users\mumuj\Documents\lambda")
 
 
 def run(name: str, expect: str, artifacts=()) -> None:
@@ -22,7 +27,7 @@ def run(name: str, expect: str, artifacts=()) -> None:
     cmd = [PY, "-m", "pilang", "cpp", os.path.join("examples", name + ".pi"), "--out", out]
     p = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True,
                        env={**os.environ, "PYTHONPATH": ROOT,
-                            "LAMBDA_HOME": os.environ.get("LAMBDA_HOME", r"C:\Users\mumuj\Documents\lambda")})
+                            "LAMBDA_HOME": LAMBDA_HOME})
     if p.returncode != 0:
         raise SystemExit(f"{name}: exit {p.returncode}\n{p.stdout}\n{p.stderr}")
     combined = p.stdout + p.stderr
@@ -39,7 +44,7 @@ def run_default(name: str, expect: str) -> None:
     p = subprocess.run([PY, "-m", "pilang", "run", os.path.join("examples", name + ".pi")],
                        cwd=ROOT, text=True, capture_output=True,
                        env={**os.environ, "PYTHONPATH": ROOT,
-                            "LAMBDA_HOME": os.environ.get("LAMBDA_HOME", r"C:\Users\mumuj\Documents\lambda")})
+                            "LAMBDA_HOME": LAMBDA_HOME})
     combined = p.stdout + p.stderr
     if p.returncode != 0 or expect not in combined or "pi-cpp: done" not in combined:
         raise SystemExit(f"default backend {name}: exit {p.returncode}\n{combined}")
@@ -47,6 +52,9 @@ def run_default(name: str, expect: str) -> None:
 
 
 def main() -> None:
+    # Keep the developer's per-user build cache out of this regression run and
+    # make the run work in sandboxes that only allow writes under the temp dir.
+    os.environ.setdefault("PI_CACHE_DIR", tempfile.mkdtemp(prefix="pi-example-cache-"))
     run("field", "shape sin(x) * cos(y), 200 x 200", ["report.html", "field.csv"])
     run("drone", "shape 200 control steps", ["report.html"])
     run("heat", "after WorkerDied + restart", ["report.html", "h1_clean.csv"])

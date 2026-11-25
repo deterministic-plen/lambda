@@ -19,8 +19,9 @@ from typing import Dict, List, Optional, Tuple
 from . import syntax as S
 from .checker import check, walk
 from .errors import PiCompileError
+from .frontend import run_frontend
 from .parser import load_module
-from .worker import ToolchainError, build_worker, find_lambda_home
+from .worker import ToolchainError, build_worker, find_lambda_home, schema_hash
 
 
 class AotError(Exception):
@@ -46,6 +47,30 @@ def _cstr(s: str) -> str:
     return "".join(out)
 
 
+def _clit(s: str) -> Tuple[str, int]:
+    """A C string literal plus its exact byte length (PR.md A5).
+
+    Every byte outside printable ASCII is emitted as a three-digit octal escape,
+    so NUL and other control characters survive into the C string and UTF-8
+    text cannot be mangled by the compiler's source encoding.  The returned
+    length is the number of bytes in the literal, which the AOT runtime needs
+    because C's ``printf("%s")`` would truncate at an embedded NUL.
+    """
+    data = s.encode("utf-8")
+    out = ['"']
+    for byte in data:
+        if byte == 0x22:            # "
+            out.append('\\"')
+        elif byte == 0x5C:          # backslash
+            out.append("\\\\")
+        elif 0x20 <= byte < 0x7F:
+            out.append(chr(byte))
+        else:
+            out.append("\\%03o" % byte)
+    out.append('"')
+    return "".join(out), len(data)
+
+
 def _ctype_name(name: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
     return "v_" + safe
@@ -64,6 +89,7 @@ class AotGen:
         protocols = list(mod.protocols.values())
         self.proto = protocols[0] if len(protocols) == 1 else None
         self.op_index = {o.name: i for i, o in enumerate(self.proto.ops)} if self.proto else {}
+        self.schema = schema_hash(self.proto) if self.proto else (0, 0)
 
     def fail(self, node, msg: str):
         loc = getattr(node, "loc", None)
@@ -172,7 +198,8 @@ class AotGen:
             if kind == "bool":
                 return f"pi_num({1.0 if node.value else 0.0!r})"
             if kind == "string":
-                return f"pi_str({_cstr(node.value)})"
+                lit, nbytes = _clit(node.value)
+                return f"pi_str({lit}, {nbytes})"
             if kind == "unit":
                 return "pi_unit()"
             if kind == "duration":
@@ -249,28 +276,28 @@ class AotGen:
         if name == "emit_text":
             if len(node.args) < 2:
                 self.fail(node, "emit_text(name, text)")
-            return f"(pi_emit_text({self.expr(node.args[1])}.str), pi_unit())"
+            return f"(pi_emit_text({self.expr(node.args[1])}), pi_unit())"
         if name == "emit_series":
             if len(node.args) < 2:
                 self.fail(node, "emit_series(name, y)")
             namev = self.expr(node.args[0])
             x = self.expr(node.args[1])
             y = self.expr(node.args[2]) if len(node.args) > 2 else x
-            return f"(pi_emit_series({namev}.str, {x}, {y}), pi_unit())"
+            return f"(pi_emit_series({namev}, {x}, {y}), pi_unit())"
         if name == "emit_points":
             if len(node.args) < 2:
                 self.fail(node, "emit_points(name, xs, ys)")
             namev = self.expr(node.args[0])
             x = self.expr(node.args[1])
             y = self.expr(node.args[2]) if len(node.args) > 2 else x
-            return f"(pi_emit_points({namev}.str, {x}, {y}), pi_unit())"
+            return f"(pi_emit_points({namev}, {x}, {y}), pi_unit())"
         if name == "emit_bars":
             if len(node.args) < 2:
                 self.fail(node, "emit_bars(name, xs, ys)")
             namev = self.expr(node.args[0])
             x = self.expr(node.args[1])
             y = self.expr(node.args[2]) if len(node.args) > 2 else x
-            return f"(pi_emit_bars({namev}.str, {x}, {y}), pi_unit())"
+            return f"(pi_emit_bars({namev}, {x}, {y}), pi_unit())"
         if name == "emit_grid":
             if len(node.args) < 2:
                 self.fail(node, "emit_grid(name, values, rows, cols)")
@@ -278,7 +305,7 @@ class AotGen:
             val = self.expr(node.args[1])
             rows = self.expr(node.args[2]) if len(node.args) > 2 else "pi_num(0)"
             cols = self.expr(node.args[3]) if len(node.args) > 3 else "pi_num(0)"
-            return (f"(pi_emit_grid({namev}.str, {val}, pi_as_int({rows}), "
+            return (f"(pi_emit_grid({namev}, {val}, pi_as_int({rows}), "
                     f"pi_as_int({cols})), pi_unit())")
         if name == "emit_animation_frame":
             if len(node.args) < 4:
@@ -287,7 +314,7 @@ class AotGen:
             val = self.expr(node.args[1])
             rows = self.expr(node.args[2])
             cols = self.expr(node.args[3])
-            return (f"(pi_emit_animation_frame({namev}.str, {val}, pi_as_int({rows}), "
+            return (f"(pi_emit_animation_frame({namev}, {val}, pi_as_int({rows}), "
                     f"pi_as_int({cols})), pi_unit())")
         if name == "Pool":
             self.fail(node, "Pool(...) is only used as Pool(...).recruit(n)")
@@ -314,6 +341,16 @@ def _collect_pools(mod, base: str, proto, lambda_home, builddir):
 def compile_aot(path: str, output: str, *, lambda_home: Optional[str] = None,
                 builddir: Optional[str] = None, outdir: Optional[str] = None,
                 keep_c: bool = False, steps: int = 100) -> str:
+    # The parser/checker/plan walk and the C generator are recursive; run the
+    # whole compile on the large frontend stack (PR.md P5).
+    return run_frontend(lambda: _compile_aot(
+        path, output, lambda_home=lambda_home, builddir=builddir, outdir=outdir,
+        keep_c=keep_c, steps=steps))
+
+
+def _compile_aot(path: str, output: str, *, lambda_home: Optional[str] = None,
+                 builddir: Optional[str] = None, outdir: Optional[str] = None,
+                 keep_c: bool = False, steps: int = 100) -> str:
     try:
         mod = load_module(path)
         diags = check(mod)
@@ -339,7 +376,14 @@ def compile_aot(path: str, output: str, *, lambda_home: Optional[str] = None,
     if prog.params:
         raise AotError("AOT program parameters are not implemented; specialize the source")
     gen = AotGen(mod, prog, pools, outdir or "", steps)
-    gen.emit(f"pi_set_output({_cstr(outdir or '')});")
+    if outdir:
+        gen.emit(f"pi_set_output({_cstr(outdir)});")
+    else:
+        # PR.md A1: an empty output directory used to become "/index.csv" in
+        # the filesystem root.  NULL means "print a summary, write nothing".
+        gen.emit("pi_set_output(NULL);")
+    hi, lo = gen.schema
+    gen.emit(f"pi_set_schema({hi & (2**64 - 1)}ull, {lo & (2**64 - 1)}ull);")
     gen.block(prog.body)
     gen.emit("pi_finish();")
     gen.emit("return 0;")
@@ -360,7 +404,12 @@ def compile_aot(path: str, output: str, *, lambda_home: Optional[str] = None,
     exe = output
     if os.name == "nt" and not exe.lower().endswith(".exe"):
         exe += ".exe"
-    cmd = [cc, "-O2", "-std=c99", cpath, "-o", exe]
+    # PR.md 3A/3B: -std=c99 hides POSIX declarations (usleep/setenv) on Linux, so
+    # `pi aot` could not compile its own runtime there.  gnu99 works on both
+    # glibc and the Windows clang/gcc drivers; _GNU_SOURCE keeps it working if a
+    # driver treats gnu99 as strict c99.
+    extra = [] if os.name == "nt" else ["-D_GNU_SOURCE"]
+    cmd = [cc, "-O2", "-std=gnu99", *extra, cpath, "-o", exe]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise AotError("C compilation failed:\n" + (proc.stderr or proc.stdout))

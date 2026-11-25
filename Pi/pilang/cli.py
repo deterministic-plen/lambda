@@ -11,20 +11,33 @@ import subprocess
 from typing import List
 
 from . import syntax as S
+from .cache import CacheError
 from .checker import check, walk
 from .errors import PiCompileError
+from .frontend import run_frontend
 from .parser import load_module
 from .worker import ToolchainError, build_worker, find_lambda_home, schema_hex
 
 
-def _load(path: str, quiet: bool = False):
+def _load_checked(path: str):
     mod = load_module(path)
-    diags = check(mod)
+    return mod, check(mod)
+
+
+def _load(path: str, quiet: bool = False):
+    # P5: parse/check on the large frontend stack; deep but flat programs must
+    # not fail with a bare RecursionError.
+    mod, diags = run_frontend(lambda: _load_checked(path))
     errs = [d for d in diags if d.severity == "error"]
     if not quiet:
         for d in diags:
             print(f"{os.path.basename(path)}: {d}" if d.loc is None else str(d), file=sys.stderr)
     return mod, diags, errs
+
+
+def _walk_all(node):
+    """Materialise a recursive walk on the frontend stack (P5)."""
+    return run_frontend(lambda: list(walk(node)))
 
 
 def cmd_check(a) -> int:
@@ -33,6 +46,9 @@ def cmd_check(a) -> int:
     except PiCompileError as e:
         print(e.format(), file=sys.stderr)
         return 2
+    except RuntimeError as e:
+        print(f"pi check: {e}", file=sys.stderr)
+        return 1
     n = (len(mod.protocols), len(mod.elems), len(mod.systems), len(mod.programs))
     print(f"{a.file}: {n[0]} protocol(s), {n[1]} element(s), {n[2]} system(s), {n[3]} program(s); "
           f"{len(errs)} error(s), {len(diags) - len(errs)} warning(s)")
@@ -57,7 +73,7 @@ def cmd_aot(a) -> int:
         exe = compile_aot(a.file, a.output, lambda_home=a.lambda_home,
                           builddir=a.builddir, outdir=a.out, keep_c=a.keep_c,
                           steps=a.steps)
-    except (AotError, ToolchainError) as e:
+    except (AotError, ToolchainError, CacheError) as e:
         print(f"pi aot: {e}", file=sys.stderr)
         return 1
     print(f"aot: {exe}")
@@ -71,6 +87,9 @@ def cmd_build(a) -> int:
     except PiCompileError as e:
         print(e.format(), file=sys.stderr)
         return 2
+    except RuntimeError as e:
+        print(f"pi build: {e}", file=sys.stderr)
+        return 1
     if errs:
         return 1
     base = os.path.dirname(os.path.abspath(a.file))
@@ -86,7 +105,7 @@ def cmd_build(a) -> int:
         proto, _, src = spec.partition("=")
         wanted.append((src, mod.protocols[proto]))
     for prog in mod.programs.values():
-        for n in walk(prog.body):
+        for n in _walk_all(prog.body):
             if isinstance(n, S.Call) and isinstance(n.fn, S.Name) and n.fn.id == "Pool" and n.args \
                     and isinstance(n.args[0], S.Lit) and len(mod.protocols) == 1:
                 wanted.append((n.args[0].value, next(iter(mod.protocols.values()))))
@@ -94,7 +113,7 @@ def cmd_build(a) -> int:
         path = src if os.path.isabs(src) else os.path.join(base, src)
         try:
             exe = build_worker(path, proto, lambda_home=a.lambda_home, builddir=a.builddir)
-        except ToolchainError as e:
+        except (ToolchainError, CacheError) as e:
             print(e, file=sys.stderr)
             return 1
         print(f"built {src} [{proto.name} schema {schema_hex(proto)[:16]}…] -> {exe}")
@@ -152,17 +171,20 @@ def cmd_analyze(a) -> int:
     except PiCompileError as e:
         print(e.format(), file=sys.stderr)
         return 2
+    except RuntimeError as e:
+        print(f"pi analyze: {e}", file=sys.stderr)
+        return 1
     rows = []
     for e in mod.elems.values():
         counts = {"send": 0, "recv": 0, "call": 0}
         for c in e.ctrls:
-            for n in walk(c.body):
+            for n in _walk_all(c.body):
                 if isinstance(n, S.Call) and isinstance(n.fn, S.Name) and n.fn.id in counts:
                     counts[n.fn.id] += 1
         rec = "restart-only (state consumed on failure)" if e.states else "resume-capable"
         rows.append((e.name, rec, counts, len(e.on_failure or [])))
     tasks = []
-    for n in walk(mod):
+    for n in _walk_all(mod):
         if isinstance(n, S.Serve):
             attrs = {a.name: a.value for a in n.attrs}
             tasks.append({k: attrs.get(k) for k in ("rate", "deadline", "priority")})

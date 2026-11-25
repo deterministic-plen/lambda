@@ -1,0 +1,13 @@
+include "lib/statistics.lambda"
+nan → (/ 0.0 0.0)
+e → (arrayf 0 0.0)
+a → (arrayf-of [nan, 3.0, 1.0])
+b → (arrayf-of [3.0, nan, 1.0])
+c → (arrayf-of [nan, nan])
+d → (arrayf-of [3.0, 1.0, 2.0])
+inf → (/ 1.0 0.0)
+g → (arrayf-of [inf, (- 0.0 inf), 2.0])
+[(minf e), (maxf e),
+ (minf a), (maxf a), (minf b), (maxf b),
+ (minf c), (maxf c), (minf d), (maxf d),
+ (minf g), (maxf g)]

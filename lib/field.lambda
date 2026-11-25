@@ -5,16 +5,44 @@
 ;   [component0 of all elements, component1 of all elements, ...]
 ; `field-get`/`field-set` are checked and carry width and element count, so the
 ; convention is explicit and bounds-safe.
+;
+; The checks used to bound only the whole ArrayF, so i >= n aliased into the
+; next plane and a k of 0 divided by zero inside field-length.  Every access
+; now validates k, n, i, c and the flat length k*n explicitly; invalid use
+; stops the program (the language has no dedicated panic primitive, so the
+; library uses the generic empty-list failure).
 
-field-new → (λ k: Int n: Int. (arrayf (* k n) 0.0))
+; Shared validity test for the layout invariant: k >= 1, n >= 0 and
+; arrayf-length f == k*n.
+field-shape-ok? → (λ&f: ArrayF k: Int n: Int.
+  (and (and (>= k 1) (>= n 0))
+       (== (arrayf-length f) (* k n))))
 
-field-length → (λ&f: ArrayF k: Int. (/ (arrayf-length f) k))
+field-new → (λ k: Int n: Int.
+  if (or (< k 0) (< n 0))
+  then (head nil)
+  else (arrayf (* k n) 0.0))
+
+field-length → (λ&f: ArrayF k: Int.
+  if (< k 1)
+  then (head nil)
+  else if (not (== 0 (% (arrayf-length f) k)))
+  then (head nil)
+  else (/ (arrayf-length f) k))
 
 field-get → (λ&f: ArrayF k: Int n: Int i: Int c: Int.
-  (arrayf-get f (+ (* c n) i)))
+  if (or (not (field-shape-ok? f k n))
+         (or (or (< i 0) (>= i n)) (or (< c 0) (>= c k))))
+  then (head nil)
+  else (arrayf-get f (+ (* c n) i)))
 
 field-set → (λ f: ArrayF k: Int n: Int i: Int c: Int x: Float.
-  (arrayf-set f (+ (* c n) i) x))
+  if (or (not (field-shape-ok? f k n))
+         (or (or (< i 0) (>= i n)) (or (< c 0) (>= c k))))
+  then (head nil)
+  else (arrayf-set f (+ (* c n) i) x))
 
 field-map → (λ&f: ArrayF k: Int n: Int g: pure.
-  (arrayf-pmap (λ p. (g p)) (* k n)))
+  if (not (field-shape-ok? f k n))
+  then (head nil)
+  else (arrayf-pmap (λ p. (g p)) (* k n)))

@@ -1,0 +1,6 @@
+include "lib/bigint.lambda"
+a → (bi-from-int 4 2000000000)
+[(bi-len (bi-from-int 4 0)), (bi-len (bi-from-int 4 1)),
+ (bi-len (bi-from-int 4 999999999)), (bi-len (bi-from-int 4 1000000000)),
+ (bi-len a), (bi-len (bi-from-int 4 9223372036854775807)),
+ (bi-get a 0), (bi-get a 1)]

@@ -1,0 +1,2 @@
+include "lib/stream.lambda"
+(emit-i64s 1 (arrayi-of [1]))

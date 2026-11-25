@@ -17,7 +17,7 @@ include "pi_worker.lambda"
 tile-shim → (λop-init op-step op-patch op-snapshot err hi lo version
               initial-state init-fn step-fn payload-fn patch-fn snapshot-fn.
   hello → (pi-hello hi lo version)
-  loop → (λstate.
+  tile-loop → (λstate.
     hd → (pi-next-call 0)
     corr → (arrayi-get hd 0)
     if (< corr 0)
@@ -31,7 +31,7 @@ tile-shim → (λop-init op-step op-patch op-snapshot err hi lo version
         if (< nargs 6)
         then
           w → (pi-reply-err corr err 0 0 (- 0 1))
-          (loop state)
+          (tile-loop state)
         else
           ox → (float->int (arrayf-get a 0))
           oy → (float->int (arrayf-get a 1))
@@ -41,23 +41,23 @@ tile-shim → (λop-init op-step op-patch op-snapshot err hi lo version
           gc → (float->int (arrayf-get a 5))
           state2 → (init-fn ox oy r c gr gc)
           w → (pi-reply-ok corr pi-empty)
-          (loop state2)
+          (tile-loop state2)
       else if (== op op-step)
       then
         state2 → (step-fn state)
         payload → (payload-fn state2)
         w → (pi-reply-ok corr payload)
-        (loop state2)
+        (tile-loop state2)
       else if (== op op-patch)
       then
         state2 → (patch-fn state a)
         w → (pi-reply-ok corr pi-empty)
-        (loop state2)
+        (tile-loop state2)
       else if (== op op-snapshot)
       then
         w → (pi-reply-ok corr (snapshot-fn state))
-        (loop state)
+        (tile-loop state)
       else
         w → (pi-reply-err corr err 0 0 (- 0 1))
-        (loop state))
-  (loop initial-state))
+        (tile-loop state))
+  (tile-loop initial-state))

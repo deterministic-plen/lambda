@@ -1,0 +1,2 @@
+; Generic Array<T>: array-clone retains every element and returns a new buffer.
+(array-clone (array-of ["x", "y"]))

@@ -1,0 +1,4 @@
+include "lib/vec2.lambda"
+v → (arrayf-of [1.0, 2.0, 3.0, 4.0])
+r → (v2-shift v 2 10.0 20.0)
+[(arrayf-get r 0), (arrayf-get r 1), (arrayf-get r 2), (arrayf-get r 3)]

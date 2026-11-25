@@ -37,4 +37,3 @@ bf → (λ&src tape ptr sp.
 path → (if (>= argc 2) then (argv 1) else "")
 src → (str->arrayb (read-file path))
 (bf &src (arrayb 32000 0) 0 0)
-0

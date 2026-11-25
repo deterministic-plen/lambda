@@ -1,0 +1,6 @@
+include "lib/stream.lambda"
+h → (stream-header 1 305419896 1000)
+[(arrayb-get h 0), (arrayb-get h 1), (arrayb-get h 2), (arrayb-get h 3),
+ (arrayb-get h 4), (arrayb-get h 5), (arrayb-get h 6), (arrayb-get h 7),
+ (arrayb-get h 8), (arrayb-get h 9), (arrayb-get h 10), (arrayb-get h 11),
+ (arrayb-get h 12), (arrayb-get h 13), (arrayb-get h 14), (arrayb-get h 15)]

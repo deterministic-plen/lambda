@@ -1,0 +1,10 @@
+; Regression for PR.md S4: freeing a long chain of nested closures used to
+; recurse through the generated environment destructors and overflow the
+; native stack (about 150k levels).  Release is iterative now, and the test
+; requires live=0 so the whole chain really is reclaimed.
+build → (λn f.
+  if (== n 0)
+  then f
+  else (build (- n 1) (λx. (f x))))
+g → (build 200000 (λx. x))
+0

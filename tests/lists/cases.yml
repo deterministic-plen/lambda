@@ -32,4 +32,3 @@ cases:
   stdout: '[1, 0, 1]
 
     '
-strict: true

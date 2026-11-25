@@ -47,11 +47,13 @@ class ProgramLoader:
         self.loaded: Set[str] = set()
         self.active: List[str] = []
         self.included_data_decls: List[object] = []
+        self.main_root = root
 
     def load_main(self, path: str) -> Node:
         full = os.path.abspath(path)
         if not os.path.exists(full):
             raise SyntaxErr(f"file '{path}' not found")
+        self.main_root = os.path.dirname(os.path.realpath(full))
         self.included_data_decls = []
         block = self._parse_file(full, is_main=True)
         if self.included_data_decls:
@@ -75,14 +77,40 @@ class ProgramLoader:
         key = self._key(path)
         self.active.append(key)
         try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                source = f.read()
+            try:
+                with open(path, "r", encoding="utf-8-sig") as f:
+                    source = f.read()
+            except UnicodeDecodeError as exc:
+                raise SyntaxErr(
+                    f"'{path}' is not valid UTF-8 (byte {exc.start}); Lambda "
+                    f"source files must be UTF-8", Loc(1, 1, path)) from None
             parser = Parser(tokenize(source, path), warn_infix=self.warn_infix)
             block = parser.parse_unit(self, require_body=is_main)
         finally:
             self.active.pop()
         self.loaded.add(key)
         return block
+
+    def _allowed(self, path: str) -> bool:
+        """Whether an include may read *path*.
+
+        Absolute and ``../`` includes were a one-token file-read primitive for
+        untrusted sources.  Includes are confined to the main file's directory
+        and the configured search roots; ``LAMBDA_ALLOW_INCLUDE_OUTSIDE=1`` is
+        the explicit escape hatch for unusual layouts.
+        """
+
+        if os.environ.get("LAMBDA_ALLOW_INCLUDE_OUTSIDE") == "1":
+            return True
+        real = os.path.realpath(path)
+        roots = [self.main_root] + self.search_paths
+        for root in roots:
+            try:
+                if os.path.commonpath([real, os.path.realpath(root)]) == os.path.realpath(root):
+                    return True
+            except ValueError:
+                continue
+        return False
 
     def _resolve(self, path: str, loc: Loc) -> str:
         candidates: List[str] = []
@@ -109,6 +137,11 @@ class ProgramLoader:
                 continue
             seen.add(cand)
             if os.path.isfile(cand):
+                if not self._allowed(cand):
+                    raise SyntaxErr(
+                        f"include '{path}' resolves outside the project "
+                        f"({cand}); pass its directory with -L/--lib, or set "
+                        f"LAMBDA_ALLOW_INCLUDE_OUTSIDE=1 to allow it", loc)
                 return cand
         tried = "\n  ".join(sorted(seen))
         raise SyntaxErr(

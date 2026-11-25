@@ -12,9 +12,10 @@ cases:
   stdout: '3628800
 
     '
-  strict: false
-  note: self-application needs a recursive type (t = t -> u); HM rejects it, so this case runs on the
-    boxed backend by design
+  flags:
+  - --allow-dynamic
+  note: self-application needs a recursive type (t = t -> u); HM rejects it, so this case explicitly opts
+    into the boxed backend
 - name: fix
   stdout: '3628800
 
@@ -53,4 +54,3 @@ cases:
     '
   flags:
   - --no-musttail
-strict: true

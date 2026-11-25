@@ -1,0 +1,4 @@
+include "lib/vector.lambda"
+v0 → (vec-new 1)
+v1 → (vec-push v0 1.5)
+(vec-get v1 (- 0 1))

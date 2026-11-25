@@ -1,0 +1,3 @@
+﻿type Opt (Some (x: Int) | None)
+a → #[Some 1, None]
+[(int->str (array-length a)), (int->str (head (match (array-get a 0) with Some x: [x], None: [0])))]

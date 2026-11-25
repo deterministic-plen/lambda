@@ -41,7 +41,7 @@ cases:
 
     '
 - name: float_str
-  stdout: '6.2831853071795862
+  stdout: '6.283185307179586
 
     '
 - name: float_trig
@@ -62,6 +62,3 @@ cases:
     '
 - name: float_strict
   compile_fail: type error
-  flags:
-  - --strict
-strict: true

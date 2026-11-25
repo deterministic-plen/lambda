@@ -6,19 +6,11 @@
 ; The two components stay in separate contiguous halves, so per-component
 ; loops can be vectorized without introducing a Vec2 primitive.
 ;
-; arrayf-pmap falls back to a safe serial loop when fx/fy cannot be proved
-; pure, so this generic map is accepted even before effect annotations land.
-
-; vec2.lambda -- structure-of-arrays helper for 2D vector fields.
-;
-; A vector field is one planar ArrayF:
-;   [x0 .. x(n-1), y0 .. y(n-1)]
-;
-; The two components stay in separate contiguous halves, so per-component
-; loops can be vectorized without introducing a Vec2 primitive.
-;
 ; A scalar Vec2 product is also available for code that genuinely needs a
 ; first-class pair.  It is unboxed when inference knows the layout.
+;
+; arrayf-pmap falls back to a safe serial loop when fx/fy cannot be proved
+; pure, so this generic map is accepted even before effect annotations land.
 
 data Vec2 = V2 (x: Float, y: Float)
 

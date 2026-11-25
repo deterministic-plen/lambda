@@ -1,0 +1,3 @@
+include "lib/arena.lambda"
+[(arrayf-length (arena-reserve (arena-new 8) 4 8)),
+ (arrayf-length (arena-reserve (arena-new 4) 3 4))]

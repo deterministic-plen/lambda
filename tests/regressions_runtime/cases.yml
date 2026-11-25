@@ -1,0 +1,84 @@
+description: 'Runtime and memory-safety regressions from PR.md (release, file I/O, primitives, floats)'
+cases:
+- name: pmap_shared_tail
+  stdout: '515920000
+
+    '
+  note: PR.md 1.1 - the loop inside the program repeats the shared-tail race.
+- name: empty_array_pool
+  stdout: '[42, 2]
+
+    '
+  note: PR.md F1 end-to-end pattern; the deterministic size-class assertion is in check_runtime.py.
+- name: write_file_nul_path
+  stdout: '-1
+
+    '
+  note: PR.md 2.3 - embedded NUL in a path must be rejected, not truncated.
+- name: read_file_nonregular
+  stdout: '[0, 0, 0, 0]
+
+    '
+  note: PR.md 2.2 - directory and missing file return empty, never abort.
+- name: reductions_typed
+  stdout: '[6, 24, 0, 1, 5]
+
+    '
+  note: sum/product/str-len keep working for well-typed arguments.
+- name: deep_closure_release
+  stdout: '0
+
+    '
+  note: PR.md S4 - 200,000 nested closures are released iteratively (live=0 checks the whole chain).
+- name: deep_list_release
+  stdout: '0
+
+    '
+  flags:
+  - --allow-dynamic
+  note: PR.md F4 - 400,000-deep left-nested list released iteratively in the boxed backend.
+- name: float_shortest
+  stdout: '[0.1, 1e-07, 1000.0]
+
+    '
+  note: PR.md float printing - shortest round-trip representation.
+- name: float_nan_sign
+  stdout: 'nan
+
+    '
+  note: PR.md float printing - NaN is normalised so both backends print nan.
+- name: float_str_shortest
+  stdout: '6.283185307179586
+
+    '
+  note: PR.md float printing - float->str uses the same shortest formatting.
+- name: arrayg_smoke
+  stdout: '["x", "y", "z"]
+
+    '
+  note: 'Task 10 - boxed generic Array<String>: array-of + print + release.'
+- name: arrayg_set
+  stdout: '["x", "z"]
+
+    '
+  note: 'Task 10 - array-set replaces a slot.'
+- name: arrayg_new
+  stdout: '["w", "w", "w"]
+
+    '
+  note: 'Task 10 - array-new retains the initial element per slot.'
+- name: arrayg_get
+  stdout: 'y
+
+    '
+  note: 'Task 10 - array-get returns a retained element.'
+- name: arrayg_length
+  stdout: '2
+
+    '
+  note: 'Task 10 - array-length.'
+- name: arrayg_clone
+  stdout: '["x", "y"]
+
+    '
+  note: 'Task 10 - array-clone retains each element.'

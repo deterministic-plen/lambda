@@ -4,18 +4,25 @@
 ;   [arena, used]
 ; and alloc returns an ArrayI [offset, used'] (offset = -1 on overflow).
 ; No per-element heap nodes are allocated.
+;
+; Invalid arguments stop the program: the language has no dedicated panic
+; primitive, so the library uses the generic empty-list failure.  Overflow is
+; not an invalid argument: `arena-alloc` reports it with offset -1 and the
+; *unchanged* cursor in slot 1, so a caller that stores `(arena-used r)` never
+; rewinds the arena over live data.
 
-arena-new → (λ cap: Int. (arrayf cap 0.0))
+arena-new → (λ cap: Int.
+  if (< cap 0) then (head nil) else (arrayf cap 0.0))
 
 arena-alloc → (λ used: Int n: Int cap: Int.
-  if (<= (+ used n) cap)
+  if (or (< n 0) (> (+ used n) cap))
   then
-    out → (arrayi 2 0)
-    out1 → (arrayi-set out 0 used)
-    (arrayi-set out1 1 (+ used n))
+    ; -1 = allocation failed; the cursor is the caller's original `used`.
+    out → (arrayi 2 used)
+    (arrayi-set out 0 (- 0 1))
   else
-    out → (arrayi 2 0)
-    (arrayi-set out 0 (- 0 1)))
+    out → (arrayi 2 used)
+    (arrayi-set out 1 (+ used n)))
 
 arena-offset → (λ r: ArrayI. (arrayi-get r 0))
 arena-used → (λ r: ArrayI. (arrayi-get r 1))
@@ -30,8 +37,20 @@ arena-copy → (λ src: ArrayF dst: ArrayF n: Int i: Int.
   if (>= i n) then dst
   else (arena-copy src (arrayf-set dst i (arrayf-get src i)) n (+ i 1)))
 
+; Ensure the arena has room past `used` (so the next `arena-alloc` of >= 1
+; element succeeds), growing to `max(2*cap, used+1)` and copying the live
+; prefix.  The old test `used > cap` only grew *after* the overrun, so an
+; exactly full arena (used = cap) was returned unchanged.
 arena-reserve → (λ src: ArrayF used: Int cap: Int.
-  if (<= used cap) then src
+  if (or (< used 0) (< cap 0))
+  then (head nil)
   else
-    dst → (arena-new (* cap 2))
-    (arena-copy src dst used 0))
+    len → (arrayf-length src)
+    if (> len used)
+    then src
+    else
+      target → (* cap 2)
+      wanted → (+ used 1)
+      newcap → (if (< target wanted) then wanted else target)
+      live → (if (< used len) then used else len)
+      (arena-copy src (arena-new newcap) live 0))

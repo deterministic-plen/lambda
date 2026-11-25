@@ -1,0 +1,12 @@
+include "lib/complex.lambda"
+inf → (/ 1.0 0.0)
+z → (Complex (* (- 0.0 1.0) 0.0) (* (- 0.0 1.0) 0.0))
+p → (Complex::toPolar (Complex 0.0 0.0))
+[(== (Complex::modulus (Complex 0.0 0.0)) 0.0),
+ (== (Complex::modulus z) 0.0),
+ (== (Complex::modulus (Complex 3.0 4.0)) 5.0),
+ (== (Complex::modulus (Complex 0.0 5.0)) 5.0),
+ (== (Complex::modulus (Complex 1e200 1e200)) 1.414213562373095e+200),
+ (not (< (Complex::modulus (Complex inf inf)) 1e308)),
+ (== (PolarComplex-r p) 0.0),
+ (== (PolarComplex-arg p) 0.0)]

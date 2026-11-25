@@ -1,0 +1,10 @@
+include "lib/matrix.lambda"
+m → (mat2 1.0 2.0 3.0 4.0)
+v → (matvec2 5.0 6.0)
+s → (mat11 7.0)
+mv → (matvec2-values v)
+m2 → (mat2-values m)
+m1 → (mat1-values s)
+[(MatVec2Values-a mv), (MatVec2Values-b mv),
+ (Mat2Values-a m2), (Mat2Values-b m2), (Mat2Values-c m2), (Mat2Values-d m2),
+ (Mat1Values-a m1), (mat-scalar s)]

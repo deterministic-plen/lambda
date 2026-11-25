@@ -2,8 +2,6 @@ description: Expected compile failures and error messages
 cases:
 - name: typeerror
   compile_fail: type error
-  flags:
-  - --strict
 - name: unbound
   compile_fail: unbound variable
 - name: syntax
@@ -18,6 +16,11 @@ cases:
   compile_fail: while parsing lambda expression
 - name: infix_warn
   compile_fail: Lambda has no infix operators
+
+- name: invalid_utf8
+  compile_fail: not valid UTF-8
+
+- name: strict_removed
+  compile_fail: unrecognized arguments
   flags:
   - --strict
-strict: true

@@ -1,0 +1,10 @@
+include "lib/complex.lambda"
+e1 → (Complex::exp (Complex 0.0 1.0))
+e2 → (Complex::exp (Complex 0.0 3.141592653589793))
+e3 → (Complex::exp (Complex 1.0 0.0))
+[(== (Complex-re e1) 0.5403023058681398),
+ (== (Complex-im e1) 0.8414709848078965),
+ (== (Complex-re e2) (- 0.0 1.0)),
+ (< (abs (Complex-im e2)) 1e-15),
+ (== (Complex-re e3) 2.718281828459045),
+ (== (Complex-im e3) 0.0)]

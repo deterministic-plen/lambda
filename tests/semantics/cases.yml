@@ -1,0 +1,69 @@
+description: 'Strict typing, return annotations, halting and borrow inference'
+cases:
+- name: strict_default
+  compile_fail: type error
+- name: allow_dynamic
+  stdout: '42
+
+    '
+  flags:
+  - --allow-dynamic
+- name: return_ok
+  stdout: '42
+
+    '
+- name: return_mismatch
+  compile_fail: declared return type
+- name: halt_ok
+  stdout: '0
+
+    '
+- name: halt_warn
+  stdout: '0
+
+    '
+  stderr_contains: may not halt
+- name: borrow_inferred
+  stdout: '10
+
+    '
+- name: borrow_linear
+  stdout: '3
+
+    '
+
+- name: cycle_trace
+  stdout: |
+    cycle 1: 1
+    cycle 2: 2
+    cycle 3: 3
+    3
+  env:
+    LAMBDA_TRACE: '1'
+    LAMBDA_PROFILE: '1'
+  run_stderr_contains: 'lambda-profile: cycles=3'
+
+- name: world
+  stdout: '[55, 2]
+
+    '
+- name: world_pure
+  compile_fail: a parameter declared 'pure' requires a provably pure function argument
+
+- name: loop_sugar
+  stdout: '5000050000
+
+    '
+- name: match_literals
+  stdout: '["plus", "minus", "open", "close", "other"]
+
+    '
+- name: string_index
+  stdout: '[65, 128512, 233, -1]
+
+    '
+
+- name: generalize_scc
+  stdout: 's
+
+    '

@@ -1,0 +1,3 @@
+include "lib/stream.lambda"
+b → (put-u32 (arrayb 4 0) 0 305419896)
+[(arrayb-get b 0), (arrayb-get b 1), (arrayb-get b 2), (arrayb-get b 3)]

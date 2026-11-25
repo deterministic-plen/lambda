@@ -1,0 +1,7 @@
+include "lib/vector.lambda"
+v0 → (vec-new 1)
+v1 → (vec-push v0 1.5)
+v2 → (vec-push v1 2.5)
+v3 → (vec-push v2 3.5)
+[(vec-get v3 0), (vec-get v3 1), (vec-get v3 2),
+ (int->float (vec-length v3)), (int->float (vec-capacity v3))]

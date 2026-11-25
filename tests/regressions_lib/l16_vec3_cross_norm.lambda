@@ -1,0 +1,6 @@
+include "lib/vec3.lambda"
+a → (Vec3 1.0 0.0 0.0)
+b → (Vec3 0.0 1.0 0.0)
+c → (v3-cross a b)
+[(Vec3-x c), (Vec3-y c), (Vec3-z c),
+ (v3-norm (Vec3 3.0 4.0 0.0)), (v3-norm (Vec3 0.0 0.0 0.0))]

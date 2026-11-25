@@ -1,0 +1,6 @@
+﻿; A helper used at two types from two different definitions must be
+; generalized per strongly-connected component (PR 3A).
+ident → (λx. x)
+a → (ident 1)
+b → (ident "s")
+b

@@ -26,6 +26,11 @@ INFIX_NAMES = {
     "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
 }
 
+ARRAY_PRIMS = {
+    "array-of", "array-new", "array-get", "array-set", "array-length",
+    "array-clone",
+}
+
 I64 = "i64"
 F64 = "f64"
 BOX = "box"
@@ -155,6 +160,18 @@ class TList(Type):
         return f"[{self.elem!r}]"
 
 
+class TArrayG(Type):
+    """A general, boxed ``Array<T>`` (element type may be any value type)."""
+
+    __slots__ = ("elem",)
+
+    def __init__(self, elem: Type) -> None:
+        self.elem = elem
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"Array<{self.elem!r}>"
+
+
 class TFun(Type):
     __slots__ = ("arg", "ret")
 
@@ -174,6 +191,7 @@ TUNIT = TCon("Unit")
 TARRAYF = TCon("ArrayF")
 TARRAYI = TCon("ArrayI")
 TARRAYB = TCon("ArrayB")
+TCON_WORLD = TCon("World")
 
 
 def tfun(args: Iterable[Type], ret: Type) -> Type:
@@ -264,6 +282,8 @@ def free_type_vars(t: Type, out: Optional[Set[Type]] = None) -> Set[Type]:
         out.add(t)
     elif isinstance(t, TList):
         free_type_vars(t.elem, out)
+    elif isinstance(t, TArrayG):
+        free_type_vars(t.elem, out)
     elif isinstance(t, TFun):
         free_type_vars(t.arg, out)
         free_type_vars(t.ret, out)
@@ -278,6 +298,8 @@ def default_numeric(t: Type) -> None:
         if t.instance is None:
             t.instance = TINT
     elif isinstance(t, TList):
+        default_numeric(t.elem)
+    elif isinstance(t, TArrayG):
         default_numeric(t.elem)
     elif isinstance(t, TFun):
         default_numeric(t.arg)
@@ -296,6 +318,7 @@ def parse_type_annotation(text: str, loc=None,
     simple = {
         "Int": TINT, "Float": TFLOAT, "Bool": TBOOL, "String": TSTR,
         "ArrayF": TARRAYF, "ArrayI": TARRAYI, "ArrayB": TARRAYB,
+        "World": TCON_WORLD,
     }
     if text.startswith("Array<") and text.endswith(">"):
         inner = parse_type_annotation(text[6:-1], loc, known_enums,
@@ -316,9 +339,8 @@ def parse_type_annotation(text: str, loc=None,
         if isinstance(inner, TRecord):
             if inner.fields and all(prune(ft) == TFLOAT for _, ft in inner.fields):
                 return TARRAYF
-        raise TypeError_(
-            f"Array<T> currently supports Int, Float, Bool elements; got '{text}'",
-            loc)
+        # Any other element type uses the boxed generic Array<T>.
+        return TArrayG(inner)
     if "<" in text:
         base = text.split("<", 1)[0].strip()
         if known_adts is not None and base in known_adts:
@@ -383,6 +405,8 @@ def instantiate(scheme: TScheme) -> Type:
             return mapping.get((type(t).__name__, t.id), t)
         if isinstance(t, TList):
             return TList(copy(t.elem))
+        if isinstance(t, TArrayG):
+            return TArrayG(copy(t.elem))
         if isinstance(t, TFun):
             return TFun(copy(t.arg), copy(t.ret))
         return t
@@ -402,6 +426,8 @@ def show_type(t: Type, depth: int = 0) -> str:
         return t.name
     if isinstance(t, TList):
         return f"[{show_type(t.elem, depth + 1)}]"
+    if isinstance(t, TArrayG):
+        return f"Array<{show_type(t.elem, depth + 1)}>"
     if isinstance(t, TFun):
         left = show_type(t.arg, depth + 1)
         if isinstance(prune(t.arg), TFun):
@@ -570,8 +596,34 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TINT, TINT], TList(TINT)))
     if name in "immortalize":
         return _forall(lambda m: tfun([m["a"]], m["a"]))
+    if name == "cycle":
+        return _forall(lambda m: tfun([m["a"]], m["a"]))
+    if name == "world-new":
+        return mono(tfun([TINT], TCON_WORLD))
+    if name == "world-get":
+        return mono(tfun([TCON_WORLD, TINT], TINT))
+    if name == "world-set":
+        return mono(tfun([TCON_WORLD, TINT, TINT], TCON_WORLD))
+    if name == "world-length":
+        return mono(tfun([TCON_WORLD], TINT))
     # Flat arrays: one RC buffer, no per-element wrappers.  `set` consumes the
     # array and returns the same buffer, so callers treat it linearly.
+    # General boxed arrays.  Applications are typed by
+    # Inferencer._infer_array_prim, which specializes scalar element types to
+    # the existing flat arrays; these schemes cover first-class references.
+    if name == "array-of":
+        return _forall(lambda m: tfun([TList(m["a"])], TArrayG(m["a"])))
+    if name == "array-new":
+        return _forall(lambda m: tfun([TINT, m["a"]], TArrayG(m["a"])))
+    if name == "array-get":
+        return _forall(lambda m: tfun([TArrayG(m["a"]), TINT], m["a"]))
+    if name == "array-set":
+        return _forall(lambda m: tfun(
+            [TArrayG(m["a"]), TINT, m["a"]], TArrayG(m["a"])))
+    if name == "array-length":
+        return _forall(lambda m: tfun([TArrayG(m["a"])], TINT))
+    if name == "array-clone":
+        return _forall(lambda m: tfun([TArrayG(m["a"])], TArrayG(m["a"])))
     if name == "arrayf":
         return mono(tfun([TINT, TFLOAT], TARRAYF))
     if name == "arrayf-of":
@@ -639,9 +691,80 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
     raise TypeError_(f"unknown primitive '{name}'")
 
 
+def _array_elem_type(t: Type, loc=None) -> Type:
+    t = prune(t)
+    if isinstance(t, TArrayG):
+        return t.elem
+    if isinstance(t, TCon) and t.name == "ArrayI":
+        return TINT
+    if isinstance(t, TCon) and t.name == "ArrayF":
+        return TFLOAT
+    if isinstance(t, TCon) and t.name == "ArrayB":
+        return TINT
+    raise TypeError_(f"array operation requires an Array, got {show_type(t)}",
+                     loc)
+
+
+def _array_of_type(elem: Type) -> Type:
+    """Choose the specialized flat array for scalar elements, else Array<T>."""
+    elem = prune(elem)
+    if elem == TINT:
+        return TARRAYI
+    if elem == TFLOAT:
+        return TARRAYF
+    if elem == TBOOL:
+        return TARRAYB
+    return TArrayG(elem)
+
+
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
+def _strong_components(edges: List[Set[int]]) -> List[List[int]]:
+    """Tarjan SCCs, in dependency-first order.
+
+    ``edges[i]`` lists definitions that definition *i* references.  Tarjan
+    emits an SCC only after every SCC it can reach, so the returned order is
+    exactly the order in which a block's definitions may be generalized.
+    """
+
+    n = len(edges)
+    index = 0
+    indices = [-1] * n
+    low = [0] * n
+    on_stack = [False] * n
+    stack: List[int] = []
+    out: List[List[int]] = []
+
+    def visit(v: int) -> None:
+        nonlocal index
+        indices[v] = low[v] = index
+        index += 1
+        stack.append(v)
+        on_stack[v] = True
+        for w in edges[v]:
+            if indices[w] == -1:
+                visit(w)
+                low[v] = min(low[v], low[w])
+            elif on_stack[w]:
+                low[v] = min(low[v], indices[w])
+        if low[v] == indices[v]:
+            comp: List[int] = []
+            while True:
+                w = stack.pop()
+                on_stack[w] = False
+                comp.append(w)
+                if w == v:
+                    break
+            comp.sort()
+            out.append(comp)
+
+    for v in range(n):
+        if indices[v] == -1:
+            visit(v)
+    return out
+
+
 class Inferencer:
     def __init__(self) -> None:
         self.env: Dict[int, TScheme] = {}
@@ -707,19 +830,24 @@ class Inferencer:
                     else:
                         arena_ok = False
             adt.layout = "arena" if arena_ok else "boxed"
+        self._warn_uninhabited(data_decls)
         for node in walk(program):
             if not isinstance(node, RecordLit):
                 continue
             fields = []
             for fname, ftype_text in zip(node.field_names, node.field_types):
                 ft = parse_type_annotation(
-                    ftype_text, node.loc, self.enum_names, {})
+                    ftype_text, node.loc, self.enum_names,
+                    self.record_schemas, self.adt_schemas, self.data_params)
                 if not (isinstance(ft, TEnum)
                         or (isinstance(ft, TCon) and ft.name in
                             ("Int", "Float", "Bool"))):
                     raise TypeError_(
-                        f"record field '{node.record_name}.{fname}' must be a "
-                        "scalar or enum", node.loc)
+                        f"record field '{node.record_name}.{fname}' has type "
+                        f"'{show_type(ft)}'; unboxed products only hold scalars "
+                        f"and enums. Use `type {node.record_name} = (...)` for "
+                        f"a boxed product, or `data {node.record_name} = ...` "
+                        f"for a recursive/boxed one", node.loc)
                 fields.append((fname, ft))
             existing = self.record_schemas.get(node.record_name)
             if existing is not None and existing.fields != tuple(fields):
@@ -780,10 +908,98 @@ class Inferencer:
         default_numeric(result)
         return result
 
+    def _warn_uninhabited(self, data_decls) -> None:
+        """Warn about data types with no finite values (e.g. ``data T = A (x: T)``).
+
+        Lists are always inhabited (``nil``), so a rose tree is fine.  A value
+        is constructible when some variant's every field is constructible.
+        """
+
+        if not data_decls:
+            return
+        alive = {d.name: False for d in data_decls}
+        changed = True
+
+        def constructible(t: Type) -> bool:
+            t = prune(t)
+            if isinstance(t, TAdt):
+                return alive.get(t.name, True)
+            if isinstance(t, TList):
+                return True
+            return True
+
+        while changed:
+            changed = False
+            for d in data_decls:
+                if alive[d.name]:
+                    continue
+                adt = self.adt_schemas.get(d.name)
+                if adt is None:
+                    continue
+                for _, _, fields in adt.variants:
+                    if all(constructible(ft) for _, ft in fields):
+                        alive[d.name] = True
+                        changed = True
+                        break
+        for d in data_decls:
+            if not alive.get(d.name, True):
+                loc = getattr(d, "loc", None)
+                where = (f"{loc.source}:{loc.line}:{loc.col}: "
+                         if loc and loc.line else "")
+                print(f"{where}warning: data type '{d.name}' is uninhabited "
+                      f"(no finite value can be constructed)", file=__import__("sys").stderr)
+
     def infer(self, node: Node, env: Dict[int, TScheme]) -> Type:
         t = self._infer(node, env)
         node.type = t
         return t
+
+    def _infer_array_prim(self, node: App,
+                          env: Dict[int, TScheme]) -> Type:
+        name = node.func.binding.name
+        arg_types = [self.infer(a, env) for a in node.args]
+        arity = {"array-of": 1, "array-new": 2, "array-get": 2,
+                 "array-set": 3, "array-length": 1, "array-clone": 1}[name]
+        if len(arg_types) != arity:
+            raise TypeError_(
+                f"'{name}' expects {arity} argument(s), got {len(arg_types)}",
+                node.loc)
+        if name == "array-of":
+            lty = prune(arg_types[0])
+            if not isinstance(lty, TList):
+                raise TypeError_(
+                    f"array-of expects a list, got {show_type(lty)}",
+                    node.args[0].loc)
+            return _array_of_type(lty.elem)
+        if name == "array-new":
+            try:
+                unify(arg_types[0], TINT)
+            except UnifyError as exc:
+                raise TypeError_(
+                    f"array size must be Int: {exc.message}",
+                    node.args[0].loc) from None
+            return _array_of_type(arg_types[1])
+        arr = prune(arg_types[0])
+        elem = _array_elem_type(arr, node.args[0].loc)
+        if name == "array-length":
+            return TINT
+        if name == "array-clone":
+            return arr
+        try:
+            unify(arg_types[1], TINT)
+        except UnifyError as exc:
+            raise TypeError_(
+                f"array index must be Int: {exc.message}",
+                node.args[1].loc) from None
+        if name == "array-get":
+            return elem
+        try:
+            unify(arg_types[2], elem)
+        except UnifyError as exc:
+            raise TypeError_(
+                f"array element type mismatch: expected {show_type(elem)}, "
+                f"got {show_type(arg_types[2])}", node.args[2].loc) from None
+        return arr
 
     def _infer(self, node: Node, env: Dict[int, TScheme]) -> Type:
         if isinstance(node, DataCtor):
@@ -919,10 +1135,28 @@ class Inferencer:
                 param_types.append(v)
                 env2[b.uid] = mono(v)
             body_t = self.infer(node.body, env2)
+            ann = getattr(node, "return_annotation", None)
+            if ann:
+                ret_t = parse_type_annotation(
+                    ann, node.loc, self.enum_names, self.record_schemas,
+                    self.adt_schemas, self.data_params)
+                try:
+                    unify(body_t, ret_t)
+                except UnifyError as exc:
+                    raise TypeError_(
+                        f"function body has type {show_type(body_t)}, but its "
+                        f"declared return type is {show_type(ret_t)}: "
+                        f"{exc.message}", node.body.loc) from None
+                body_t = ret_t
             node.param_types = param_types
+            node.return_type = body_t
             return tfun(param_types, body_t)
 
         if isinstance(node, App):
+            if (isinstance(node.func, Var) and node.func.binding is not None
+                    and node.func.binding.kind == PRIM
+                    and node.func.binding.name in ARRAY_PRIMS):
+                return self._infer_array_prim(node, env)
             func_t = self.infer(node.func, env)
             for arg in node.args:
                 arg_t = self.infer(arg, env)
@@ -1122,37 +1356,53 @@ class Inferencer:
         raise TypeError_(f"internal: cannot infer {type(node).__name__}", node.loc)
 
     def _infer_block(self, block: Block, outer_env: Dict[int, TScheme]) -> Type:
+        # A block is a mutually recursive group, but Hindley-Milner
+        # generalization is per strongly connected component: a helper used by
+        # two later definitions must be generalized before the second uses it.
+        # Infer dependencies first, then the definitions that depend on them.
+        by_uid = {d.binding.uid: i for i, d in enumerate(block.defs)}
+        edges: List[Set[int]] = [set() for _ in block.defs]
+        for i, d in enumerate(block.defs):
+            for n in walk(d.value):
+                if isinstance(n, Var) and n.binding is not None:
+                    j = by_uid.get(n.binding.uid)
+                    if j is not None:
+                        edges[i].add(j)
+        order = _strong_components(edges)
+
         env = dict(outer_env)
-        def_vars: List[Type] = []
-        for d in block.defs:
-            v = TVar()
-            def_vars.append(v)
-            # Recursive definitions are monomorphic while their values are
-            # being inferred (standard letrec typing).
-            env[d.binding.uid] = mono(v)
-            d.binding.type = v
+        gen_env = dict(outer_env)
+        for comp in order:
+            def_vars: List[Type] = []
+            for i in comp:
+                v = TVar()
+                def_vars.append(v)
+                d = block.defs[i]
+                env[d.binding.uid] = mono(v)
+                d.binding.type = v
+            for i, v in zip(comp, def_vars):
+                d = block.defs[i]
+                val_t = self.infer(d.value, env)
+                d.type = val_t
+                try:
+                    unify(v, val_t)
+                except UnifyError as exc:
+                    raise TypeError_(exc.message, d.value.loc) from None
+            for i, v in zip(comp, def_vars):
+                d = block.defs[i]
+                t = prune(v)
+                default_numeric(t)
+                scheme = generalize(t, gen_env)
+                d.binding.scheme = scheme
+                d.binding.type = t
+                gen_env[d.binding.uid] = scheme
+                env[d.binding.uid] = scheme
 
-        for d, v in zip(block.defs, def_vars):
-            val_t = self.infer(d.value, env)
-            d.type = val_t
-            try:
-                unify(v, val_t)
-            except UnifyError as exc:
-                raise TypeError_(exc.message, d.value.loc) from None
+        self._pin_annotated_params(block, gen_env)
+        return self.infer(block.body, gen_env)
 
-        # Generalize the whole group before inferring the block body, so the
-        # body may use a definition polymorphically.  Numeric constraints
-        # without a concrete Int/Float use default to Int, which keeps every
-        # function ABI concrete.
-        env = dict(outer_env)
-        for d, v in zip(block.defs, def_vars):
-            t = prune(v)
-            default_numeric(t)
-            scheme = generalize(t, outer_env)
-            d.binding.scheme = scheme
-            d.binding.type = t
-            env[d.binding.uid] = scheme
-
+    def _pin_annotated_params(self, block: Block,
+                              env: Dict[int, TScheme]) -> None:
         # Function parameters whose types came from source annotations must
         # keep those types at every call site.  The annotation is stored on the
         # Lam node, not inside the TFun type, so generalizing the lambda's type
@@ -1170,12 +1420,8 @@ class Inferencer:
             pinned = set()
             for v in annotated:
                 pinned |= free_type_vars(prune(v))
-            # Keep instantiation sharing the SAME unifiers for annotated
-            # positions: `quantified` maps the variables that may be replaced
-            # with fresh ones, so removing them is sufficient.
             d.binding.scheme.quantified = d.binding.scheme.quantified - pinned
             env[d.binding.uid] = d.binding.scheme
-        return self.infer(block.body, env)
 
 
 def infer_program(program: Node) -> Type:

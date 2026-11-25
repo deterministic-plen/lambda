@@ -1,0 +1,76 @@
+; GUI.lambda -- a tiny framebuffer GUI library.
+;
+; The screen is a `GUI` product carrying a width, a height and an ArrayB of
+; width*height*3 bytes in B,G,R order.  Drawing functions consume the GUI and
+; return the updated value (arrays are single-owner), so a scene is built as a
+; linear chain of calls:
+;
+;   g0 → (canvas 320 200)
+;   g1 → (Rectangle g0 10 10 120 40 16711680)
+;   g2 → (button g1 150 10 120 40 "Go")
+;   g2
+;
+; Returning a GUI value from the program opens a native window on Windows.
+; On other platforms (or with LAMBDA_GUI_HEADLESS=1) it writes a PPM image to
+; LAMBDA_GUI_OUT (default gui.ppm), which keeps programs testable in CI.
+
+type GUI = (width: Int, height: Int, pixels: ArrayB)
+
+canvas → (λw: Int h: Int. (GUI w h (arrayb (* (* w h) 3) 0)))
+
+; plot one pixel into an existing buffer, without re-matching the GUI wrapper
+plot-px → (λw: Int px: ArrayB x: Int y: Int color: Int.
+  if (or (< x 0) (or (>= x w) (or (< y 0) (>= y (/ (arrayb-length px) (* w 3))))))
+  then px
+  else idx → (* (+ (* y w) x) 3)
+       b → (% color 256)
+       g → (% (/ color 256) 256)
+       r → (% (/ color 65536) 256)
+       (arrayb-set (arrayb-set (arrayb-set px idx b) (+ idx 1) g) (+ idx 2) r))
+
+; Drawing helpers take every value explicitly.  Match-bound fields cannot be
+; captured by a nested lambda in the current compiler, so the product is
+; destructured once and passed down as ordinary parameters.
+row-fill → (λw: Int px: ArrayB x: Int xe: Int y: Int color: Int.
+  if (>= x xe) then px
+  else (row-fill w (plot-px w px x y color) (+ x 1) xe y color))
+
+rect-fill → (λw: Int px: ArrayB x0: Int y0: Int rw: Int rh: Int y: Int color: Int.
+  if (>= y (+ y0 rh)) then px
+  else (rect-fill w (row-fill w px x0 (+ x0 rw) y color)
+                   x0 y0 rw rh (+ y 1) color))
+
+circle-row → (λw: Int px: ArrayB cx: Int cy: Int r2: Int x: Int xe: Int y: Int color: Int.
+  if (>= x xe) then px
+  else dx → (- x cx)
+       dy → (- y cy)
+       (circle-row w (if (<= (+ (* dx dx) (* dy dy)) r2)
+                      then (plot-px w px x y color) else px)
+                   cx cy r2 (+ x 1) xe y color))
+
+circle-rows → (λw: Int px: ArrayB cx: Int cy: Int r: Int r2: Int y: Int color: Int.
+  if (> y (+ cy r)) then px
+  else (circle-rows w (circle-row w px cx cy r2 (- cx r) (+ cx r) y color)
+                     cx cy r r2 (+ y 1) color))
+
+gui-plot → (λg: GUI x: Int y: Int color: Int.
+  match g with GUI w h px:
+    (GUI w h (plot-px w px x y color)))
+
+; Filled axis-aligned rectangle.
+Rectangle → (λg: GUI x0: Int y0: Int rw: Int rh: Int color: Int.
+  match g with GUI w h px:
+    (GUI w h (rect-fill w px x0 y0 rw rh y0 color)))
+
+; Filled circle (integer squared-distance test).
+circle → (λg: GUI cx: Int cy: Int r: Int color: Int.
+  match g with GUI w h px:
+    (GUI w h (circle-rows w px cx cy r (* r r) (- cy r) color)))
+
+; A beveled button rectangle.  The label is accepted for API stability; this
+; framebuffer layer draws the widget chrome and leaves glyph rasterisation to
+; the native windowing layer.
+button → (λg: GUI x: Int y: Int w: Int h: Int label: String.
+  shaded → (Rectangle g x y w h 2105376)
+  inner → (Rectangle shaded (+ x 2) (+ y 2) (- w 4) (- h 4) 14737632)
+  (Rectangle inner (+ x 2) (+ y 2) (- w 4) 2 16777215))

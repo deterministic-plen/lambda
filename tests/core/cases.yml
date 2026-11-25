@@ -80,4 +80,3 @@ cases:
     '
   flags:
   - --dynamic
-strict: true

@@ -4,8 +4,46 @@
 ; new matrix, matching Lambda's linear array convention.  All element access
 ; goes through checked arrayf-get, and the matrix dimensions are carried with
 ; the data so shape errors surface as ordinary bounds failures.
+;
+; "Shape errors surface as ordinary bounds failures" used to be true only for
+; the backing array: mat-add/mat-sub ignored the other operand's dimensions,
+; mat-mul used the left operand's column count for the right operand, and
+; mat-get/mat-set computed a flat index without checking it against the row
+; and column bounds.  The public operations below now validate shapes and
+; indices explicitly and stop the program on misuse (the language has no
+; dedicated panic primitive, so the library uses the generic empty-list
+; failure).  Dimensions and the element count are also checked by the value
+; extractors so a hand-built `M r c data` cannot silently alias elements.
+;
+; The checks are separate Int-returning definitions rather than `if` branches
+; that directly produce a Matrix: the backend cannot coerce a boxed failure
+; value into an unboxed product type, so a product-returning `if` with a
+; failing branch is a compile error.  Evaluating an Int guard first has the
+; right semantics and keeps the check in one place.
 
 data Matrix = M (rows: Int, cols: Int, data: ArrayF)
+
+; `want` is the expected element count r*c.  Returns 0 on success; stops the
+; program otherwise.
+mat-shape-guard → (λ r: Int c: Int want: Int.
+  if (not (== (* r c) want)) then (+ 0 (head nil)) else 0)
+
+mat-same-shape-guard → (λ ar: Int ac: Int br: Int bc: Int.
+  if (or (not (== ar br)) (not (== ac bc))) then (+ 0 (head nil)) else 0)
+
+mat-mul-shape-guard → (λ ac: Int br: Int.
+  if (not (== ac br)) then (+ 0 (head nil)) else 0)
+
+mat-index-guard → (λ r: Int c: Int i: Int j: Int.
+  if (or (or (< i 0) (>= i r)) (or (< j 0) (>= j c)))
+  then (+ 0 (head nil))
+  else 0)
+
+mat-nonneg-guard → (λ n: Int.
+  if (< n 0) then (+ 0 (head nil)) else 0)
+
+mat-scalar-guard → (λ r: Int c: Int.
+  if (or (not (== r 1)) (not (== c 1))) then (+ 0 (head nil)) else 0)
 
 mat2 → (λ a b c d. (M 2 2 (arrayf-of [a, b, c, d])))
 matvec2 → (λ a b. (M 2 1 (arrayf-of [a, b])))
@@ -16,6 +54,7 @@ type MatVec2Values (a: Float, b: Float)
 
 matvec2-values → (λ m: Matrix.
   match m with M r c d:
+    guard → (mat-shape-guard r c 2)
     (MatVec2Values (arrayf-get d 0) (arrayf-get d 1)))
 
 type Mat2Values (a: Float, b: Float, c: Float, d: Float)
@@ -23,22 +62,30 @@ type Mat1Values (a: Float)
 
 mat2-values → (λ m: Matrix.
   match m with M r c d:
+    guard → (mat-shape-guard r c 4)
     (Mat2Values (arrayf-get d 0) (arrayf-get d 1)
                 (arrayf-get d 2) (arrayf-get d 3)))
 
 mat1-values → (λ m: Matrix.
   match m with M r c d:
+    guard → (mat-shape-guard r c 1)
     (Mat1Values (arrayf-get d 0)))
 
 
-mat-zero → (λ r: Int c: Int. (M r c (arrayf (* r c) 0.0)))
+mat-zero → (λ r: Int c: Int.
+  guard-r → (mat-nonneg-guard r)
+  guard-c → (mat-nonneg-guard c)
+  (M r c (arrayf (* r c) 0.0)))
 
 mat-get → (λ m: Matrix i: Int j: Int.
   match m with M r c d:
-    (arrayf-get d (+ (* i c) j)))
+    if (or (or (< i 0) (>= i r)) (or (< j 0) (>= j c)))
+    then (head nil)
+    else (arrayf-get d (+ (* i c) j)))
 
 mat-set → (λ m: Matrix i: Int j: Int v: Float.
   match m with M r c d:
+    guard → (mat-index-guard r c i j)
     (M r c (arrayf-set d (+ (* i c) j) v)))
 
 mat-add-shape → (λ ar ac ad bd.
@@ -49,6 +96,7 @@ mat-add-shape → (λ ar ac ad bd.
 mat-add → (λ a: Matrix b: Matrix.
   match a with M ar ac ad:
     match b with M br bc bd:
+      guard → (mat-same-shape-guard ar ac br bc)
       (mat-add-shape ar ac ad bd))
 
 mat-sub-shape → (λ ar ac ad bd.
@@ -59,6 +107,7 @@ mat-sub-shape → (λ ar ac ad bd.
 mat-sub → (λ a: Matrix b: Matrix.
   match a with M ar ac ad:
     match b with M br bc bd:
+      guard → (mat-same-shape-guard ar ac br bc)
       (mat-sub-shape ar ac ad bd))
 
 mat-scale-shape → (λ ar ac ad s.
@@ -81,6 +130,7 @@ mat-transpose → (λ a: Matrix.
     (mat-transpose-shape ar ac ad))
 
 mat-id → (λ n: Int.
+  guard → (mat-nonneg-guard n)
   (M n n
     (arrayf-pmap (λ p. if (== (/ p n) (% p n)) then 1.0 else 0.0) (* n n))))
 
@@ -101,10 +151,13 @@ mat-mul-shape → (λ ar ac ad br bc bd.
 mat-mul → (λ a: Matrix b: Matrix.
   match a with M ar ac ad:
     match b with M br bc bd:
+      guard → (mat-mul-shape-guard ac br)
       (mat-mul-shape ar ac ad br bc bd))
 
 mat-scalar → (λ m: Matrix.
-  match m with M r c d: (arrayf-get d 0))
+  match m with M r c d:
+    guard → (mat-scalar-guard r c)
+    (arrayf-get d 0))
 
 mat-clone → (λ m: Matrix.
   match m with M r c d: (M r c (arrayf-clone d)))

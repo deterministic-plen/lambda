@@ -1,0 +1,2 @@
+﻿f → (λa: linear. (arrayi-length a))
+(f (arrayi 3 0))

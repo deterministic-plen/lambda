@@ -1,0 +1,6 @@
+﻿include "lib/GUI.lambda"
+g0 → (canvas 64 48)
+g1 → (Rectangle g0 4 4 20 10 16711680)
+g2 → (circle g1 40 30 8 65280)
+g3 → (button g2 8 20 30 12 "OK")
+g3

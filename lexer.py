@@ -194,6 +194,42 @@ def tokenize(source: str, filename: str = "<input>") -> List[Token]:
             i = j
             continue
 
+        if ch == "'":
+            # Character literal: a single codepoint, the same value as the
+            # corresponding Int.  This makes FSM tables readable without
+            # magic numbers: '[' is 91, ']' is 93, '\n' is 10.
+            j = i + 1
+            buf: List[str] = []
+            closed = False
+            while j < n:
+                c = source[j]
+                if c == "'":
+                    closed = True
+                    j += 1
+                    break
+                if c == "\\":
+                    if j + 1 >= n:
+                        break
+                    buf.append(c)
+                    buf.append(source[j + 1])
+                    j += 2
+                    continue
+                if c == "\n":
+                    raise SyntaxErr("newline in character literal", start)
+                buf.append(c)
+                j += 1
+            if not closed:
+                raise SyntaxErr("unterminated character literal", start)
+            decoded = _decode_string("".join(buf), start)
+            if len(decoded) != 1:
+                raise SyntaxErr(
+                    "character literal must contain exactly one codepoint",
+                    start)
+            tokens.append(Token("int", str(ord(decoded)), start))
+            advance(source[i:j])
+            i = j
+            continue
+
         # Parallel lambda marker ``\p``/``λp`` (requires whitespace after the p,
         # so ``\p. p`` is still an ordinary lambda whose parameter is named p).
         if ((source.startswith("\\p", i) or source.startswith("λp", i))

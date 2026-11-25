@@ -1,0 +1,8 @@
+; Regression for PR.md 2.2: read-file/read-file-bytes sized the buffer with
+; fseek/ftell.  A directory made ftell return a huge value ("out of memory"),
+; and a missing file returned empty.  Directories and other non-regular files
+; must return the existing empty-on-error value instead of aborting.
+[(str-len (read-file ".")),
+ (arrayb-length (read-file-bytes ".")),
+ (str-len (read-file "regr_no_such_file.tmp")),
+ (arrayb-length (read-file-bytes "regr_no_such_file.tmp"))]

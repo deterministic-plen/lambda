@@ -25,18 +25,23 @@ KEYWORDS = (
     "enum", "type", "match", "with",
 )
 
+# Derived from parser.PRIMITIVES; keep in sync with ``language-data.json``.
+# ``python editors/test_highlight.py`` fails if this list drifts.
 BUILTINS = (
-    "abs acos and arrayf-of arrayi-of arrayb-of arrayf-pmap arrayb arrayb-clone arrayb-get arrayb-get-ro arrayb-length "
-    "arrayb-set arrayf arrayf-clone arrayf-get arrayf-get-ro arrayf-length "
-    "arrayf-set arrayf-sum arrayi arrayi-clone arrayi-get arrayi-get-ro "
-    "arrayi-length arrayi-sum arrayi-pmap arrayi-pmap-chunk arrayi-set "
-    "asin atan atan2 bit-and bit-not bit-or bit-xor ceil cons cos e empty? "
-    "exp fix float->int or "
-    "float->str floor head immortalize int->float int->str ln log10 "
-    "log2 map not pi pmap popcount pow print println product range read-file "
-    "read-float read-int read-line round shl shr sin sqrt str->float str->int "
-    "str->list str-append str-len sum tail tan trunc write-bytes write-file write-f64s "
-    "write-i64s π ∑ ∏ √"
+    "abs acos and argc argv arrayb arrayb->str arrayb-clone arrayb-get "
+    "arrayb-get-ro arrayb-length arrayb-of arrayb-set arrayf arrayf-clone "
+    "arrayf-get arrayf-get-ro arrayf-get-unchecked arrayf-length arrayf-of "
+    "arrayf-pmap arrayf-pmap-into arrayf-set arrayf-sum arrayi arrayi-clone "
+    "arrayi-get arrayi-get-ro arrayi-length arrayi-of arrayi-pmap "
+    "arrayi-pmap-chunk arrayi-set arrayi-sum asin atan atan2 bit-and bit-not "
+    "bit-or bit-xor ceil cons cos e empty? exp fix float->int float->str floor "
+    "head immortalize int->float int->str ln log10 log2 map not or pi pmap "
+    "popcount pow print println product range read-file read-file-bytes "
+    "read-float read-int read-line round shl shr sin sqrt str->arrayb "
+    "str->float str->int str->list str->utf16le str->utf16le-bytes str-append "
+    "str-byte-at str-byte-length str-codepoint-at str-codepoint-length "
+    "str-len str-utf8-at str-valid-utf8 sum tail tan trunc utf16le->str "
+    "utf16le-bytes->str write-bytes write-f64s write-file write-i64s π ∏ ∑ √"
 )
 
 TYPES = ("Int", "Float", "Bool", "String", "ArrayF", "ArrayI", "ArrayB")

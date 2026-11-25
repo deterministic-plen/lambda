@@ -1,0 +1,9 @@
+include "lib/prime.lambda"
+[(is-prime 0), (is-prime 1), (is-prime 2), (is-prime 3), (is-prime 4),
+ (is-prime 17), (is-prime 25), (is-prime 121), (is-prime 97),
+ (is-prime 1000000007), (is-prime 1000000009),
+ (is-prime 3825123056546413051),
+ (is-prime 9223372036854775783), (is-prime 9223372036854775787),
+ (is-prime 9223372036854775807), (is-prime 9223372030926249001),
+ (is-prime 9000000000000000041), (is-prime 1000000000000),
+ (is-prime 1000000000039), (is-prime 9223372036854775789)]

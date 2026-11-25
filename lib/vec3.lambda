@@ -18,3 +18,12 @@ v3-dot → (λ a: Vec3 b: Vec3.
 
 v3-scale → (λ a: Vec3 s: Float.
   (Vec3 (* (Vec3-x a) s) (* (Vec3-y a) s) (* (Vec3-z a) s)))
+
+; Right-handed cross product: a x b.
+v3-cross → (λ a: Vec3 b: Vec3.
+  (Vec3 (- (* (Vec3-y a) (Vec3-z b)) (* (Vec3-z a) (Vec3-y b)))
+        (- (* (Vec3-z a) (Vec3-x b)) (* (Vec3-x a) (Vec3-z b)))
+        (- (* (Vec3-x a) (Vec3-y b)) (* (Vec3-y a) (Vec3-x b)))))
+
+; Euclidean length.
+v3-norm → (λ a: Vec3. (sqrt (v3-dot a a)))

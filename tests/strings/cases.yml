@@ -40,4 +40,3 @@ cases:
   stdout: '[65, 128512, 240]
 
     '
-strict: true

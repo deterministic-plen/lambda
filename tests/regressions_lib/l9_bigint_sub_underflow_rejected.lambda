@@ -1,0 +1,2 @@
+include "lib/bigint.lambda"
+(bi-sub (bi-from-int 2 5) (bi-from-int 2 7) 2)

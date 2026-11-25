@@ -11,7 +11,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -21,6 +23,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -34,19 +37,32 @@
 #include <vector>
 
 static constexpr uint64_t MAX_FRAME = 256ull * 1024 * 1024;
-static constexpr size_t MAX_JSON_DEPTH = 512;
+/* P5: large but flat programs (a 1,000-term + chain nests ~1 plan level per
+   term).  The old 512 cap rejected them.  The runtime runs on a 64 MB stack
+   (see main) so this depth is safe to parse and evaluate. */
+static constexpr size_t MAX_JSON_DEPTH = 8192;
+static constexpr size_t BIG_STACK_BYTES = 64ull * 1024 * 1024;
+/* P3: `par for` uses a bounded pool, never one OS thread per element. */
+static constexpr size_t MAX_PAR_WORKERS = 64;
 
 #ifdef _WIN32
 #define NOMINMAX 1
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/wait.h>
+extern char **environ;
 #endif
 
 namespace fs = std::filesystem;
 
 // ------------------------------------------------------------------ JSON
+[[noreturn]] static void plan_json_fail(std::string msg);
+
 struct J {
     enum Kind { NUL, BOOL, NUM, STR, ARR, OBJ } kind = NUL;
     bool b = false;
@@ -63,13 +79,33 @@ struct J {
     std::string as_str() const { return str; }
 };
 
+static void utf8_append(std::string &out, uint32_t cp) {
+    if (cp <= 0x7F) {
+        out.push_back((char)cp);
+    } else if (cp <= 0x7FF) {
+        out.push_back((char)(0xC0 | (cp >> 6)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        out.push_back((char)(0xE0 | (cp >> 12)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back((char)(0xF0 | (cp >> 18)));
+        out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+}
+
 struct JsonParser {
     const char *start, *p, *end;
     explicit JsonParser(const std::string &s) : start(s.data()), p(s.data()), end(s.data() + s.size()) {}
     void ws() { while (p < end && std::isspace((unsigned char)*p)) p++; }
     [[noreturn]] void fail(const char *m) {
-        std::fprintf(stderr, "plan JSON: %s at %ld near %.40s [%02x]\n", m, (long)(p - start), p, p < end ? (unsigned char)*p : 0);
-        std::exit(2);
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "plan JSON: %s at %ld near %.40s [%02x]", m,
+                      (long)(p - start), p, p < end ? (unsigned char)*p : 0);
+        plan_json_fail(buf);
     }
     size_t depth = 0;
     J parse() {
@@ -96,25 +132,69 @@ struct JsonParser {
         J v; v.kind = J::NUM; v.num = d; return v;
     }
     std::string string() {
-        if (*p != '"') fail("string");
+        if (p >= end || *p != '"') fail("string");
         p++;
         std::string out;
+        auto hex4 = [&]() -> uint32_t {
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++) {
+                if (p >= end) fail("truncated \\u escape");
+                char c = *p++;
+                v <<= 4;
+                if (c >= '0' && c <= '9') v |= (uint32_t)(c - '0');
+                else if (c >= 'a' && c <= 'f') v |= (uint32_t)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') v |= (uint32_t)(c - 'A' + 10);
+                else fail("bad \\u escape");
+            }
+            return v;
+        };
         while (p < end && *p != '"') {
-            if (*p == '\\') {
+            unsigned char c = (unsigned char)*p;
+            if (c == '\\') {
                 p++;
+                if (p >= end) fail("bad escape");
                 switch (*p) {
-                case 'n': out.push_back('\n'); break;
-                case 'r': out.push_back('\r'); break;
-                case 't': out.push_back('\t'); break;
-                case '\\': out.push_back('\\'); break;
-                case '"': out.push_back('"'); break;
-                case '/': out.push_back('/'); break;
-                default: out.push_back(*p); break;
+                case 'n': out.push_back('\n'); p++; break;
+                case 'r': out.push_back('\r'); p++; break;
+                case 't': out.push_back('\t'); p++; break;
+                case 'b': out.push_back('\b'); p++; break;
+                case 'f': out.push_back('\f'); p++; break;
+                case '\\': out.push_back('\\'); p++; break;
+                case '"': out.push_back('"'); p++; break;
+                case '/': out.push_back('/'); p++; break;
+                case 'u': {
+                    // P4: decode \uXXXX (and surrogate pairs) to UTF-8.  The old
+                    // default branch kept the letter and dropped the backslash,
+                    // mangling NUL/control characters (Python's json writes a NUL
+                    // in a label as \u0000).
+                    p++;
+                    uint32_t cp = hex4();
+                    if (cp >= 0xD800 && cp <= 0xDBFF) {
+                        if (p + 1 < end && p[0] == '\\' && p[1] == 'u') {
+                            p += 2;
+                            uint32_t lo = hex4();
+                            if (lo < 0xDC00 || lo > 0xDFFF) fail("bad surrogate pair");
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        } else {
+                            fail("unpaired high surrogate");
+                        }
+                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                        fail("unpaired low surrogate");
+                    }
+                    utf8_append(out, cp);
+                    break;
                 }
+                default: fail("bad escape");
+                }
+            } else if (c < 0x20) {
+                fail("control character in string");
+            } else {
+                out.push_back((char)c);
                 p++;
-            } else out.push_back(*p++);
+            }
         }
-        if (p < end) p++;
+        if (p >= end) fail("unterminated string");
+        p++;
         return out;
     }
     J object() {
@@ -179,14 +259,73 @@ struct V {
     static V payload_of(std::vector<double> p) { V v; v.kind = PAYLOAD; v.payload = std::move(p); return v; }
 };
 
+// --------------------------------------------------------------- errors
+// P6: no `exit()` from worker/timeout/`par for`/controller threads.  Every
+// background thread catches (or rethrows) these exceptions and `main` decides
+// the exit status after `finish()` has run.
+struct PiError : std::exception {
+    std::string kind;
+    long code = 0;
+    Worker *worker = nullptr;
+    std::string message;
+    PiError(std::string k, long c = 0) : kind(std::move(k)), code(c) {
+        message = kind;
+        if (code) message += "(" + std::to_string(code) + ")";
+    }
+    const char *what() const noexcept override { return message.c_str(); }
+};
+
+/** A non-recoverable runtime error (bad index, bad conversion, ...).  It is not
+    a Pi error constructor, so `on_error` handlers do not swallow it. */
+struct PiFatal : std::exception {
+    std::string message;
+    int exit_code = 1;
+    explicit PiFatal(std::string m, int code = 1) : message(std::move(m)), exit_code(code) {}
+    const char *what() const noexcept override { return message.c_str(); }
+};
+
+[[noreturn]] static void plan_json_fail(std::string msg) {
+    throw PiFatal(std::move(msg), 2);
+}
+
+/** Internal: the branch holding this token was abandoned by `timeout`. */
+struct Cancelled {};
+
+struct CancelToken {
+    std::atomic<bool> cancelled{false};
+    std::atomic<Worker *> cancelled_worker{nullptr};
+    CancelToken *parent = nullptr;
+};
+
+static bool cancel_requested(CancelToken *t) {
+    for (; t; t = t->parent)
+        if (t->cancelled.load()) return true;
+    return false;
+}
+
 [[noreturn]] static void die(const std::string &m) {
-    std::fprintf(stderr, "pi-cpp: %s\n", m.c_str());
-    std::exit(1);
+    throw PiFatal(m);
+}
+
+// P7: a raw double->long cast is undefined behaviour for NaN, infinities and
+// values outside the integer range (`retry(max = 1e30)`, `chan(1e30)`).
+static bool double_fits_long(double d) {
+    if (!std::isfinite(d)) return false;
+    if (d < (double)LONG_MIN || d > (double)LONG_MAX) return false;
+    // (double)LONG_MAX rounds up to 2^63 on 64-bit targets, which would still
+    // be one past the range; reject it explicitly.
+    if (d >= 9223372036854775808.0) return false;
+    return true;
+}
+
+static long checked_long(double d, const char *what) {
+    if (!double_fits_long(d)) throw PiFatal(std::string("integer out of range for ") + what);
+    return (long)d;
 }
 
 static long as_int(const V &v) {
     if (v.kind != V::NUM) die("expected number");
-    return (long)v.num;
+    return checked_long(v.num, "a number");
 }
 
 // ------------------------------------------------------------------ worker
@@ -212,46 +351,118 @@ struct Worker {
 };
 #endif
 
-static void write_all(Worker *w, const std::string &s) {
+static std::vector<Worker *> g_workers;
+static std::mutex g_workers_mu;
+static std::mutex g_spawn_mu;
+
+static void shutdown_worker(Worker *w);
+
+static void reap_and_close(Worker *w) {
+    w->alive = false;
+    shutdown_worker(w);
+}
+
+/** P1: a worker that dies mid-call surfaces as WorkerDied to on_error/restart,
+    never as `die()`/`exit()` (which bypassed the recovery ladder). */
+[[noreturn]] static void worker_died(Worker *w, const char *) {
+    reap_and_close(w);
+    PiError e("WorkerDied");
+    e.worker = w;
+    throw e;
+}
+
+/** P2: the branch holding *cancel* was abandoned by `timeout`.  A worker that
+    is still blocked in a call cannot be left holding its I/O mutex, so it is
+    killed here; the timeout error carries the worker so `| Deadline ⇒ restart`
+    can replace it. */
+[[noreturn]] static void worker_cancelled(Worker *w, CancelToken *cancel) {
+    if (cancel) {
+        Worker *expected = nullptr;
+        cancel->cancelled_worker.compare_exchange_strong(expected, w);
+    }
+    reap_and_close(w);
+    throw Cancelled{};
+}
+
+static void write_all(Worker *w, const std::string &s, CancelToken *cancel = nullptr) {
 #ifdef _WIN32
     size_t off = 0;
     while (off < s.size()) {
+        if (cancel_requested(cancel)) worker_cancelled(w, cancel);
         DWORD n = 0;
-        if (!WriteFile(w->in, s.data() + off, (DWORD)(s.size() - off), &n, nullptr) || !n)
-            die("worker write");
+        DWORD chunk = (DWORD)std::min<size_t>(s.size() - off, 1u << 20);
+        if (!WriteFile(w->in, s.data() + off, chunk, &n, nullptr) || !n)
+            worker_died(w, "worker write");
         off += n;
     }
 #else
     size_t off = 0;
     while (off < s.size()) {
+        if (cancel_requested(cancel)) worker_cancelled(w, cancel);
+        struct pollfd pfd{w->in, POLLOUT, 0};
+        int r = ::poll(&pfd, 1, 50);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            worker_died(w, "worker write");
+        }
+        if (r == 0) continue;
         ssize_t n = ::write(w->in, s.data() + off, s.size() - off);
-        if (n <= 0) die("worker write");
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (n <= 0) worker_died(w, "worker write");
         off += (size_t)n;
     }
 #endif
 }
 
-static void read_all(Worker *w, void *buf, size_t n) {
+static void read_all(Worker *w, void *buf, size_t n, CancelToken *cancel = nullptr) {
 #ifdef _WIN32
     char *p = (char *)buf;
     while (n) {
-        DWORD got = 0;
-        if (!ReadFile(w->out, p, (DWORD)n, &got, nullptr) || !got) die("worker read");
-        p += got; n -= got;
+        if (cancel_requested(cancel)) worker_cancelled(w, cancel);
+        DWORD avail = 0;
+        if (PeekNamedPipe(w->out, nullptr, 0, nullptr, &avail, nullptr)) {
+            if (avail) {
+                DWORD got = 0;
+                DWORD chunk = (DWORD)std::min<size_t>(n, avail);
+                if (!ReadFile(w->out, p, chunk, &got, nullptr) || !got)
+                    worker_died(w, "worker read");
+                p += got; n -= got;
+                continue;
+            }
+        } else {
+            worker_died(w, "worker read");
+        }
+        /* No bytes ready: wait briefly, then check whether the process is gone. */
+        if (w->proc.hProcess) {
+            DWORD wr = WaitForSingleObject(w->proc.hProcess, 5);
+            if (wr == WAIT_OBJECT_0) {
+                /* Drain a final partial buffer before declaring it dead. */
+                DWORD left = 0;
+                if (!PeekNamedPipe(w->out, nullptr, 0, nullptr, &left, nullptr) || left == 0)
+                    worker_died(w, "worker read");
+            }
+        } else {
+            Sleep(5);
+        }
     }
 #else
     char *p = (char *)buf;
     while (n) {
+        if (cancel_requested(cancel)) worker_cancelled(w, cancel);
+        struct pollfd pfd{w->out, POLLIN, 0};
+        int r = ::poll(&pfd, 1, 50);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            worker_died(w, "worker read");
+        }
+        if (r == 0) continue;
         ssize_t got = ::read(w->out, p, n);
-        if (got <= 0) die("worker read");
+        if (got < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (got <= 0) worker_died(w, "worker read");
         p += got; n -= (size_t)got;
     }
 #endif
 }
-
-static std::vector<Worker *> g_workers;
-static std::mutex g_workers_mu;
-static std::mutex g_spawn_mu;
 
 static void shutdown_worker(Worker *w) {
     if (!w) return;
@@ -273,91 +484,134 @@ static void shutdown_all_workers() {
     g_workers.clear();
 }
 
-static Worker *spawn_worker(const std::string &exe, bool gpu, const std::string &name,
-                            uint64_t schema_hi = 0, uint64_t schema_lo = 0) {
-    Worker *w = new Worker();
-    w->name = name;
-    w->exe = exe;
-    w->gpu = gpu;
-    w->schema_hi = schema_hi;
-    w->schema_lo = schema_lo;
-    if (exe.find('"') != std::string::npos) die("worker path contains a quote");
-    std::lock_guard<std::mutex> spawn_lock(g_spawn_mu);
-#ifdef _WIN32
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE ir, iw, orr, ow;
-    if (!CreatePipe(&ir, &iw, &sa, 0) || !CreatePipe(&orr, &ow, &sa, 0)) die("CreatePipe");
-    SetHandleInformation(iw, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(orr, HANDLE_FLAG_INHERIT, 0);
-    STARTUPINFOA si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = ir;
-    si.hStdOutput = ow;
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    std::string cmd = "\"" + exe + "\"";
-    char oldgpu[32768] = {0};
-    DWORD oldn = GetEnvironmentVariableA("LAMBDA_GPU", oldgpu, sizeof(oldgpu));
-    if (oldn >= sizeof(oldgpu)) die("LAMBDA_GPU is too long");
-    SetEnvironmentVariableA("LAMBDA_GPU", gpu ? "1" : nullptr);
-    BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &w->proc);
-    SetEnvironmentVariableA("LAMBDA_GPU", oldn ? oldgpu : nullptr);
-    if (!ok) die("cannot start worker " + exe);
-    CloseHandle(ir);
-    CloseHandle(ow);
-    w->in = iw;
-    w->out = orr;
-#else
-    int pin[2], pout[2];
-    if (pipe(pin) || pipe(pout)) die("pipe");
-    if (gpu) setenv("LAMBDA_GPU", "1", 1); else unsetenv("LAMBDA_GPU");
-    pid_t pid = fork();
-    if (pid < 0) die("fork");
-    if (pid == 0) {
-        dup2(pin[0], 0); dup2(pout[1], 1);
-        close(pin[0]); close(pin[1]); close(pout[0]); close(pout[1]);
-        execl(exe.c_str(), exe.c_str(), (char *)nullptr);
-        _exit(127);
-    }
-    close(pin[0]); close(pout[1]);
-    w->pid = pid; w->in = pin[1]; w->out = pout[0];
-#endif
-    unsigned char h[16];
-    read_all(w, h, 16);
-    if (std::memcmp(h, "LMB1", 4)) die("worker HELLO magic");
-    if (h[4] != 2) die("worker HELLO tag");
-    uint32_t sid = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
-    uint32_t n = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
-    if (sid != 0 || n != 24 || n > MAX_FRAME) die("worker HELLO shape");
-    std::vector<unsigned char> body(n);
-    read_all(w, body.data(), n);
-    if (n != 24) die("worker HELLO body");
-    int64_t hdr[3];
-    std::memcpy(hdr, body.data(), 24);
-    uint64_t got_hi = (uint64_t)hdr[0], got_lo = (uint64_t)hdr[1];
-    if (hdr[2] != 2) die("worker schema version");
-    if ((schema_hi || schema_lo) && (got_hi != schema_hi || got_lo != schema_lo))
-        die("worker schema mismatch");
-    {
-        std::lock_guard<std::mutex> lk(g_workers_mu);
-        g_workers.push_back(w);
-    }
-    return w;
+/** P2 last resort: kill workers without deleting them (a cancelled branch may
+    still hold a pointer).  Deletion happens in shutdown_all_workers. */
+static void kill_all_workers() {
+    std::lock_guard<std::mutex> lk(g_workers_mu);
+    for (Worker *w : g_workers) shutdown_worker(w);
 }
 
-struct PiError : std::exception {
-    std::string kind;
-    long code = 0;
-    Worker *worker = nullptr;
-    PiError(std::string k, long c = 0) : kind(std::move(k)), code(c) {}
-    const char *what() const noexcept override { return kind.c_str(); }
-};
+#ifdef _WIN32
+static std::string windows_env_block(bool gpu) {
+    std::string block;
+    LPCH env = GetEnvironmentStringsA();
+    if (env) {
+        for (LPCH p = env; *p; p += std::strlen(p) + 1) {
+            std::string entry(p);
+            if (entry.rfind("LAMBDA_GPU=", 0) == 0) continue;
+            block += entry;
+            block.push_back('\0');
+        }
+        FreeEnvironmentStringsA(env);
+    }
+    if (gpu) {
+        block += "LAMBDA_GPU=1";
+        block.push_back('\0');
+    }
+    block.push_back('\0');
+    return block;
+}
+#else
+static void set_cloexec(int fd) {
+    int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+#endif
 
-static void restart_worker(Worker *w) {
+static Worker *spawn_worker(const std::string &exe, bool gpu, const std::string &name,
+                            uint64_t schema_hi = 0, uint64_t schema_lo = 0,
+                            CancelToken *cancel = nullptr) {
+    Worker *w = new Worker();
+    try {
+        w->name = name;
+        w->exe = exe;
+        w->gpu = gpu;
+        w->schema_hi = schema_hi;
+        w->schema_lo = schema_lo;
+        if (exe.find('"') != std::string::npos) die("worker path contains a quote");
+        std::lock_guard<std::mutex> spawn_lock(g_spawn_mu);
+#ifdef _WIN32
+        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+        HANDLE ir, iw, orr, ow;
+        if (!CreatePipe(&ir, &iw, &sa, 0) || !CreatePipe(&orr, &ow, &sa, 0)) die("CreatePipe");
+        SetHandleInformation(iw, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(orr, HANDLE_FLAG_INHERIT, 0);
+        STARTUPINFOA si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = ir;
+        si.hStdOutput = ow;
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        std::string cmd = "\"" + exe + "\"";
+        /* 3B: pass the child's environment explicitly instead of mutating the
+           process environment under a mutex that getenv() readers do not take. */
+        std::string env_block = windows_env_block(gpu);
+        BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
+                                 CREATE_NO_WINDOW, (LPVOID)env_block.data(), nullptr, &si, &w->proc);
+        if (!ok) die("cannot start worker " + exe);
+        CloseHandle(ir);
+        CloseHandle(ow);
+        w->in = iw;
+        w->out = orr;
+#else
+        int pin[2], pout[2];
+        if (pipe(pin) || pipe(pout)) die("pipe");
+        /* 3B: close-on-exec so later workers do not inherit earlier pipes. */
+        set_cloexec(pin[0]); set_cloexec(pin[1]);
+        set_cloexec(pout[0]); set_cloexec(pout[1]);
+        std::vector<std::string> env_store;
+        for (char **e = environ; e && *e; ++e) {
+            std::string entry(*e);
+            if (entry.rfind("LAMBDA_GPU=", 0) == 0) continue;
+            env_store.push_back(std::move(entry));
+        }
+        if (gpu) env_store.push_back("LAMBDA_GPU=1");
+        std::vector<char *> envp;
+        envp.reserve(env_store.size() + 1);
+        for (auto &entry : env_store) envp.push_back(const_cast<char *>(entry.c_str()));
+        envp.push_back(nullptr);
+        pid_t pid = fork();
+        if (pid < 0) die("fork");
+        if (pid == 0) {
+            dup2(pin[0], 0); dup2(pout[1], 1);
+            close(pin[0]); close(pin[1]); close(pout[0]); close(pout[1]);
+            execle(exe.c_str(), exe.c_str(), (char *)nullptr, envp.data());
+            _exit(127);
+        }
+        close(pin[0]); close(pout[1]);
+        w->pid = pid; w->in = pin[1]; w->out = pout[0];
+#endif
+        unsigned char h[16];
+        read_all(w, h, 16, cancel);
+        if (std::memcmp(h, "LMB1", 4)) die("worker HELLO magic");
+        if (h[4] != 2) die("worker HELLO tag");
+        uint32_t sid = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+        uint32_t n = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
+        if (sid != 0 || n != 24 || n > MAX_FRAME) die("worker HELLO shape");
+        std::vector<unsigned char> body(n);
+        read_all(w, body.data(), n, cancel);
+        int64_t hdr[3];
+        std::memcpy(hdr, body.data(), 24);
+        uint64_t got_hi = (uint64_t)hdr[0], got_lo = (uint64_t)hdr[1];
+        if (hdr[2] != 2) die("worker schema version");
+        if ((schema_hi || schema_lo) && (got_hi != schema_hi || got_lo != schema_lo))
+            die("worker schema mismatch");
+        {
+            std::lock_guard<std::mutex> lk(g_workers_mu);
+            g_workers.push_back(w);
+        }
+        return w;
+    } catch (...) {
+        shutdown_worker(w);
+        delete w;
+        throw;
+    }
+}
+
+static void restart_worker(Worker *w, CancelToken *cancel = nullptr) {
     std::lock_guard<std::mutex> lk(w->io_mu);
     shutdown_worker(w);
-    Worker *n = spawn_worker(w->exe, w->gpu, w->name, w->schema_hi, w->schema_lo);
+    Worker *n = spawn_worker(w->exe, w->gpu, w->name, w->schema_hi, w->schema_lo, cancel);
 #ifdef _WIN32
     w->in = n->in; w->out = n->out; w->proc = n->proc;
 #else
@@ -378,13 +632,15 @@ struct EscalateSignal { PiError err; explicit EscalateSignal(PiError e) : err(st
 
 static std::atomic<long> g_corr{1};
 
-static V worker_call(Worker *w, long op, const std::vector<V> &args, const std::string &ret = "") {
+static V worker_call(Worker *w, long op, const std::vector<V> &args, const std::string &ret = "",
+                     CancelToken *cancel = nullptr) {
     std::lock_guard<std::mutex> io_lock(w->io_mu);
     if (!w->alive) {
         PiError e("WorkerDied");
         e.worker = w;
         throw e;
     }
+    if (cancel_requested(cancel)) worker_cancelled(w, cancel);
     // flatten
     long nargs = 0;
     for (auto &a : args) {
@@ -426,9 +682,9 @@ static V worker_call(Worker *w, long op, const std::vector<V> &args, const std::
             }
         }
     }
-    write_all(w, req);
+    write_all(w, req, cancel);
     unsigned char h[16];
-    read_all(w, h, 16);
+    read_all(w, h, 16, cancel);
     if (std::memcmp(h, "LMB1", 4)) die("reply magic");
     if (h[4] != 1) die("reply tag");
     uint32_t sid = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
@@ -436,24 +692,29 @@ static V worker_call(Worker *w, long op, const std::vector<V> &args, const std::
     if ((long)sid != corr) die("reply correlation");
     if (n < 8 || (n % 8) != 0 || n > MAX_FRAME) die("reply BadFrame length");
     std::vector<double> body(n / 8);
-    read_all(w, body.data(), n);
+    read_all(w, body.data(), n, cancel);
     if (body.empty()) die("empty reply");
-    if ((long)body[0] == 2) {
-        PiError e("WorkerError", body.size() > 1 ? (long)body[1] : -1);
+    long tag = checked_long(body[0], "reply tag");
+    if (tag == 2) {
+        long code = body.size() > 1 ? checked_long(body[1], "error code") : -1;
+        PiError e("WorkerError", code);
         e.worker = w;
         throw e;
     }
     size_t off = 1;
-    if ((long)body[0] == 1) {
+    long stats_k = -1;
+    if (tag == 1) {
         if (body.size() < 2) die("reply BadFrame stats header");
-        size_t k = (size_t)body[1];
-        if (k > body.size() - 2) die("reply BadFrame stats length");
-        off = 2 + k;
+        stats_k = checked_long(body[1], "stats length");
+        if (stats_k < 0 || (size_t)stats_k > body.size() - 2) die("reply BadFrame stats length");
+        off = 2 + (size_t)stats_k;
+    } else if (tag != 0) {
+        die("reply BadFrame tag");
     }
     if (off > body.size()) die("reply BadFrame payload offset");
     std::vector<double> vals(body.begin() + off, body.end());
-    if (ret.find('(') != std::string::npos && (long)body[0] == 1) {
-        long k = body.size() > 1 ? (long)body[1] : 0;
+    if (ret.find('(') != std::string::npos && tag == 1) {
+        long k = stats_k > 0 ? stats_k : 0;
         V stats = V::payload_of(std::vector<double>(body.begin() + 2,
                                                     body.begin() + std::min((size_t)(2 + k), body.size())));
         V out; out.kind = V::TUPLE;
@@ -480,12 +741,15 @@ struct Channel {
     }
 };
 
-static void chan_send(const V &c, const V &v) {
+static void chan_send(const V &c, const V &v, CancelToken *cancel = nullptr) {
     if (c.kind != V::CHAN || !c.tx) die("send needs a Tx");
     auto ch = c.chan;
     if (!ch) return;
     std::unique_lock<std::mutex> lk(ch->mu);
-    ch->cv.wait(lk, [&] { return ch->closed || ch->q.size() < ch->cap; });
+    while (!(ch->closed || ch->q.size() < ch->cap)) {
+        if (cancel_requested(cancel)) throw Cancelled{};
+        ch->cv.wait_for(lk, std::chrono::milliseconds(25));
+    }
     if (ch->closed) throw ChannelClosed{};
     ch->q.push_back(v);
     ch->cv.notify_all();
@@ -497,12 +761,15 @@ static bool chan_is_closed(const V &c) {
     return c.chan->closed;
 }
 
-static V chan_recv(const V &c) {
+static V chan_recv(const V &c, CancelToken *cancel = nullptr) {
     if (c.kind != V::CHAN || c.tx) die("recv needs an Rx");
     auto ch = c.chan;
     if (!ch) return V::payload_of({});
     std::unique_lock<std::mutex> lk(ch->mu);
-    ch->cv.wait(lk, [&] { return ch->closed || !ch->q.empty(); });
+    while (!(ch->closed || !ch->q.empty())) {
+        if (cancel_requested(cancel)) throw Cancelled{};
+        ch->cv.wait_for(lk, std::chrono::milliseconds(25));
+    }
     if (ch->q.empty()) throw ChannelClosed{};
     V v = ch->q.front();
     ch->q.pop_front();
@@ -569,7 +836,10 @@ static void bind_pattern(const J &pat, const V &v, std::unordered_map<std::strin
 }
 
 static std::string safe_artifact_name(const std::string &name) {
-    if (name.empty() || name == "." || name == ".." ||
+    // NUL truncates filenames at the C API boundary and ':' opens an NTFS
+    // alternate data stream on Windows (PR.md 3A "Pi artifact names").
+    if (name.empty() || name.size() > 4096 || name == "." || name == ".." ||
+        name.find('\0') != std::string::npos || name.find(':') != std::string::npos ||
         name.find('/') != std::string::npos || name.find('\\') != std::string::npos ||
         name.find("..") != std::string::npos)
         die("unsafe artifact name: " + name);
@@ -597,7 +867,7 @@ struct Interp {
     explicit Interp(J p) : plan(std::move(p)) {
         for (auto &kv : plan["workers"].obj) workers[kv.first] = kv.second.as_str();
         if (plan["gpu"].kind == J::OBJ) {
-            for (auto &kv : plan["gpu"].obj) gpu[kv.first] = (long)kv.second.num != 0;
+            for (auto &kv : plan["gpu"].obj) gpu[kv.first] = kv.second.num != 0;
         }
         if (plan["schemas"].kind == J::OBJ) {
             for (auto &kv : plan["schemas"].obj) {
@@ -636,6 +906,15 @@ struct Interp {
     std::vector<ScopeFrame> scopes;
     Worker *last_error_worker = nullptr;
     std::unordered_map<Worker *, int> restart_counts;
+    // P2: set for a branch running under `timeout`; checked at every blocking
+    // point so the branch can be cancelled and joined (never detached).
+    std::shared_ptr<CancelToken> cancel;
+
+    void check_cancel() const {
+        if (cancel_requested(cancel.get())) throw Cancelled{};
+    }
+    void cancellable_sleep(double seconds) const;
+    void parallel_for(size_t n, const std::function<void(size_t)> &body);
 
     void emit_text(const std::string &s);
     void emit_series(const std::string &name, const V &x, const V &y);
@@ -646,6 +925,64 @@ struct Interp {
     void finish();
     V pool_worker(const J &call);
 };
+
+void Interp::cancellable_sleep(double seconds) const {
+    if (!(seconds > 0)) { check_cancel(); return; }
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(seconds));
+    for (;;) {
+        check_cancel();
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return;
+        auto step = std::min(std::chrono::duration<double>(0.02),
+                             std::chrono::duration<double>(deadline - now));
+        std::this_thread::sleep_for(step);
+    }
+}
+
+/* P3: bounded parallel iteration.  `par for` used to create one std::thread per
+   element, which aborts near the OS thread limit (`std::terminate` from
+   `~vector<thread>`); a fixed pool of hardware threads is used instead. */
+void Interp::parallel_for(size_t n, const std::function<void(size_t)> &body) {
+    if (n == 0) return;
+    unsigned hw = std::thread::hardware_concurrency();
+    size_t pool = std::min<size_t>(n, std::max(1u, hw ? hw : (unsigned)MAX_PAR_WORKERS));
+    pool = std::min<size_t>(pool, MAX_PAR_WORKERS);
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::exception_ptr first;
+    std::mutex emu;
+    auto run = [&]() {
+        for (;;) {
+            if (failed.load()) return;
+            size_t i = next.fetch_add(1);
+            if (i >= n) return;
+            try {
+                body(i);
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lk(emu);
+                    if (!first) first = std::current_exception();
+                }
+                failed.store(true);
+                return;
+            }
+        }
+    };
+    std::vector<std::thread> ts;
+    size_t started = 0;
+    try {
+        ts.reserve(pool);
+        for (size_t k = 0; k < pool; k++) { ts.emplace_back(run); started++; }
+    } catch (...) {
+        if (started == 0) run();
+    }
+    for (auto &t : ts) {
+        if (t.joinable()) t.join();
+    }
+    if (first) std::rethrow_exception(first);
+}
 
 void Interp::emit_text(const std::string &s) {
     std::printf("%s\n", s.c_str());
@@ -1130,7 +1467,8 @@ V Interp::pool_worker(const J &call) {
         auto sit = schema.find(src);
         Worker *w = spawn_worker(it->second, use_gpu, src,
                                  sit == schema.end() ? 0 : sit->second.first,
-                                 sit == schema.end() ? 0 : sit->second.second);
+                                 sit == schema.end() ? 0 : sit->second.second,
+                                 this->cancel.get());
         V v; v.kind = V::WORKER; v.worker = w;
         out.tuple.push_back(v);
     }
@@ -1239,7 +1577,7 @@ V Interp::instantiate_system(const std::string &name, const std::vector<V> &args
             names.push_back(b.arr[0].str);
             V r = eval(b.arr[1]);
             std::vector<long> vals;
-            for (double x : r.payload) vals.push_back((long)x);
+            for (double x : r.payload) vals.push_back(checked_long(x, "instance binding"));
             if (vals.empty()) die("empty instance binding range");
             axes.push_back(vals);
         }
@@ -1272,7 +1610,8 @@ V Interp::instantiate_system(const std::string &name, const std::vector<V> &args
                 auto sit = schema.find(src);
                 Worker *wp = spawn_worker(wit->second, false, src,
                                           sit == schema.end() ? 0 : sit->second.first,
-                                          sit == schema.end() ? 0 : sit->second.second);
+                                          sit == schema.end() ? 0 : sit->second.second,
+                                          this->cancel.get());
                 V wv; wv.kind = V::WORKER; wv.worker = wp;
                 inst->env[wn] = wv;
             }
@@ -1467,7 +1806,7 @@ V Interp::call(const J &n) {
         for (size_t i = 2; i < args.arr.size(); i++) a.push_back(eval(args.arr[i]));
         if (w.kind != V::WORKER) die("call target is not a worker");
         std::string ret = (oi->second < (long)op_rets.size()) ? op_rets[(size_t)oi->second] : "";
-        return worker_call(w.worker, oi->second, a, ret);
+        return worker_call(w.worker, oi->second, a, ret, this->cancel.get());
     }
     if (fname == "chan") {
         long cap = args.arr.empty() ? 1 : as_int(eval(args.arr[0]));
@@ -1479,10 +1818,10 @@ V Interp::call(const J &n) {
         V t; t.kind = V::TUPLE; t.tuple = {tx, rx};
         return t;
     }
-    if (fname == "send") { chan_send(eval(args.arr[0]), eval(args.arr[1])); return V(); }
-    if (fname == "recv") return chan_recv(eval(args.arr[0]));
+    if (fname == "send") { chan_send(eval(args.arr[0]), eval(args.arr[1]), this->cancel.get()); return V(); }
+    if (fname == "recv") return chan_recv(eval(args.arr[0]), this->cancel.get());
     if (fname == "close") { chan_close(eval(args.arr[0])); return V(); }
-    if (fname == "closed") { V c = eval(args.arr[0]); return V((c.kind == V::CHAN && c.chan->closed) ? 1.0 : 0.0); }
+    if (fname == "closed") { V c = eval(args.arr[0]); return V(chan_is_closed(c) ? 1.0 : 0.0); }
     if (fname == "restart") {
         if (last_error_worker) {
             int max_attempts = 3;
@@ -1496,7 +1835,7 @@ V Interp::call(const J &n) {
                 throw e;
             }
             count++;
-            restart_worker(last_error_worker);
+            restart_worker(last_error_worker, this->cancel.get());
             last_error_worker = nullptr;
         }
         return V();
@@ -1528,6 +1867,7 @@ V Interp::call(const J &n) {
         V data = eval(args.arr.at(0));
         long n = as_int(eval(args.arr.at(1)));
         if (n < 1) die("split count must be >= 1");
+        if (n > 1000000) die("split count is too large");
         std::vector<double> vals = data.payload;
         long size = vals.size() / n, rem = vals.size() % n, at = 0;
         V out; out.kind = V::TUPLE;
@@ -1692,7 +2032,7 @@ V Interp::call(const J &n) {
                 std::string ret = (oi->second < (long)op_rets.size())
                                       ? op_rets[(size_t)oi->second] : "";
                 tiles.push_back(worker_call(it->second.worker, oi->second,
-                                            std::vector<V>(), ret));
+                                            std::vector<V>(), ret, this->cancel.get()));
             }
         size_t tile_n = (size_t)rows * (size_t)cols;
         size_t out_cols = (size_t)nx * (size_t)cols;
@@ -1738,7 +2078,7 @@ V Interp::call(const J &n) {
             if (it == inst->env.end() || it->second.kind != V::WORKER)
                 die("collect: instance has no worker 'gs'");
             out.tuple.push_back(worker_call(it->second.worker, oi->second,
-                                            std::vector<V>(), ret));
+                                            std::vector<V>(), ret, this->cancel.get()));
         }
         return out;
     }
@@ -1751,9 +2091,14 @@ V Interp::call(const J &n) {
         long cols = as_int(eval(args.arr.at(4)));
         if (ts.kind != V::TUPLE || nx < 1 || ny < 1 || rows < 1 || cols < 1)
             die("stitch_grid needs a list of tiles and positive dimensions");
-        if ((long)ts.tuple.size() < nx * ny) die("stitch_grid needs nx*ny tiles");
-        size_t tile_n = (size_t)rows * (size_t)cols;
-        std::vector<double> out((size_t)(nx * cols) * (size_t)(ny * rows));
+        if (nx > 1000000 || ny > 1000000 || rows > 1000000 || cols > 1000000)
+            die("stitch_grid dimensions too large");
+        if (nx * ny > (long)ts.tuple.size()) die("stitch_grid needs nx*ny tiles");
+        long long tile_n_ll = (long long)rows * (long long)cols;
+        long long out_n_ll = (long long)nx * (long long)cols * (long long)ny * (long long)rows;
+        if (out_n_ll > 100000000LL) die("stitch_grid grid is too large");
+        size_t tile_n = (size_t)tile_n_ll;
+        std::vector<double> out((size_t)out_n_ll);
         long out_cols = nx * cols;
         for (long ty = 0; ty < ny; ty++) {
             for (long tx = 0; tx < nx; tx++) {
@@ -1774,10 +2119,13 @@ V Interp::call(const J &n) {
         V av = eval(args.arr.at(0)), bv = eval(args.arr.at(1));
         long rows = as_int(eval(args.arr.at(2)));
         long cols = as_int(eval(args.arr.at(3)));
-        if (rows < 0 || cols < 0 || av.payload.size() < (size_t)rows * (size_t)cols ||
-            bv.payload.size() < (size_t)rows * (size_t)cols)
+        if (rows < 0 || cols < 0 || rows > 1000000 || cols > 1000000 ||
+            (long long)rows * (long long)cols > 50000000LL)
+            die("hstack tile dimensions invalid");
+        size_t n = (size_t)rows * (size_t)cols;
+        if (av.payload.size() < n || bv.payload.size() < n)
             die("hstack tile shape mismatch");
-        std::vector<double> out((size_t)rows * (size_t)cols * 2);
+        std::vector<double> out(n * 2);
         for (long r = 0; r < rows; r++) {
             for (long c = 0; c < cols; c++) {
                 out[(size_t)r * 2 * cols + c] = av.payload[(size_t)r * cols + c];
@@ -1790,11 +2138,14 @@ V Interp::call(const J &n) {
         V av = eval(args.arr.at(0)), bv = eval(args.arr.at(1));
         long rows = as_int(eval(args.arr.at(2)));
         long cols = as_int(eval(args.arr.at(3)));
-        if (rows < 0 || cols < 0 || av.payload.size() < (size_t)rows * (size_t)cols ||
-            bv.payload.size() < (size_t)rows * (size_t)cols)
+        if (rows < 0 || cols < 0 || rows > 1000000 || cols > 1000000 ||
+            (long long)rows * (long long)cols > 50000000LL)
+            die("vstack tile dimensions invalid");
+        size_t n = (size_t)rows * (size_t)cols;
+        if (av.payload.size() < n || bv.payload.size() < n)
             die("vstack tile shape mismatch");
-        std::vector<double> out(av.payload.begin(), av.payload.begin() + rows * cols);
-        out.insert(out.end(), bv.payload.begin(), bv.payload.begin() + rows * cols);
+        std::vector<double> out(av.payload.begin(), av.payload.begin() + (std::ptrdiff_t)n);
+        out.insert(out.end(), bv.payload.begin(), bv.payload.begin() + (std::ptrdiff_t)n);
         return V::payload_of(std::move(out));
     }
     if (fname == "scalar") {
@@ -1807,13 +2158,18 @@ V Interp::call(const J &n) {
     if (fname == "range") {
         long lo = as_int(eval(args.arr.at(0)));
         long hi = as_int(eval(args.arr.at(1)));
+        if (hi <= lo) return V::payload_of({});
+        unsigned long long span = (unsigned long long)hi - (unsigned long long)lo;
+        if (span > 100000000ULL) die("range is too large");
         std::vector<double> v;
+        v.reserve((size_t)span);
         for (long i = lo; i < hi; i++) v.push_back((double)i);
         return V::payload_of(std::move(v));
     }
     if (fname == "after") {
         double sec = eval(args.arr.at(0)).num;
-        std::this_thread::sleep_for(std::chrono::duration<double>(sec));
+        if (!std::isfinite(sec) || sec < 0) die("after duration must be finite and non-negative");
+        cancellable_sleep(sec);
         return V();
     }
     if (fname == "emit" || fname == "emit_text") {
@@ -1878,7 +2234,9 @@ V Interp::call(const J &n) {
 }
 
 V Interp::eval(const J &n) {
+    check_cancel();
     std::string k = n["_"].str;
+    if (k.empty()) die("plan node has no kind ('_' field)");
     if (k == "Lit") {
         std::string kind = n["kind"].str;
         if (kind == "string") return V(n["value"].str);
@@ -1935,7 +2293,11 @@ V Interp::eval(const J &n) {
     }
     if (k == "RangeE") {
         long lo = as_int(eval(n["lo"])), hi = as_int(eval(n["hi"]));
-        std::vector<double> v; for (long i = lo; i < hi; i++) v.push_back((double)i);
+        if (hi <= lo) return V::payload_of({});
+        unsigned long long span = (unsigned long long)hi - (unsigned long long)lo;
+        if (span > 100000000ULL) die("range is too large");
+        std::vector<double> v; v.reserve((size_t)span);
+        for (long i = lo; i < hi; i++) v.push_back((double)i);
         return V::payload_of(std::move(v));
     }
     if (k == "ParFor") {
@@ -1945,24 +2307,17 @@ V Interp::eval(const J &n) {
         else if (it.kind == V::TUPLE) xs = it.tuple;
         else die("par for needs payload");
         std::vector<V> results(xs.size());
-        std::vector<std::thread> ts;
-        std::exception_ptr first; std::mutex emu;
         auto *self = this;
-        for (size_t i = 0; i < xs.size(); i++) {
-            ts.emplace_back([self, xs, i, n, &results, &first, &emu] {
-                try {
-                    Interp branch(self->plan);
-                    branch.env = self->env; branch.workers = self->workers;
-                    branch.op_index = self->op_index; branch.gpu = self->gpu;
-                    branch.outdir = self->outdir; branch.scopes = self->scopes;
-                    branch.current_inst = self->current_inst;
-                    bind_pattern(n["pat"], xs[i], branch.env);
-                    results[i] = branch.eval(n["body"]);
-                } catch (...) { std::lock_guard<std::mutex> lk(emu); if (!first) first = std::current_exception(); }
-            });
-        }
-        for (auto &t : ts) t.join();
-        if (first) std::rethrow_exception(first);
+        parallel_for(xs.size(), [self, &xs, &results, n](size_t i) {
+            Interp branch(self->plan);
+            branch.env = self->env; branch.workers = self->workers;
+            branch.op_index = self->op_index; branch.gpu = self->gpu;
+            branch.outdir = self->outdir; branch.scopes = self->scopes;
+            branch.current_inst = self->current_inst;
+            branch.cancel = self->cancel;
+            bind_pattern(n["pat"], xs[i], branch.env);
+            results[i] = branch.eval(n["body"]);
+        });
         V out; out.kind = V::TUPLE; out.tuple = std::move(results);
         return out;
     }
@@ -1977,7 +2332,7 @@ V Interp::eval(const J &n) {
                     if (pat["name"].str == e.kind) match = true;
                     if (pat["name"].str == "WorkerError" && e.kind == "WorkerError"
                         && !pat["args"].arr.empty() && pat["args"].arr[0]["_"].str == "Lit")
-                        match = (long)pat["args"].arr[0]["value"].num == e.code;
+                        match = checked_long(pat["args"].arr[0]["value"].num, "handler code") == e.code;
                 }
                 if (!match) continue;
                 const J &act = arm["action"];
@@ -1996,7 +2351,11 @@ V Interp::eval(const J &n) {
         if (it.kind == V::PAYLOAD) for (double x : it.payload) xs.push_back(V(x));
         else if (it.kind == V::TUPLE) xs = it.tuple;
         else die("for needs payload/tuple");
-        for (auto &x : xs) { env[n["var"]["id"].str] = x; out.tuple.push_back(eval(n["body"])); }
+        for (auto &x : xs) {
+            check_cancel();
+            env[n["var"]["id"].str] = x;
+            out.tuple.push_back(eval(n["body"]));
+        }
         return out;
     }
     if (k == "Block" || k == "ScopeE") {
@@ -2024,7 +2383,9 @@ V Interp::eval(const J &n) {
 }
 
 void Interp::stmt(const J &n) {
+    check_cancel();
     std::string k = n["_"].str;
+    if (k.empty()) die("plan node has no kind ('_' field)");
     if (k == "Block") { for (auto &s : n["stmts"].arr) stmt(s); return; }
     if (k == "ScopeE") {
         scopes.emplace_back();
@@ -2053,35 +2414,43 @@ void Interp::stmt(const J &n) {
         std::exception_ptr first;
         std::mutex emu;
         auto *self = this;
-        for (auto &b : n["branches"].arr) {
-            ts.emplace_back([self, b, &first, &emu] {
-                try {
-                    Interp branch(self->plan);
-                    branch.env = self->env;
-                    branch.workers = self->workers;
-                    branch.op_index = self->op_index;
-                    branch.gpu = self->gpu;
-                    branch.outdir = self->outdir;
-                    branch.scopes = self->scopes;
-                    branch.current_inst = self->current_inst;
-                    branch.stmt(b);
-                } catch (...) {
-                    std::lock_guard<std::mutex> lk(emu);
-                    if (!first) first = std::current_exception();
-                }
-            });
+        auto run = [self, &first, &emu](const J &b) {
+            try {
+                Interp branch(self->plan);
+                branch.env = self->env;
+                branch.workers = self->workers;
+                branch.op_index = self->op_index;
+                branch.gpu = self->gpu;
+                branch.outdir = self->outdir;
+                branch.scopes = self->scopes;
+                branch.current_inst = self->current_inst;
+                branch.cancel = self->cancel;
+                branch.stmt(b);
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(emu);
+                if (!first) first = std::current_exception();
+            }
+        };
+        try {
+            ts.reserve(n["branches"].arr.size());
+            for (auto &b : n["branches"].arr) ts.emplace_back(run, std::cref(b));
+        } catch (...) {
+            /* Thread creation failed: run what is left serially. */
         }
-        for (auto &t : ts) t.join();
+        for (auto &t : ts) if (t.joinable()) t.join();
         if (first) std::rethrow_exception(first);
         return;
     }
     if (k == "Serve") {
         V ch = eval(n["chan"]);
         while (true) {
+            check_cancel();
             V msg;
-            try { msg = chan_recv(ch); }
+            try { msg = chan_recv(ch, this->cancel.get()); }
             catch (const ChannelClosed &) { return; }
-            catch (...) { throw; }
+            catch (const Cancelled &) { throw; }
+            catch (const PiFatal &) { throw; }
+            catch (...) { return; }
             env[n["pat"]["id"].str] = msg;
             try { stmt(n["body"]); }
             catch (const PiError &e) {
@@ -2089,10 +2458,12 @@ void Interp::stmt(const J &n) {
                 if (action == 0) return;
                 if (action == 2) {
                     if (current_inst && current_inst->tick_tx.kind == V::CHAN)
-                        chan_send(current_inst->tick_tx, msg);
+                        chan_send(current_inst->tick_tx, msg, this->cancel.get());
                     throw RestartController{};
                 }
             }
+            catch (const Cancelled &) { throw; }
+            catch (const PiFatal &) { throw; }
             catch (...) { return; }
             if (current_inst) {
                 current_inst->iterations.fetch_add(1);
@@ -2108,6 +2479,7 @@ void Interp::stmt(const J &n) {
         else if (it.kind == V::TUPLE) xs = it.tuple;
         else die("for needs payload/tuple");
         for (auto &x : xs) {
+            check_cancel();
             env[n["var"]["id"].str] = x;
             stmt(n["body"]);
         }
@@ -2123,28 +2495,55 @@ void Interp::stmt(const J &n) {
             std::exception_ptr ep;
         };
         auto st = std::make_shared<TimeoutState>();
+        auto tok = std::make_shared<CancelToken>();
+        tok->parent = this->cancel.get();
         J plan = this->plan;
         auto workers = this->workers;
         auto op_index = this->op_index;
         auto gpu = this->gpu;
         std::string outdir = this->outdir;
         auto base_env = this->env;
-        std::thread th([st, plan, workers, op_index, gpu, outdir, base_env, n]() mutable {
+        auto scopes_copy = this->scopes;
+        auto cur_inst = this->current_inst;
+        std::thread th([st, tok, plan, workers, op_index, gpu, outdir, base_env, scopes_copy,
+                        cur_inst, n]() mutable {
             try {
                 Interp branch(plan);
                 branch.env = std::move(base_env); branch.workers = std::move(workers);
                 branch.op_index = std::move(op_index); branch.gpu = std::move(gpu);
                 branch.outdir = std::move(outdir);
+                branch.scopes = std::move(scopes_copy);
+                branch.current_inst = std::move(cur_inst);
+                branch.cancel = tok;
                 branch.stmt(n["body"]);
             } catch (...) { st->ep = std::current_exception(); }
-            std::lock_guard<std::mutex> lk(st->mu);
-            st->done = true;
+            {
+                std::lock_guard<std::mutex> lk(st->mu);
+                st->done = true;
+            }
             st->cv.notify_all();
         });
         std::unique_lock<std::mutex> lk(st->mu);
-        if (!st->cv.wait_for(lk, std::chrono::duration<double>(sec), [&] { return st->done; })) {
-            th.detach();
-            throw PiError("Deadline");
+        bool finished = st->cv.wait_for(lk, std::chrono::duration<double>(sec),
+                                        [&] { return st->done; });
+        if (!finished) {
+            /* P2: cancel the branch and join it; never detach.  Blocking points
+               inside the branch poll this token (worker I/O, sleeps, channels). */
+            tok->cancelled.store(true);
+            bool stopped = st->cv.wait_for(lk, std::chrono::seconds(10),
+                                           [&] { return st->done; });
+            lk.unlock();
+            if (!stopped) {
+                /* Cancellation should be prompt; if something unforeseen is
+                   still blocked, kill the workers it could be waiting on. */
+                kill_all_workers();
+                th.join();
+            } else {
+                th.join();
+            }
+            PiError e("Deadline");
+            e.worker = tok->cancelled_worker.load();
+            throw e;
         }
         lk.unlock();
         th.join();
@@ -2156,12 +2555,14 @@ void Interp::stmt(const J &n) {
         double backoff = 0.0;
         if (n["opts"].has("max")) max_attempts = (int)as_int(eval(n["opts"]["max"]));
         if (n["opts"].has("backoff")) backoff = eval(n["opts"]["backoff"]).num;
+        if (max_attempts < 1) die("retry max must be >= 1");
+        if (!std::isfinite(backoff) || backoff < 0) die("retry backoff must be finite and non-negative");
         for (int attempt = 0; ; attempt++) {
             try { stmt(n["body"]); return; }
             catch (const PiError &e) {
                 if (attempt + 1 >= max_attempts) throw;
-                if (e.worker && e.kind == "WorkerDied") restart_worker(e.worker);
-                if (backoff > 0) std::this_thread::sleep_for(std::chrono::duration<double>(backoff));
+                if (e.worker && e.kind == "WorkerDied") restart_worker(e.worker, this->cancel.get());
+                if (backoff > 0) cancellable_sleep(backoff);
             }
         }
     }
@@ -2171,23 +2572,16 @@ void Interp::stmt(const J &n) {
         if (it.kind == V::PAYLOAD) for (double x : it.payload) xs.push_back(V(x));
         else if (it.kind == V::TUPLE) xs = it.tuple;
         else die("par for needs payload");
-        std::vector<std::thread> ts;
-        std::exception_ptr first; std::mutex emu;
         auto *self = this;
-        for (auto &x : xs) {
-            ts.emplace_back([self, x, n, &first, &emu] {
-                try {
-                    Interp branch(self->plan);
-                    branch.env = self->env; branch.workers = self->workers;
-                    branch.op_index = self->op_index; branch.gpu = self->gpu;
-                    branch.outdir = self->outdir;
-                    branch.env[n["pat"]["id"].str] = x;
-                    branch.stmt(n["body"]);
-                } catch (...) { std::lock_guard<std::mutex> lk(emu); if (!first) first = std::current_exception(); }
-            });
-        }
-        for (auto &t : ts) t.join();
-        if (first) std::rethrow_exception(first);
+        parallel_for(xs.size(), [self, &xs, n](size_t i) {
+            Interp branch(self->plan);
+            branch.env = self->env; branch.workers = self->workers;
+            branch.op_index = self->op_index; branch.gpu = self->gpu;
+            branch.outdir = self->outdir;
+            branch.cancel = self->cancel;
+            branch.env[n["pat"]["id"].str] = xs[i];
+            branch.stmt(n["body"]);
+        });
         return;
     }
     if (k == "Select") {
@@ -2202,12 +2596,14 @@ void Interp::stmt(const J &n) {
             }
         }
         for (;;) {
+            check_cancel();
             for (auto &arm : n["arms"].arr) {
                 const J &g = arm["guard"];
                 if (g["_"].str == "Call" && g["fn"]["id"].str == "recv") {
                     V ch = eval(g["args"].arr[0]);
                     if (ch.kind != V::CHAN) die("select recv needs channel");
                     V msg;
+                    if (!ch.chan) continue;
                     if (ch.chan->try_recv(msg)) { stmt(arm["body"]); return; }
                 } else if (g["_"].str == "Call" && g["fn"]["id"].str == "closed") {
                     if (chan_is_closed(eval(g["args"].arr[0]))) { stmt(arm["body"]); return; }
@@ -2242,7 +2638,7 @@ void Interp::stmt(const J &n) {
                     if (pat["name"].str == e.kind) match = true;
                     if (pat["name"].str == "WorkerError" && e.kind == "WorkerError"
                         && !pat["args"].arr.empty() && pat["args"].arr[0]["_"].str == "Lit")
-                        match = (long)pat["args"].arr[0]["value"].num == e.code;
+                        match = checked_long(pat["args"].arr[0]["value"].num, "handler code") == e.code;
                 }
                 if (!match) continue;
                 const J &act = arm["action"];
@@ -2261,12 +2657,16 @@ void Interp::stmt(const J &n) {
     }
     if (k == "Iterate") {
         long count = as_int(eval(n["n"]));
-        for (long i = 0; i < count; i++) stmt(n["body"]);
+        for (long i = 0; i < count; i++) {
+            check_cancel();
+            stmt(n["body"]);
+        }
         return;
     }
     if (k == "AfterBlock") {
         double sec = eval(n["duration"]).num;
-        std::this_thread::sleep_for(std::chrono::duration<double>(sec));
+        if (!std::isfinite(sec) || sec < 0) die("after duration must be finite and non-negative");
+        cancellable_sleep(sec);
         stmt(n["body"]);
         return;
     }
@@ -2301,7 +2701,7 @@ int Interp::handle_instance_failure(const PiError &e) {
             if (pat["name"].str == e.kind) match = true;
             if (pat["name"].str == "WorkerError" && e.kind == "WorkerError"
                 && !pat["args"].arr.empty() && pat["args"].arr[0]["_"].str == "Lit")
-                match = (long)pat["args"].arr[0]["value"].num == e.code;
+                match = checked_long(pat["args"].arr[0]["value"].num, "handler code") == e.code;
         }
         if (!match) continue;
         bool restarting = arm["action"]["_"].str == "Call"
@@ -2326,36 +2726,88 @@ static std::string slurp(const std::string &path) {
     return std::string(std::istreambuf_iterator<char>(f), {});
 }
 
-int main(int argc, char **argv) {
+static int run_program(int argc, char **argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: pi-runtime plan.json\n");
         return 2;
     }
-    std::string text = slurp(argv[1]);
-    JsonParser parser(text);
-    J plan = parser.parse();
-    Interp in(std::move(plan));
     int rc = 0;
-    try {
-        const auto &progs = in.plan["programs"].obj;
-        auto it = progs.find("Main");
-        if (it == progs.end()) die("plan has no Main program");
-        in.run(it->second["body"]);
-    } catch (const std::exception &e) {
-        std::fprintf(stderr, "pi-cpp: %s\n", e.what());
-        rc = 1;
-    } catch (...) {
-        std::fprintf(stderr, "pi-cpp: unknown runtime failure\n");
-        rc = 1;
+    {
+        std::string text = slurp(argv[1]);
+        JsonParser parser(text);
+        J plan = parser.parse();
+        Interp in(std::move(plan));
+        try {
+            const auto &progs = in.plan["programs"].obj;
+            auto it = progs.find("Main");
+            if (it == progs.end()) die("plan has no Main program");
+            in.run(it->second["body"]);
+        } catch (const PiFatal &e) {
+            std::fprintf(stderr, "pi-cpp: %s\n", e.what());
+            rc = e.exit_code;
+        } catch (const std::exception &e) {
+            std::fprintf(stderr, "pi-cpp: %s\n", e.what());
+            rc = 1;
+        } catch (...) {
+            std::fprintf(stderr, "pi-cpp: unknown runtime failure\n");
+            rc = 1;
+        }
+        try { in.finish(); }
+        catch (const std::exception &e) { std::fprintf(stderr, "pi-cpp: report: %s\n", e.what()); rc = 1; }
+        for (auto &sy : g_systems) {
+            V v; v.kind = V::SYSCALL; v.sys = sy; v.field = "close";
+            try { in.system_push(v); } catch (...) { rc = 1; }
+        }
+        g_systems.clear();
     }
-    try { in.finish(); }
-    catch (const std::exception &e) { std::fprintf(stderr, "pi-cpp: report: %s\n", e.what()); rc = 1; }
-    for (auto &sy : g_systems) {
-        V v; v.kind = V::SYSCALL; v.sys = sy; v.field = "close";
-        try { in.system_push(v); } catch (...) { rc = 1; }
-    }
-    g_systems.clear();
     shutdown_all_workers();
     std::printf(rc == 0 ? "pi-cpp: done\n" : "pi-cpp: failed\n");
     return rc;
+}
+
+struct MainArgs {
+    int argc;
+    char **argv;
+    int rc;
+};
+
+#ifdef _WIN32
+static DWORD WINAPI main_thread(LPVOID p) {
+    MainArgs *a = (MainArgs *)p;
+    a->rc = run_program(a->argc, a->argv);
+    return 0;
+}
+#else
+static void *main_thread(void *p) {
+    MainArgs *a = (MainArgs *)p;
+    a->rc = run_program(a->argc, a->argv);
+    return nullptr;
+}
+#endif
+
+// P5: parse/evaluate on a 64 MB stack so large-but-flat programs (deeply nested
+// plan JSON, long left-associated expressions) fit without lowering the limits.
+int main(int argc, char **argv) {
+#ifndef _WIN32
+    ::signal(SIGPIPE, SIG_IGN);  // P1: a write to a dead worker must not kill us
+#endif
+    MainArgs a{argc, argv, 1};
+#if defined(_WIN32)
+    HANDLE h = CreateThread(nullptr, BIG_STACK_BYTES, main_thread, &a, 0, nullptr);
+    if (!h) return run_program(argc, argv);
+    WaitForSingleObject(h, INFINITE);
+    CloseHandle(h);
+#else
+    pthread_attr_t attr;
+    pthread_t th;
+    if (pthread_attr_init(&attr) != 0 ||
+        pthread_attr_setstacksize(&attr, BIG_STACK_BYTES) != 0 ||
+        pthread_create(&th, &attr, main_thread, &a) != 0) {
+        pthread_attr_destroy(&attr);
+        return run_program(argc, argv);
+    }
+    pthread_join(th, nullptr);
+    pthread_attr_destroy(&attr);
+#endif
+    return a.rc;
 }

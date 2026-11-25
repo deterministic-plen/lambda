@@ -3,42 +3,54 @@ include "lib/matrix.lambda"
 ; A 2D constant-velocity Kalman state: position, velocity and 2x2 covariance.
 data Kalman2 = K2 (p: Float, pv: Float, p00: Float, p01: Float, p11: Float)
 
+; Predict: x' = F x and P' = F P F^T + Q.
+;
+; `q` is the discrete white-noise acceleration density of the constant-velocity
+; model, so the process noise is
+;   Q = q * [[dt^4/4, dt^3/2], [dt^3/2, dt^2]]
+; (the old code used Q = q*I, which under-weights the position/velocity
+; correlation that the motion model itself creates and therefore
+; under-estimates the position variance for dt > 0).
+;
+; The previous version rebuilt F, P and the matrices around them three or four
+; times per call to work around an old consume-on-use diagnostic.  Matrix
+; values only read their ArrayF backing store, so one built value can be
+; passed to several operations; the duplication is gone.
 k2-predict → (λ k: Kalman2 dt: Float q: Float.
   match k with K2 p pv p00 p01 p11:
-    f1 → (mat2 1.0 dt 0.0 1.0)
-    f2 → (mat2 1.0 dt 0.0 1.0)
-    f3 → (mat2 1.0 dt 0.0 1.0)
+    f → (mat2 1.0 dt 0.0 1.0)
     x → (matvec2 p pv)
     P → (mat2 p00 p01 p01 p11)
-    Q → (mat2 q 0.0 0.0 q)
-    xp → (mat-mul f1 x)
-    pp → (mat-add (mat-mul f2 (mat-mul P (mat-transpose f3))) Q)
+    q2 → (* q (* dt dt))
+    q3 → (* q2 dt)
+    q4 → (* q3 dt)
+    Q → (mat2 (/ q4 4.0) (/ q3 2.0) (/ q3 2.0) q2)
+    xp → (mat-mul f x)
+    pp → (mat-add (mat-mul f (mat-mul P (mat-transpose f))) Q)
     xv → (matvec2-values xp)
     pv2 → (mat2-values pp)
     (K2 (MatVec2Values-a xv) (MatVec2Values-b xv)
         (Mat2Values-a pv2) (Mat2Values-b pv2) (Mat2Values-d pv2)))
 
+; Update with measurement z and variance r, using the Joseph form:
+;   x' = x + K y
+;   P' = (I - K H) P (I - K H)^T + K R K^T
+; The Joseph form is algebraically identical to (I - K H) P but is a sum of
+; symmetric products, so it keeps P symmetric and positive semi-definite over
+; long runs instead of losing either through cancellation.
 k2-update → (λ k: Kalman2 z: Float r: Float.
   match k with K2 p pv p00 p01 p11:
     x → (matvec2 p pv)
-    P1 → (mat2 p00 p01 p01 p11)
-    P2 → (mat2 p00 p01 p01 p11)
-    h1 → (mat-row2 1.0 0.0)
-    h2 → (mat-row2 1.0 0.0)
-    h3 → (mat-row2 1.0 0.0)
-    h4 → (mat-row2 1.0 0.0)
-    zm → (mat11 z)
-    rm → (mat11 r)
-    y → (mat-sub zm (mat-mul h1 x))
-    S → (mat-add (mat-mul h2 (mat-mul P1 (mat-transpose h3))) rm)
+    P → (mat2 p00 p01 p01 p11)
+    h → (mat-row2 1.0 0.0)
+    S → (mat-add (mat-mul h (mat-mul P (mat-transpose h))) (mat11 r))
     sv → (mat-scalar S)
-    K → (mat-scale (mat-mul P2 (mat-transpose h4)) (/ 1.0 sv))
-  ; Rebuild P for the covariance update; K already consumed its copy.
-    xnew → (mat-add (matvec2 p pv) (mat-mul K y))
-    P3 → (mat2 p00 p01 p01 p11)
-    I → (mat-id 2)
-    hn → (mat-row2 1.0 0.0)
-    Pnew → (mat-mul (mat-sub I (mat-mul K hn)) P3)
+    K → (mat-scale (mat-mul P (mat-transpose h)) (/ 1.0 sv))
+    y → (mat-sub (mat11 z) (mat-mul h x))
+    xnew → (mat-add x (mat-mul K y))
+    A → (mat-sub (mat-id 2) (mat-mul K h))
+    Pnew → (mat-add (mat-mul A (mat-mul P (mat-transpose A)))
+                    (mat-mul K (mat-mul (mat11 r) (mat-transpose K))))
     xv → (matvec2-values xnew)
     pvv → (mat2-values Pnew)
     (K2 (MatVec2Values-a xv) (MatVec2Values-b xv)

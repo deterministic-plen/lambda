@@ -1,4 +1,5 @@
 ;variance
+; `varp` returns 0.0 for an empty or one-element array.
 varp → (λ&data.
   N → (arrayf-length data)
   if (<= N 1)
@@ -15,21 +16,38 @@ varp → (λ&data.
         (go (+ i 1) mean2 (+ m2 (* delta delta2))))
     (go 0 0.0 0.0)
 )
-;minimum float
+; minimum float.  NaN is ignored (like Python's math.fmin / NumPy's nanmin):
+; comparing against NaN is always false, so a NaN would otherwise poison the
+; result depending on its position.  An empty array, or an array that contains
+; only NaN, returns 0.0 - the same "no data" value varp uses - instead of the
+; out-of-bounds read the old first-element seed performed.
 minf → (λ&data. 
-    go → (λiter &a m. if (>= iter (arrayf-length a)) then m else if (>= m (arrayf-get a iter)) then go (+ iter 1) a (arrayf-get a iter) else go (+ iter 1) a m)
-    (go 0 data (arrayf-get data 0))
+    go → (λiter &a m found. 
+      if (>= iter (arrayf-length a))
+      then (if found then m else 0.0)
+      else
+        x → (arrayf-get a iter)
+        if (== x x)
+        then
+          if found
+          then (if (< x m) then (go (+ iter 1) a x true) else (go (+ iter 1) a m true))
+          else (go (+ iter 1) a x true)
+        else (go (+ iter 1) a m found))
+    (go 0 data 0.0 false)
 )
 
-;maximum float
+; maximum float; same NaN/empty rules as minf.
 maxf → (λ&data.
-    go → (λiter &a m.
-    if (>= iter (arrayf-length a))
-    then m
-    else if (<= m (arrayf-get a iter))    
-    then go (+ iter 1) a (arrayf-get a iter)
-    else go (+ iter 1) a m
-    )
-    (go 0 data (arrayf-get data 0))
+    go → (λiter &a m found.
+      if (>= iter (arrayf-length a))
+      then (if found then m else 0.0)
+      else
+        x → (arrayf-get a iter)
+        if (== x x)
+        then
+          if found
+          then (if (> x m) then (go (+ iter 1) a x true) else (go (+ iter 1) a m true))
+          else (go (+ iter 1) a x true)
+        else (go (+ iter 1) a m found))
+    (go 0 data 0.0 false)
 )
-

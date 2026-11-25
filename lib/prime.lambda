@@ -1,6 +1,83 @@
 ; Shared prime helpers, usable through `include "lib/prime.lambda"`.
 ; The parallel versions split the candidate range into fixed-size blocks.
 
+; Trial division below 1e12: d is compared against d*d, which is safe for every
+; n handled here (sqrt(1e12) = 1e6, far below sqrt(2^63)).  The previous code
+; used d*d for every n; for n > 3037000499^2 the product overflowed Int64, the
+; termination test never became true, and `is-prime` never returned (e.g. for
+; 9223372036854775783, the largest prime below 2^63).
+prime-trial → (λ n: Int d: Int.
+  if (< n (* d d))
+  then true
+  else if (== 0 (% n d))
+  then false
+  else (prime-trial n (+ d 2)))
+
+; ---- deterministic Miller-Rabin for large n ------------------------------
+; Exact for every Int64: the first 12 prime bases are a deterministic test for
+; n < 3.3e24.  Multiplication uses only doubling and modular addition, so no
+; intermediate product overflows Int64.
+
+prime-bases → [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]
+
+; (a + b) mod n for 0 <= a, b < n and 0 < n < 2^63.  a+b can exceed Int64, so
+; only form the sum when it fits; otherwise subtract n from a first.
+prime-add-mod → (λ n: Int a: Int b: Int.
+  if (>= a (- n b)) then (- a (- n b)) else (+ a b))
+
+; (a * b) mod n by binary doubling.
+prime-mul-mod → (λ n: Int a: Int b: Int.
+  go → (λ r base b.
+    if (== b 0)
+    then r
+    else
+      r2 → (if (== 1 (& b 1)) then (prime-add-mod n r base) else r)
+      (go r2 (prime-add-mod n base base) (shr b 1)))
+  (go 0 a b))
+
+; base^e mod n.
+prime-pow-mod → (λ n: Int b: Int e: Int.
+  go → (λ r base e.
+    if (== e 0)
+    then r
+    else
+      r2 → (if (== 1 (& e 1)) then (prime-mul-mod n r base) else r)
+      (go r2 (prime-mul-mod n base base) (shr e 1)))
+  (go 1 b e))
+
+; Odd part and 2-adic valuation of n-1: [d, s] with n-1 = d * 2^s.
+prime-strip2 → (λ d: Int s: Int.
+  if (== 0 (& d 1))
+  then (prime-strip2 (/ d 2) (+ s 1))
+  else [d, s])
+
+; One strong-probable-prime test for base a; true means n is composite.
+prime-witness → (λ n: Int d: Int s: Int a: Int.
+  x → (prime-pow-mod n a d)
+  if (or (== x 1) (== x (- n 1)))
+  then false
+  else
+    go → (λ i x.
+      if (>= i s)
+      then true
+      else
+        x2 → (prime-mul-mod n x x)
+        if (== x2 (- n 1)) then false else (go (+ i 1) x2))
+    (go 1 x))
+
+; n is odd and > 2.  True when every deterministic base passes.
+prime-mr → (λ n: Int.
+  ds → (prime-strip2 (- n 1) 0)
+  d → (head ds)
+  s → (head (tail ds))
+  check → (λ bs.
+    if (empty? bs)
+    then true
+    else if (prime-witness n d s (head bs))
+    then false
+    else (check (tail bs)))
+  (check prime-bases))
+
 is-prime → (λn.
   if (< n 2)
   then false
@@ -8,14 +85,9 @@ is-prime → (λn.
   then true
   else if (== 0 (% n 2))
   then false
-  else
-    check → (λd.
-      if (< n (* d d))
-      then true
-      else if (== 0 (% n d))
-      then false
-      else (check (+ d 2)))
-    (check 3))
+  else if (< n 1000000000000)
+  then (prime-trial n 3)
+  else (prime-mr n))
 
 block-size → 65536
 
@@ -63,9 +135,11 @@ find-in-block → (λb k.
   (go (if (< lo 2) then 2 else lo) k))
 
 ; Primes up to `limit`, newest first; the order is irrelevant for sieving.
+; Primes larger than `limit` are never returned, so a limit below 2 is empty
+; (the old code returned [2] for 0 and 1).
 base-primes → (λlimit.
   go → (λi acc.
     if (< limit i)
     then acc
     else (go (+ i 2) (if (is-prime i) then (cons i acc) else acc)))
-  (go 3 [2]))
+  if (< limit 2) then nil else (go 3 [2]))

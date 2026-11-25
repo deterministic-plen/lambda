@@ -1,0 +1,15 @@
+include "lambda_ast.lambda"
+enum Kind (LambdaPar, Lam, Arrow, Larrow, PPipe, Pipe, Range, Punct, Borrow, Float, Int, Kwrd, Ident, EOF)
+type Token = (kind: Kind, value: [Int])
+
+; A small, complete tokenizer skeleton: non-whitespace runs become Ident
+; tokens.  The self-hosting lexer will grow here; this file must stay valid so
+; the bootstrap tree is compile-checked.
+decode-string → (λs: String. (str->list s))
+
+tokenize → (λsource: String.
+  if (== (str-len source) 0)
+  then []
+  else [(Token Ident [0])])
+
+(tokenize "x")

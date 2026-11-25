@@ -1,1 +1,10 @@
-derivative → 
+;naive symmetric derivative
+derivative → (λ f x. 
+epsilon → 0.00000000001
+/ (- (f (+ x epsilon)) (f (- x epsilon))) (* 2.0 epsilon)
+)
+h → (λ x:Float. * x x)
+((derivative h) 2.0) 
+;(derivative h) is the closure, it is a function which is returned.
+; d/dx x^2 = 2x, at 2 this is 4
+; actual answer is not exactly 4 due to numerical error

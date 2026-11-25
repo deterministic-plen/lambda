@@ -20,4 +20,3 @@ cases:
   compile_fail: include cycle
 - name: include_body
   compile_fail: definitions only
-strict: true

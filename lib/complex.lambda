@@ -1,7 +1,11 @@
 type Complex (re: Float, im: Float) ;Rectangular form
 type PolarComplex (r:Float, arg:Float)
-max → (λa: Float b: Float. if (>= (abs a) (abs b)) then (abs a) else (abs b))
-min → (λa: Float b: Float. if (>= (abs a) (abs b)) then (abs b) else (abs a))
+; Absolute-value extrema used by Complex::modulus.  The old names `max`/`min`
+; were ordinary globals over *absolute values*, so merely including this module
+; clashed with any program (or other library) that defined its own `max`/`min`.
+; The prefixed names keep that namespace free.
+cabs-max → (λa: Float b: Float. if (>= (abs a) (abs b)) then (abs a) else (abs b))
+cabs-min → (λa: Float b: Float. if (>= (abs a) (abs b)) then (abs b) else (abs a))
 Complex::add → (λa: Complex b: Complex.
   (Complex (+ a_re b_re) (+ a_im b_im)))
 
@@ -22,17 +26,29 @@ Complex::conj → (λa: Complex.
 (Complex a_re (- 0.0 a_im))
 )
 
+; Overflow-safe modulus.  ratio = min/max is 0/0 for zero, so zero is special
+; cased; when max is infinite the result is infinite (and NaN input stays NaN).
 Complex::modulus →(λa: Complex.
-  ratio → (/ (min a_re a_im) (max a_re a_im))
-  (* (max a_re a_im) (sqrt (+ 1.0 (* ratio ratio))))
+  m → (cabs-max a_re a_im)
+  if (== m 0.0)
+  then 0.0
+  else if (not (< m 1.7976931348623157e308))
+  then m
+  else
+    ratio → (/ (cabs-min a_re a_im) m)
+    (* m (sqrt (+ 1.0 (* ratio ratio))))
 )
 
 Complex::toPolar → (λa: Complex.
     (PolarComplex (Complex::modulus a) (Complex::arg a))
 )
 
+; exp(a) = e^(a_re) * (cos(a_im) + i sin(a_im)).  The old code used
+; cos/sin(Complex::arg a), i.e. the *angle of a*, which is only correct when
+; a_im = 0.
 Complex::exp → (λa: Complex.
-(Complex::scale (Complex (cos (Complex::arg a)) (sin (Complex::arg a))) (exp a_re))
+  e → (exp a_re)
+  (Complex (* e (cos a_im)) (* e (sin a_im)))
 )
 
 Complex::div → (λa: Complex b: Complex.

@@ -1,0 +1,13 @@
+; Regression for PR.md F1: an empty ArrayI/ArrayF files its 1-byte block under
+; the 8-byte pool class, so the next one-element array writes 8 bytes into a
+; 1-byte block (heap overflow, invisible without valgrind/ASan).
+;
+; The output cannot show the overflow; tests/regressions_runtime/check_runtime.py
+; has the deterministic pool-size-class assertion (a block taken for an empty
+; array must never be handed to a larger size class).  This case keeps the
+; end-to-end pattern in the ordinary suite and fails if the pattern crashes.
+a → (arrayi 0 0)
+b → (arrayi 1 42)
+c → (arrayf 0 0.0)
+d → (arrayf 1 2.5)
+[(arrayi-get b 0), (float->int (arrayf-get d 0))]

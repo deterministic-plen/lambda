@@ -1,0 +1,2 @@
+﻿up → (λn. if (== n 0) then 0 else (up (+ n 1)))
+if (== 0 1) then (up 5) else 0

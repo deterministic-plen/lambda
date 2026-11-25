@@ -1,0 +1,3 @@
+include "lib/arena.lambda"
+a → (arena-new 8)
+(arrayf-length (arena-reserve a (- 0 1) 8))

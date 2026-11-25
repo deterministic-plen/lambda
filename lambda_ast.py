@@ -97,7 +97,7 @@ class Lam(Node):
 
     __slots__ = (
         "params", "body", "param_bindings", "param_annotations", "param_borrows",
-        "param_pure",
+        "param_pure", "param_linear", "return_annotation", "return_type",
         "is_parallel", "info", "captures", "capture_set", "param_types",
     )
 
@@ -108,7 +108,13 @@ class Lam(Node):
         self.param_bindings: List["Binding"] = []
         self.param_annotations: List[Optional[str]] = [None] * len(params)
         self.param_pure: List[bool] = [False] * len(params)
+        self.param_linear: List[bool] = [False] * len(params)
         self.param_borrows: List[bool] = [False] * len(params)
+        # Optional explicit return annotation: (λx: Int -> Int. ...) or
+        # (λx. body : Int).  When omitted, the body's inferred type is the
+        # function's return type.
+        self.return_annotation: Optional[str] = None
+        self.return_type: object = None
         self.is_parallel = False
         self.captures: List["Binding"] = []
         # Filled in by the type checker: the resolved parameter types.
@@ -389,42 +395,48 @@ class Binding:
         return f"Binding({self.name}#{self.uid},{self.kind})"
 
 
-def walk(node: Node):
-    """Yield every AST node in *node* (pre-order)."""
-
-    yield node
+def _children(node: Node) -> List[Node]:
     if isinstance(node, Block):
-        for d in node.defs:
-            yield from walk(d.value)
-        for d in getattr(node, "data_decls", ()):
-            yield from walk(d)
-        yield from walk(node.body)
-    elif isinstance(node, Def):
-        yield from walk(node.value)
-    elif isinstance(node, DataCtor):
-        for a in node.args:
-            yield from walk(a)
-    elif isinstance(node, Lam):
-        yield from walk(node.body)
-    elif isinstance(node, App):
-        yield from walk(node.func)
-        for a in node.args:
-            yield from walk(a)
-    elif isinstance(node, If):
-        yield from walk(node.cond)
-        yield from walk(node.then)
-        yield from walk(node.else_)
-    elif isinstance(node, Match):
-        yield from walk(node.subject)
-        for _, arm in node.arms:
-            yield from walk(arm)
-    elif isinstance(node, RecordLit):
-        for a in node.args:
-            yield from walk(a)
-    elif isinstance(node, SumLit):
-        for a in node.args:
-            yield from walk(a)
-    elif isinstance(node, RecordField):
-        yield from walk(node.value)
-    elif isinstance(node, Borrow):
-        yield from walk(node.value)
+        out = [d.value for d in node.defs]
+        out.extend(getattr(node, "data_decls", ()))
+        out.append(node.body)
+        return out
+    if isinstance(node, Def):
+        return [node.value]
+    if isinstance(node, DataCtor):
+        return list(node.args)
+    if isinstance(node, Lam):
+        return [node.body]
+    if isinstance(node, App):
+        return [node.func] + list(node.args)
+    if isinstance(node, If):
+        return [node.cond, node.then, node.else_]
+    if isinstance(node, Match):
+        return [node.subject] + [arm for _, arm in node.arms]
+    if isinstance(node, RecordLit):
+        return list(node.args)
+    if isinstance(node, SumLit):
+        return list(node.args)
+    if isinstance(node, RecordField):
+        return [node.value]
+    if isinstance(node, Borrow):
+        return [node.value]
+    return []
+
+
+def walk(node: Node):
+    """Yield every AST node in *node* (pre-order).
+
+    Iterative rather than recursive: ``yield from`` made every yielded node
+    pass through all of its ancestors' generator frames, which is O(N*depth)
+    per traversal and made long list literals quadratic.  The stack order is
+    the same pre-order sequence the recursive version produced.
+    """
+
+    stack: List[Node] = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        children = _children(current)
+        for child in reversed(children):
+            stack.append(child)

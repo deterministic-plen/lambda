@@ -22,4 +22,3 @@ cases:
   compile_fail: cannot mutate a borrowed
 - name: borrow_return
   compile_fail: borrowed parameter cannot be returned
-strict: true

@@ -1,0 +1,16 @@
+﻿include "lib/GUI.lambda"
+
+; A 640x400 sine plot drawn with the framebuffer helpers.  Return value is a
+; GUI: running the program opens a window on Windows, or writes plot.ppm when
+; LAMBDA_GUI_HEADLESS=1.
+W → 640
+H → 400
+background → (canvas W H)
+axes → (Rectangle background 40 20 2 (- H 40) 2105376)
+base → (Rectangle axes 40 (- H 20) (- W 60) 2 2105376)
+plot → (λg i.
+  if (>= i (- W 60)) then g
+  else x → (+ 40 i)
+       y → (float->int (- (int->float (- H 20)) (* 160.0 (sin (/ (int->float i) 40.0)))))
+       (plot (gui-plot g x y 16711680) (+ i 1)))
+(plot base 0)

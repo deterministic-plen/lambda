@@ -1,0 +1,2 @@
+; Regression for PR.md "float printing": float->str used "%.17g".
+(float->str (* pi 2.0))

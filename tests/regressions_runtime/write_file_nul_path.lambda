@@ -1,0 +1,6 @@
+; Regression for PR.md 2.3: Lambda strings are length-tagged, but fopen took
+; the bytes as a C string, so a path with an embedded NUL silently truncated
+; to its prefix and wrote the prefix file.  Embedded NULs must be rejected by
+; returning the normal write-file failure value (-1) instead.
+; (u0000 is the Lambda string escape for an embedded NUL.)
+(write-file "regr_nul_path.tmp\u0000suffix" (arrayb 2 65))

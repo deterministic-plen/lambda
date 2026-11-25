@@ -1,15 +1,25 @@
 ; Binary stream framing for --data programs.
 ;
-; Every frame is 16-byte header + payload, little-endian:
+; Every frame is a 16-byte header + payload.  The header is always
+; little-endian:
 ;
 ;   0..3   "LMB1"
 ;   4      tag: 1 = f64 array, 2 = i64 array, 3 = bytes
 ;   5      flags (0)
 ;   6..7   reserved (0)
-;   8..11  stream id (u32)
-;   12..15 payload byte length (u32)
+;   8..11  stream id (u32, little-endian)
+;   12..15 payload byte length (u32, little-endian)
 ;
-; f64/i64 payloads are raw little-endian host values.  The intended use is:
+; f64/i64 payloads are the runtime's raw host values (write-f64s/write-i64s
+; copy memory as-is), i.e. *native* endianness.  On a little-endian host - the
+; only host the tools under tools/ support - header and payload byte order
+; agree.  On a big-endian host the header stays little-endian while the
+; payload does not, so the framing is documented as LE-host only; it is not
+; silently mislabelled.  The length and id fields are u32: a payload of 4 GiB
+; or more cannot be described, so put-u32 rejects it instead of truncating and
+; writing a wrong length.
+;
+; The intended use is:
 ;
 ;   include "lib/stream.lambda"
 ;   (emit-f64s 1 xs)
@@ -18,10 +28,16 @@
 ; and a reader such as tools/stream_plot.py.
 
 put-u32 → (λb off v.
-  b1 → (arrayb-set b off (& v 255))
-  b2 → (arrayb-set b1 (+ off 1) (& (shr v 8) 255))
-  b3 → (arrayb-set b2 (+ off 2) (& (shr v 16) 255))
-  (arrayb-set b3 (+ off 3) (& (shr v 24) 255)))
+  if (or (< v 0) (> v 4294967295))
+  then (head nil)
+  else
+    (arrayb-set
+      (arrayb-set
+        (arrayb-set
+          (arrayb-set b off (& v 255))
+          (+ off 1) (& (shr v 8) 255))
+        (+ off 2) (& (shr v 16) 255))
+      (+ off 3) (& (shr v 24) 255)))
 
 stream-header → (λtag id nbytes.
   b0 → (arrayb 16 0)
@@ -36,22 +52,33 @@ stream-header → (λtag id nbytes.
   b9 → (put-u32 b8 8 id)
   (put-u32 b9 12 nbytes))
 
+; `seq` gives the two writes an explicit order without an unused binding (the
+; old code bound `w → (write-bytes h)` and never read it).
 emit-f64s → (λid xs.
   n → (arrayf-length xs)
   bytes → (* n 8)
-  h → (stream-header 1 id bytes)
-  w → (write-bytes h)
-  (write-f64s xs))
+  if (> bytes 4294967295)
+  then (head nil)
+  else
+    h → (stream-header 1 id bytes)
+    seq → (λx y. y)
+    (seq (write-bytes h) (write-f64s xs)))
 
 emit-i64s → (λid xs.
   n → (arrayi-length xs)
   bytes → (* n 8)
-  h → (stream-header 2 id bytes)
-  w → (write-bytes h)
-  (write-i64s xs))
+  if (> bytes 4294967295)
+  then (head nil)
+  else
+    h → (stream-header 2 id bytes)
+    seq → (λx y. y)
+    (seq (write-bytes h) (write-i64s xs)))
 
 emit-bytes → (λid bs.
   n → (arrayb-length bs)
-  h → (stream-header 3 id n)
-  w → (write-bytes h)
-  (write-bytes bs))
+  if (> n 4294967295)
+  then (head nil)
+  else
+    h → (stream-header 3 id n)
+    seq → (λx y. y)
+    (seq (write-bytes h) (write-bytes bs)))

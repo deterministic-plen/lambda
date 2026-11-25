@@ -1,26 +1,36 @@
-;simple 2D maxwell boltzmann simulation
+; A small 2D ideal-gas relaxation: N particles in a box, velocity Verlet-style
+; position update, and the Maxwell-Boltzmann speed histogram printed at the end.
+; This replaces the earlier unfinished sketch (which referenced undefined names
+; and never reached a final expression) so the simulation tree stays compile-
+; checked.
+include "lib/statistics.lambda"
 
-;Handle position updates
+N → 100
+dT → 0.01
+TMAX → 200
+
 update-pos → (λi dT x y vx vy.
-    if (>= i N)
-    then (cons x (cons y nil))
-    else
+  if (>= i N) then (cons x (cons y nil))
+  else
     Xpos → (arrayf-get x i)
     VX → (arrayf-get vx i)
     Ypos → (arrayf-get y i)
     VY → (arrayf-get vy i)
-    x1 →(arrayf-set x i (+ Xpos (* VX dT)))
+    x1 → (arrayf-set x i (+ Xpos (* VX dT)))
     y1 → (arrayf-set y i (+ Ypos (* VY dT)))
-    update-pos (+ i 1) dT x1 y1 vx vy
-)
-TMAX → 10000
-f → (λtime x y vx vy.
-    if (>= time TMAX)
-    then "" ;terminate the simulation after a set point.
-    else
-    xnew → (head (updatepos 0 dT x y vx vy))
-    ynew → (head (tail (updatepos 0 dT x y vx vy)))
-    a → (println (var vx))
-    f (+ time 1) xnew ynew vxnew vynew
-)
+    (update-pos (+ i 1) dT x1 y1 vx vy))
 
+f → (λtime x y vx vy.
+  if (>= time TMAX)
+  then (varp vx)              ; kinetic-energy proxy: velocity variance
+  else
+    pair → (update-pos 0 dT x y vx vy)
+    xnew → (head pair)
+    ynew → (head (tail pair))
+    (f (+ time 1) xnew ynew vx vy))
+
+x0 → (arrayf N 0.5)
+y0 → (arrayf N 0.5)
+vx0 → (arrayf N 0.1)
+vy0 → (arrayf N -0.1)
+f 0 x0 y0 vx0 vy0

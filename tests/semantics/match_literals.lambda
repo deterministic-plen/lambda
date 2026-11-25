@@ -1,0 +1,7 @@
+﻿describe → (λc.
+  match c 43 → "plus"
+  | 45 → "minus"
+  | 91 → "open"
+  | 93 → "close"
+  | _ → "other")
+[(describe '+'), (describe '-'), (describe '['), (describe ']'), (describe 'x')]

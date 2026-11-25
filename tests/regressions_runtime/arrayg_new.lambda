@@ -1,0 +1,2 @@
+; Generic Array<T>: array-new retains the initial element once per slot.
+(array-new 3 "w")

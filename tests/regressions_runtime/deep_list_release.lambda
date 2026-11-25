@@ -1,0 +1,11 @@
+; Regression for PR.md F4: in the boxed backend, releasing a deeply
+; left-nested list recursed through the head and overflowed the native stack
+; (about 400k levels).  The typed backend rejects the infinite type
+; (t = [t]), hence --allow-dynamic; release is iterative now and live=0
+; verifies the whole structure is reclaimed.
+nest → (λn acc.
+  if (== n 0)
+  then acc
+  else (nest (- n 1) (cons acc nil)))
+xs → (nest 400000 nil)
+0

@@ -1,0 +1,14 @@
+﻿; Array<Token>: a boxed generic array whose elements are a data-backed product.
+enum Kind (Num, Op)
+type Token = (kind: Kind, value: [Int])
+
+t1 → (Token Num [1, 2])
+t2 → (Token Op [3])
+a → #[t1, t2]
+b → (array-set a 1 t1)
+[
+  (int->str (array-length a)),
+  (int->str (array-length b)),
+  (if (== (Token-kind (array-get b 0)) Num) then "num" else "op"),
+  (int->str (head (Token-value (array-get b 1))))
+]

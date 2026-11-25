@@ -1,4 +1,14 @@
+; Integer exponentiation and numerical differentiation.
+;
+; `iexp` is only defined for non-negative exponents.  A negative exponent has
+; no Int result when |b| > 1, and the old code silently returned 1 because its
+; p==0 / p==1 chains were reached after truncating division.  It now stops the
+; program instead of returning a wrong value.  Results that do not fit in an
+; Int wrap modulo 2^64 like every other Int operation (`(iexp 2 64)` is 0);
+; that is the language's integer overflow semantics, not a library bug.
+
 iexp → (λb:Int p.
+if (< p 0) then (head nil) else
 if (== p 0) then 1 else
 if (== p 1) then b else
 if (== (% p 2) 1)

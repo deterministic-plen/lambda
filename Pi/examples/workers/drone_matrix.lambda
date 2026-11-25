@@ -95,7 +95,7 @@ init-state → (λseed: Float.
   s3 → (set s2 6 1.0)
   (set s3 7 g))
 
-loop → (λs: ArrayF.
+drone-loop → (λs: ArrayF.
   hd → (pi-next-call 0)
   corr → (arrayi-get hd 0)
   if (< corr 0)
@@ -108,31 +108,31 @@ loop → (λs: ArrayF.
       a → (pi-read-floats (arrayf nargs 0.0) 0 nargs)
       seed → (if (> nargs 0) then (arrayf-get a 0) else 0.0)
       w → (pi-reply-ok corr pi-empty)
-      (loop (init-state seed))
+      (drone-loop (init-state seed))
     else
       if (== op op-tick)
       then
         s2 → (step s)
         w → (pi-reply-ok corr (pi-vals1 (get s2 2)))
-        (loop s2)
+        (drone-loop s2)
       else
         if (== op op-history_x)
         then
           w → (pi-reply-ok corr (history s 0))
-          (loop s)
+          (drone-loop s)
         else
           if (== op op-history_p)
           then
             w → (pi-reply-ok corr (history s 1))
-            (loop s)
+            (drone-loop s)
           else
             if (== op op-history_u)
             then
               w → (pi-reply-ok corr (history s 2))
-              (loop s)
+              (drone-loop s)
             else
               w → (pi-reply-err corr error-unknown_op 0 0 (- 0 1))
-              (loop s))
+              (drone-loop s))
 
 hello → (pi-hello schema-hi schema-lo 2)
-(loop (init-state 0.0))
+(drone-loop (init-state 0.0))

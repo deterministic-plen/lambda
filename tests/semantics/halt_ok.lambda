@@ -1,0 +1,2 @@
+﻿down → (λn. if (<= n 0) then 0 else (down (- n 1)))
+(down 5)

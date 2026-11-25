@@ -22,6 +22,8 @@ from errors import CompileError
 from parser import OP_CANON, PRIMITIVES
 
 IMPURE_PRIMITIVES = {
+    "cycle",
+    "world_new", "world_get", "world_set", "world_length",
     "print", "println", "read_file", "read_file_bytes", "read_line", "read_int", "read_float",
     "fix", "immortalize",
     "map", "pmap",
@@ -58,8 +60,11 @@ PRIM_ARITY = {
     "pi": 0, "e": 0, "sum": 1, "product": 1,
     "bit_and": 2, "bit_or": 2, "bit_xor": 2, "bit_not": 1, "and": 2, "or": 2,
     "shl": 2, "shr": 2, "popcount": 1,
-    "range": 2, "map": 2, "pmap": 2, "immortalize": 1,
+    "range": 2, "map": 2, "pmap": 2, "immortalize": 1, "cycle": 1,
+    "world_new": 1, "world_get": 2, "world_set": 3, "world_length": 1,
     "arrayf": 2, "arrayi": 2, "arrayb": 2,
+    "array_of": 1, "array_new": 2, "array_get": 2, "array_set": 3,
+    "array_length": 1, "array_clone": 1,
     "arrayf_of": 1, "arrayi_of": 1, "arrayb_of": 1,
     "arrayf_get": 2, "arrayf_set": 3, "arrayf_length": 1, "arrayf_clone": 1,
     "arrayi_get": 2, "arrayi_set": 3, "arrayi_length": 1, "arrayi_clone": 1,
@@ -467,6 +472,11 @@ class _Share:
     def __init__(self, purity: Dict[int, bool]) -> None:
         self.purity = purity
         self.counter = 0
+        # Subtree purity and CSE keys are memoised by node identity.  Without
+        # these, a depth-N chain costs O(N^2) and list literals become
+        # quadratic to compile.
+        self._pure_cache: Dict[int, bool] = {}
+        self._key_cache: Dict[int, Optional[str]] = {}
 
     # -- purity / keys ----------------------------------------------------
     def call_pure(self, app: App) -> bool:
@@ -487,33 +497,45 @@ class _Share:
 
     def simple_pure(self, n: Node) -> bool:
         """Is *n* a pure, straight-line expression (no lambdas/blocks/ifs)?"""
-
+        cached = self._pure_cache.get(id(n))
+        if cached is not None:
+            return cached
         if isinstance(n, (Lit, Var)):
-            return True
-        if isinstance(n, App):
-            if not self.call_pure(n):
-                return False
-            if not self.simple_pure(n.func):
-                return False
-            return all(self.simple_pure(a) for a in n.args)
-        return False
+            result = True
+        elif isinstance(n, App):
+            result = (self.call_pure(n)
+                      and self.simple_pure(n.func)
+                      and all(self.simple_pure(a) for a in n.args))
+        else:
+            result = False
+        self._pure_cache[id(n)] = result
+        return result
 
     def key(self, n: Node) -> Optional[str]:
+        cached = self._key_cache.get(id(n), Ellipsis)
+        if cached is not Ellipsis:
+            return cached
         if isinstance(n, Lit):
-            return f"l{type(n.value).__name__}:{n.value!r}"
-        if isinstance(n, Var):
+            result: Optional[str] = f"l{type(n.value).__name__}:{n.value!r}"
+        elif isinstance(n, Var):
             if n.binding is None:
-                return None
-            return f"v{n.binding.uid}:{n.field_name or ''}"
-        if isinstance(n, App):
+                result = None
+            else:
+                result = f"v{n.binding.uid}:{n.field_name or ''}"
+        elif isinstance(n, App):
             fk = self.key(n.func)
             if fk is None:
-                return None
-            parts = [self.key(a) for a in n.args]
-            if any(p is None for p in parts):
-                return None
-            return "a(" + fk + ";" + ",".join(parts) + ")"
-        return None
+                result = None
+            else:
+                parts = [self.key(a) for a in n.args]
+                if any(p is None for p in parts):
+                    result = None
+                else:
+                    result = "a(" + fk + ";" + ",".join(parts) + ")"
+        else:
+            result = None
+        self._key_cache[id(n)] = result
+        return result
 
     # -- counting ---------------------------------------------------------
     def count(self, n: Node, counts: Dict[str, int]) -> None:
@@ -618,6 +640,9 @@ class _Share:
         counts: Dict[str, int] = {}
         self.count(n, counts)
         selected = {k for k, c in counts.items() if c >= 2}
+        # Keys/purity describe the pre-rewrite tree; drop them before mutating.
+        self._pure_cache.clear()
+        self._key_cache.clear()
         if not selected:
             return self.rewrite(n, set(), {}, []), []
         prelude: List[Def] = []

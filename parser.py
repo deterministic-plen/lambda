@@ -27,6 +27,7 @@ from typing import List, Optional, Tuple
 from lambda_ast import (
     App, Block, Borrow, DataCtor, DataDecl, DataField, DataVariant, Def,
     EnumLit, If, Lam, Lit, Loc, Match, Node, RecordField, RecordLit, SumLit, Var,
+    walk,
 )
 from errors import SyntaxErr
 from lexer import Token, tokenize
@@ -48,6 +49,9 @@ PRIMITIVES = {
     "arrayf-get-ro", "arrayi-get-ro", "arrayb-get-ro",
     "arrayi-pmap", "arrayi-pmap-chunk", "arrayf-pmap", "arrayf-pmap-into",
     "arrayf-get-unchecked",
+    # general boxed Array<T>
+    "array-of", "array-new", "array-get", "array-set", "array-length",
+    "array-clone",
     # binary data stream (requires --data)
     "write-bytes", "write-f64s", "write-i64s",
     # strings
@@ -75,6 +79,10 @@ PRIMITIVES = {
     "shl", "shr", "popcount",
     # lists and parallelism
     "map", "pmap", "range", "immortalize",
+    # state-cycle debugger/profiler
+    "cycle",
+    # explicit world objects (impure, written in place)
+    "world-new", "world-get", "world-set", "world-length",
     # optional terminal input (requires --input)
     "read-line", "read-int", "read-float",
 }
@@ -107,6 +115,9 @@ OP_CANON = {
     "arrayb-get-ro": "arrayb_get_ro", "arrayi-pmap": "arrayi_pmap", "arrayf-pmap": "arrayf_pmap",
     "arrayf-pmap-into": "arrayf_pmap_into", "arrayf-get-unchecked": "arrayf_get_unchecked",
     "arrayi-pmap-chunk": "arrayi_pmap_chunk",
+    "array-of": "array_of", "array-new": "array_new",
+    "array-get": "array_get", "array-set": "array_set",
+    "array-length": "array_length", "array-clone": "array_clone",
     "write-bytes": "write_bytes", "write-f64s": "write_f64s",
     "write-i64s": "write_i64s",
     "str->int": "str_to_int", "int->str": "int_to_str",
@@ -141,9 +152,14 @@ OP_CANON = {
     "shl": "shl", "shr": "shr", "popcount": "popcount",
     "map": "map", "pmap": "pmap", "range": "range",
     "immortalize": "immortalize",
+    "cycle": "cycle",
+    "world-new": "world_new", "world-get": "world_get",
+    "world-set": "world_set", "world-length": "world_length",
     "read-line": "read_line", "read-int": "read_int",
     "read-float": "read_float",
 }
+
+LIST_LITERAL_LIMIT = 5000
 
 INFIX_NAMES = {
     "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
@@ -160,6 +176,8 @@ class Parser:
         self.record_types: set[str] = set()
         self.data_decls: List[DataDecl] = []
         self.block_depth = 0
+        self.match_counter = 0
+        self.loop_counter = 0
 
     # -- token helpers ----------------------------------------------------
     def peek(self, offset: int = 0) -> Token:
@@ -249,6 +267,12 @@ class Parser:
                 defs.extend(self.parse_type_decl())
             else:
                 name_tok = self.pop()
+                if name_tok.value in PRIMITIVES:
+                    print(
+                        f"{name_tok.loc.source}:{name_tok.loc.line}:"
+                        f"{name_tok.loc.col}: warning: definition "
+                        f"'{name_tok.value}' shadows a built-in primitive",
+                        file=sys.stderr)
                 self.expect("arrow", what="'→'")
                 value = self.parse_definition_value()
                 defs.append(Def(name_tok.value, value, name_tok.loc))
@@ -264,7 +288,22 @@ class Parser:
         if "<" in name:
             base, _, rest = name.partition("<")
             name = base
-            params = [x.strip() for x in rest.rstrip(">").split(",") if x.strip()]
+            if rest.endswith(">"):
+                params = [x.strip() for x in rest[:-1].split(",") if x.strip()]
+            else:
+                # The lexer splits at the comma in `Pair<A, B>`; collect the
+                # parameter list from the following tokens instead.
+                params = [rest.strip()]
+                while self.check("punct", ","):
+                    self.pop()
+                    tok = self.expect("ident", what="a type parameter")
+                    if tok.value.endswith(">"):
+                        params.append(tok.value[:-1].strip())
+                        break
+                    params.append(tok.value.strip())
+        if len(params) != len(set(params)):
+            raise SyntaxErr("duplicate type parameter in data declaration",
+                            name_tok.loc)
         if self.peek().kind == "ident" and self.peek().value == "=":
             self.pop()
         else:
@@ -314,6 +353,16 @@ class Parser:
                 f"duplicate type '{name_tok.value}'", name_tok.loc)
         self.record_types.add(name_tok.value)
 
+        # `type Token = (kind: Kind, value: [Int])` declares a data-backed
+        # product: a single-variant ADT with generated field accessors.  Unlike
+        # the legacy `type Vec3 (x: Float, ...)` form it may hold boxed fields
+        # (lists, strings, recursive data), and it is represented like any
+        # other `data` value instead of an unboxed LLVM struct.
+        if self.check("ident", "="):
+            self.pop()
+            self.expect("punct", "(", "'('")
+            return self.parse_data_product_body(name_tok.value, start)
+
         self.expect("punct", "(", "'('")
         # A field list starts with "name :"; otherwise this is a sum type.
         if self.check("ident") and self.peek(1).kind == "punct" and self.peek(1).value == ":":
@@ -359,6 +408,48 @@ class Parser:
                 start)
             accessor.param_annotations = [type_name]
             defs.append(Def(f"{type_name}-{field_name}", accessor, start))
+        return defs
+
+    def parse_data_product_body(self, type_name: str, start: Loc) -> List[Def]:
+        """Parse the `type T = (field: Type, ...)` data-backed product form."""
+        fields: List[DataField] = []
+        seen = set()
+        while not self.check("punct", ")"):
+            field_tok = self.expect("ident", what="a field name")
+            if field_tok.value in seen:
+                raise SyntaxErr(
+                    f"duplicate field '{field_tok.value}'", field_tok.loc)
+            seen.add(field_tok.value)
+            self.expect("punct", ":", "':'")
+            fields.append(DataField(field_tok.value,
+                                    self.parse_type_annotation(), field_tok.loc))
+            if self.check("punct", ","):
+                self.pop()
+                continue
+            break
+        self.expect("punct", ")", "')'")
+        if not fields:
+            raise SyntaxErr(f"type '{type_name}' needs at least one field",
+                            start)
+        # The constructor keeps the type's name: `(Token kind value)`.
+        decl = DataDecl(type_name, [], [DataVariant(type_name, fields, start)],
+                        start)
+        self.data_decls.append(decl)
+        args = [Var(f.name, f.loc) for f in fields]
+        ctor = Lam([f.name for f in fields],
+                   DataCtor(type_name, type_name, 0, args, start), start)
+        ctor.param_annotations = [f.type_text for f in fields]
+        defs: List[Def] = [Def(type_name, ctor, start)]
+        # Field accessors are ordinary pattern matches, so they work for any
+        # field representation without new codegen: `(Token-kind t)`.
+        record_var = f"__{type_name}_record"
+        for f in fields:
+            body = Match(Var(record_var, start),
+                         [(type_name, Var(f.name, f.loc))], start)
+            body.binders = [[g.name for g in fields]]
+            accessor = Lam([record_var], body, start)
+            accessor.param_annotations = [type_name]
+            defs.append(Def(f"{type_name}-{f.name}", accessor, start))
         return defs
 
     def parse_sum_body(self, type_name: str, start: Loc) -> List[Def]:
@@ -509,7 +600,7 @@ class Parser:
                 and not (self.peek().kind == "punct"
                          and self.peek().value in ")]},:.")
                 and not (self.peek().kind in ("keyword", "pipe", "ppipe")
-                         and self.peek().value in ("else", "in", "with"))):
+                         and self.peek().value in ("else", "in", "with", "|"))):
             tok = self.peek()
             hint = ""
             if tok.kind == "punct" and tok.value == "(":
@@ -528,6 +619,17 @@ class Parser:
 
     def parse_expr(self) -> Node:
         tok = self.peek()
+
+        # `loop` is soft syntax: it introduces a loop only when followed by
+        # its state bindings, so a user definition or variable named `loop`
+        # keeps working.
+        if (tok.kind == "ident" and tok.value == "loop"
+                and self.peek(1).kind == "punct" and self.peek(1).value == "("
+                and self.peek(2).kind == "ident"
+                and (self.peek(3).kind == "arrow"
+                     or (self.peek(3).kind == "ident"
+                         and self.peek(3).value == "="))):
+            return self.parse_loop()
 
         if tok.kind in ("lambda", "lambda_par"):
             return self.parse_lambda(tok.kind == "lambda_par")
@@ -560,8 +662,9 @@ class Parser:
         params: List[str] = []
         annotations: List[Optional[str]] = []
         pure_flags: List[bool] = []
+        linear_flags: List[bool] = []
         borrows: List[bool] = []
-        while not self.check("punct", "."):
+        while not (self.check("punct", ".") or self.check("arrow")):
             borrowed = False
             tok = self.peek()
             if tok.kind == "ident" and tok.value == "&":
@@ -589,21 +692,44 @@ class Parser:
                 if ann == "pure":
                     annotations.append(None)
                     pure_flags.append(True)
+                    linear_flags.append(False)
+                elif ann == "linear":
+                    # Explicit linearity: never infer a borrow for this
+                    # parameter; the callee consumes it.
+                    annotations.append(None)
+                    pure_flags.append(False)
+                    linear_flags.append(True)
                 else:
                     annotations.append(ann)
                     pure_flags.append(False)
+                    linear_flags.append(False)
             else:
                 annotations.append(None)
                 pure_flags.append(False)
+                linear_flags.append(False)
         if not params:
             raise SyntaxErr("lambda needs at least one parameter", start)
+        # Optional explicit return type, written either before the dot
+        # (``λx: Int -> Int. body``) or after the body (``λx: body : Int``).
+        # When absent, inference supplies the return type.
+        return_annotation = None
+        if self.check("arrow"):
+            self.pop()
+            return_annotation = self.parse_type_annotation()
         self.expect("punct", ".")
         body = self.parse_expr()
+        if return_annotation is None and self.check("punct", ":"):
+            after = self.peek(1)
+            if after.kind == "ident" or (after.kind == "punct" and after.value == "["):
+                self.pop()
+                return_annotation = self.parse_type_annotation()
         self.pop_context()
         lam = Lam(params, body, start)
         lam.param_annotations = annotations
         lam.param_pure = pure_flags
+        lam.param_linear = linear_flags
         lam.param_borrows = borrows
+        lam.return_annotation = return_annotation
         lam.is_parallel = parallel
         return lam
 
@@ -632,30 +758,101 @@ class Parser:
         self.pop_context()
         return If(cond, then, else_, start)
 
-    def parse_match(self) -> Match:
+    def parse_match(self) -> Node:
         start = self.pop().loc  # match
         self.push_context("match expression", start)
-        subject = self.parse_expr()
-        self.expect("keyword", "with", "'with'")
+        # The new form is `match x 0 → a | 1 → b | _ → c`: the subject is one
+        # atom, then patterns follow immediately.  The legacy form uses the
+        # `with` keyword as a delimiter; both are accepted.
+        subject = self.parse_atom()
+        if self.check("keyword", "with"):
+            self.pop()
         arms = []
         binders = []
+        literals = []
         while True:
-            pat = self.expect("ident", what="an enum or sum variant name")
+            tok = self.peek()
+            literal = None
+            pattern = None
             arm_binders = []
-            while self.check("ident"):
-                arm_binders.append(self.pop().value)
+            if tok.kind == "int":
+                self.pop()
+                literal = Lit(int(tok.value), tok.loc)
+            elif tok.kind == "string":
+                self.pop()
+                literal = Lit(tok.value, tok.loc)
+            elif tok.kind == "ident":
+                if tok.value == "-" and self.peek(1).kind == "int":
+                    self.pop()
+                    num = self.pop()
+                    literal = Lit(-int(num.value), tok.loc)
+                elif tok.value in ("true", "false"):
+                    self.pop()
+                    literal = Lit(tok.value == "true", tok.loc)
+                elif tok.value in ("_", "default"):
+                    self.pop()
+                    pattern = "_"
+                else:
+                    self.pop()
+                    pattern = tok.value
+                    while self.check("ident"):
+                        arm_binders.append(self.pop().value)
+            else:
+                raise SyntaxErr(
+                    f"expected a literal, variant name or '_' in match, got "
+                    f"'{tok.value}'", tok.loc)
+            if literal is not None and arm_binders:
+                raise SyntaxErr(
+                    "literal match arms cannot bind variables", tok.loc)
             if self.check("arrow"):
                 self.pop()
             else:
                 self.expect("punct", ":", "':' or '→'")
             arm = self.parse_expr()
-            arms.append((pat.value, arm))
+            arms.append((pattern if pattern is not None else "", arm))
             binders.append(arm_binders)
+            literals.append(literal)
             if self.check("punct", ",") or self.check("pipe"):
                 self.pop()
                 continue
             break
         self.pop_context()
+
+        # Literal matches (Int/String/Bool/Float) are lowered to an equality
+        # chain over one bound subject.  This keeps code generation identical
+        # for every scalar and gives the terse `match x 0 → ... | _ → ...` form.
+        literal_match = all(lit is not None or pat == "_"
+                            for lit, (pat, _) in zip(literals, arms))
+        if literal_match:
+            default_arm = None
+            pairs = []
+            for lit, (pat, arm) in zip(literals, arms):
+                if pat == "_":
+                    if default_arm is not None:
+                        raise SyntaxErr("match has more than one default arm", arm.loc)
+                    default_arm = arm
+                else:
+                    pairs.append((lit, arm))
+            if default_arm is None:
+                raise SyntaxErr(
+                    "a literal match needs a default arm (`_ → ...`)", start)
+            self.match_counter += 1
+            subject_name = f"__match_subject_{self.match_counter}"
+            chain: Node = default_arm
+            for lit, arm in reversed(pairs):
+                cond = App(Var("==", lit.loc), [Var(subject_name, subject.loc),
+                                                lit], lit.loc)
+                chain = If(cond, arm, chain, lit.loc)
+            return Block([Def(subject_name, subject, subject.loc)], chain, start)
+
+        if any(lit is not None for lit in literals):
+            raise SyntaxErr(
+                "a match cannot mix literal patterns with variant patterns",
+                start)
+        if any(pat == "_" for pat, _ in arms):
+            raise SyntaxErr(
+                "a default/wildcard arm is only supported for literal values; "
+                "list every variant of an enum, sum or data type", start)
         match = Match(subject, arms, start)
         match.binders = binders
         return match
@@ -672,8 +869,61 @@ class Parser:
         self.pop_context()
         return Block([Def(name_tok.value, value, name_tok.loc)], body, start)
 
+    def parse_loop(self) -> Block:
+        """Tail-recursive loop sugar with named state variables.
+
+        ``(loop (i 0) (acc 0) ... (if done then acc else (recur (+ i 1) ...)))``
+        becomes a local recursive function applied to the initial values.
+        ``recur`` is a call to that function, so the existing musttail lowering
+        keeps the loop in constant stack space even with many state variables.
+        """
+        start = self.pop().loc  # loop
+        names: List[str] = []
+        values: List[Node] = []
+        while (self.check("punct", "(") and self.peek(1).kind == "ident"
+               and ((self.peek(2).kind == "arrow")
+                    or (self.peek(2).kind == "ident"
+                        and self.peek(2).value == "="))):
+            self.pop()
+            name_tok = self.pop()
+            self.pop()  # '→' or '='
+            value = self.parse_expr()
+            self.expect("punct", ")", "')'")
+            if name_tok.value in names:
+                raise SyntaxErr(
+                    f"duplicate loop variable '{name_tok.value}'", name_tok.loc)
+            names.append(name_tok.value)
+            values.append(value)
+        if not names:
+            raise SyntaxErr(
+                "loop needs at least one state variable: "
+                "(loop (x → 0) ... body)",
+                start)
+        body = self.parse_expr()
+        self.loop_counter += 1
+        loop_name = f"__loop_{self.loop_counter}"
+        # Rename recur to the generated loop name.  Nested loops have already
+        # renamed their own recur calls by the time this outer pass runs.
+        for n in walk(body):
+            if isinstance(n, Var) and n.name == "recur":
+                n.name = loop_name
+        lam = Lam(names, body, start)
+        return Block([Def(loop_name, lam, start)],
+                     App(Var(loop_name, start), values, start), start)
+
     def parse_application(self) -> Node:
         first = self.parse_atom()
+        # `name[index]` is sugar for the Unicode-codepoint accessor.  It is
+        # only recognised when the '[' is adjacent to the name, so `f [1,2]`
+        # remains ordinary application to a list.
+        if (isinstance(first, Var) and self.check("punct", "[")
+                and self.peek().loc.line == first.loc.line
+                and self.peek().loc.col == first.loc.col + len(first.name)):
+            self.pop()
+            index = self.parse_expr()
+            self.expect("punct", "]", "']'")
+            first = App(Var("str-codepoint-at", first.loc), [first, index],
+                        first.loc)
         args: List[Node] = []
         while True:
             tok = self.peek()
@@ -775,6 +1025,12 @@ class Parser:
             self.pop()
             elements.append(self.parse_expr())
         self.expect("punct", "]", "']'")
+        if len(elements) > LIST_LITERAL_LIMIT:
+            raise SyntaxErr(
+                f"list literal too long ({len(elements)} elements); the "
+                f"compiler currently handles about {LIST_LITERAL_LIMIT}. "
+                f"Build the list with range/cons or split it into chunks",
+                start)
         self.pop_context()
         expr: Node = Var("nil", start)
         for el in reversed(elements):
@@ -796,6 +1052,13 @@ class Parser:
             return expr
         if tok.kind == "punct" and tok.value == "[":
             return self.parse_list()
+        # `#[1, 2, 3]` is an Array literal (Lean-style sugar); the elements use
+        # the same list-literal grammar and are lowered by `array-of`.
+        if (tok.kind == "ident" and tok.value == "#"
+                and self.peek(1).kind == "punct" and self.peek(1).value == "["):
+            self.pop()
+            elements = self.parse_list()
+            return App(Var("array-of", tok.loc), [elements], tok.loc)
 
         if tok.kind == "int":
             self.pop()

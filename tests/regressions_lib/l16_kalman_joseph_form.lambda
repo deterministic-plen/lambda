@@ -1,0 +1,10 @@
+include "lib/kalman.lambda"
+go → (λi k.
+  if (>= i 500)
+  then k
+  else (go (+ i 1) (k2-update (k2-predict k 0.1 0.01) 1.0 0.5)))
+k → (go 0 (K2 0.0 0.0 1.0 0.0 1.0))
+match k with K2 p pv p00 p01 p11:
+  [(> p00 0.0), (> p11 0.0),
+   (> (- (* p00 p11) (* p01 p01)) 0.0),
+   (< (abs p) 1e9), (< (abs pv) 1e9)]

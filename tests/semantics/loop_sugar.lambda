@@ -1,0 +1,4 @@
+﻿sum-to → (λn.
+  loop (i → 0) (acc → 0)
+    if (> i n) then acc else (recur (+ i 1) (+ acc i)))
+(sum-to 100000)

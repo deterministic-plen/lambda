@@ -409,27 +409,27 @@ checks, systems, channels, recovery, reports, and Gray-Scott.
 
 ## Editor support
 
-The shared extension at [`editors/vscode`](../../editors/vscode)
+The shared extension at [`editors/vscode`](../editors/vscode)
 contributes `.pi` (`source.pi`) alongside `.lambda`: comments `--` / `{- -}`,
 keywords, handle types, declarations, scheduler attributes, error constructors,
 and completion for Pi builtins and local definitions.  Install it from the
 Lambda checkout:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File ../../editors/install_vscode.ps1
+powershell -ExecutionPolicy Bypass -File ../editors/install_vscode.ps1
 ```
 
 ```bash
-sh ../../editors/install_vscode.sh
+sh ../editors/install_vscode.sh
 ```
 
 Fully restart VS Code, then open any `.pi` file.  No build step or language
 server is needed.  Pygments users can import `pi_lexer.PiLexer`; validate with
-`python ../../editors/test_pi_highlight.py`.
+`python ../editors/test_pi_highlight.py`.
 
 ## Documentation
 
 * [Pi Specification v2.0](../pispec.md) — normative design.
 * [Embedded/WCET plan](docs/embedded.md) — interpreter limits and AOT target.
 * [Universal viewer](docs/viewer.md) — one WebGL renderer for every data run.
-* [Lambda README](../../README.md) — the compute language.
+* [Lambda README](../README.md) — the compute language.

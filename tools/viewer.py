@@ -33,6 +33,18 @@ HERE = Path(__file__).resolve().parent
 ASSETS = HERE / "viewer"
 MAX_GRID_CELLS = 16_000_000
 
+#: Root-relative files the viewer actually consumed and may serve back over
+#: HTTP.  S1: the handler serves only this allowlist, never an arbitrary path
+#: below the data directory.
+_SERVED_FILES: set[str] = set()
+
+
+def _record_served(path: Path) -> None:
+    try:
+        _SERVED_FILES.add(str(path.resolve()))
+    except OSError:
+        pass
+
 
 def read_text_auto(path: Path) -> str:
     """Read UTF-8/UTF-16 text, including Windows PowerShell redirects."""
@@ -150,6 +162,7 @@ def load_frames(path: Path) -> dict | None:
     frame_bytes = cols * rows * 4
     count = min(count, max(0, (size - 12) // frame_bytes) if frame_bytes else 0)
     name = path.name[:-11] if path.name.endswith(".frames.bin") else path.stem
+    _record_served(path)
     return {"grids": [{"name": name, "rows": rows, "cols": cols,
                        "framesUrl": "/data/" + quote(path.name),
                        "frameCount": count, "frameBytes": frame_bytes,
@@ -284,17 +297,73 @@ def load_source(path: Path) -> tuple[dict, Path]:
     if data is None:
         raise ValueError(f"cannot interpret {path}")
     data.setdefault("title", path.name)
-    return data, path if path.is_dir() else path.parent
+    if path.is_dir():
+        return data, path
+    _record_served(path)
+    return data, path.parent
 
 
 class Handler(SimpleHTTPRequestHandler):
     root: Path
     manifest: dict
+    allowed: set  # root-relative POSIX paths the viewer may serve
+    port: int = 0
 
     def log_message(self, fmt, *args):  # quiet local viewer
         pass
 
+    # ------------------------------------------------------------- S1 guards
+    def _host_ok(self) -> bool:
+        """Reject requests whose Host/Origin is not this loopback server.
+
+        Binding to 127.0.0.1 is not enough by itself: with DNS rebinding a web
+        page can make its origin resolve to 127.0.0.1 and reach the viewer.
+        """
+        allowed_hosts = {
+            f"127.0.0.1:{self.port}",
+            f"localhost:{self.port}",
+            f"[::1]:{self.port}",
+        }
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in allowed_hosts:
+            return False
+        origin = (self.headers.get("Origin") or "").strip().lower()
+        if origin and origin != "null" and origin not in {
+                f"http://{h}" for h in allowed_hosts}:
+            return False
+        return True
+
+    @staticmethod
+    def _safe_rel(rel: str) -> bool:
+        """Reject NUL, empty, absolute and dot-file paths (S1/S8)."""
+        if not rel or "\x00" in rel or rel.startswith(("/", "\\")):
+            return False
+        if ":" in rel:  # drive letters / NTFS streams
+            return False
+        parts = rel.replace("\\", "/").split("/")
+        if any(p in ("", ".", "..") for p in parts):
+            return False
+        if any(p.startswith(".") for p in parts):
+            return False
+        return True
+
+    def do_HEAD(self):
+        self.send_error(405, "HEAD is not supported")
+
     def do_GET(self):
+        try:
+            self._do_GET()
+        except ValueError:
+            # S8: a NUL (or otherwise malformed) request path must produce a
+            # 4xx response, not an uncaught exception/traceback.
+            self.send_error(400, "bad request path")
+        except OSError:
+            self.send_error(404, "not found")
+
+    def _do_GET(self):
+        if not self._host_ok():
+            self.send_error(403, "forbidden Host/Origin")
+            return
         parsed = urlparse(self.path)
         p = parsed.path
         if p in ("/", "/viewer.html"):
@@ -310,7 +379,18 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         if p.startswith("/data/"):
-            rel = unquote(p[len("/data/"):])
+            raw = p[len("/data/"):]
+            if "%00" in raw or "\x00" in raw:
+                self.send_error(400, "NUL in request path")
+                return
+            rel = unquote(raw).replace("\\", "/")
+            if not self._safe_rel(rel):
+                self.send_error(404)
+                return
+            # S1: explicit allowlist only -- never an arbitrary file below root.
+            if rel not in self.allowed:
+                self.send_error(403, "file is not part of this viewer session")
+                return
             target = (self.root / rel).resolve()
             try:
                 target.relative_to(self.root.resolve())
@@ -386,6 +466,24 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _allowlist_for(root: Path) -> set:
+    """Root-relative POSIX paths the server may serve for this session.
+
+    S1: only files the viewer itself opened (e.g. a ``.frames.bin`` it streams
+    with range requests, or the single data file the user asked to view) are
+    reachable; the rest of the directory stays private.
+    """
+    allowed = set()
+    root = root.resolve()
+    for name in _SERVED_FILES:
+        try:
+            rel = Path(name).resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        allowed.add(rel.as_posix())
+    return allowed
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", help="Pi output directory, CSV, JSON, text, LMB1, or .frames.bin")
@@ -393,6 +491,7 @@ def main(argv=None) -> int:
     ap.add_argument("--no-open", action="store_true", help="do not open a browser")
     ap.add_argument("--json", metavar="PATH", help="write the normalized manifest and exit")
     args = ap.parse_args(argv)
+    _SERVED_FILES.clear()
     if args.path == "-":
         manifest, root = load_stdin(), HERE.parent
     else:
@@ -403,8 +502,10 @@ def main(argv=None) -> int:
         return 0
     Handler.root = root
     Handler.manifest = manifest
+    Handler.allowed = _allowlist_for(root)
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     port = httpd.server_address[1]
+    Handler.port = port
     url = f"http://127.0.0.1:{port}/viewer.html"
     print(f"viewer: {url}")
     print(f"data:   {root}")

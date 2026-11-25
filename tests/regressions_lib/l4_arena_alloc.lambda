@@ -1,0 +1,9 @@
+include "lib/arena.lambda"
+ok → (arena-alloc 10 5 100)
+full → (arena-alloc 10 5 12)
+neg → (arena-alloc 10 (- 0 5) 100)
+zero → (arena-alloc 10 0 10)
+[(arena-offset ok), (arena-used ok),
+ (arena-offset full), (arena-used full),
+ (arena-offset neg), (arena-used neg),
+ (arena-offset zero), (arena-used zero)]

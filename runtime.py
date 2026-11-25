@@ -22,6 +22,7 @@ RUNTIME_C = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -59,7 +60,8 @@ enum {
     TAG_FLOAT = 6,
     TAG_ARRAYF = 7,
     TAG_ARRAYI = 8,
-    TAG_ARRAYB = 9
+    TAG_ARRAYB = 9,
+    TAG_ARRAYG = 10   /* boxed generic Array<T>: slots are owned %Value* */
 };
 
 #ifdef LAMBDA_ATOMIC_RC
@@ -75,6 +77,12 @@ static int64_t value_frees = 0;
 static int64_t env_allocs = 0;
 static int64_t env_frees = 0;
 static int64_t live_values = 0;
+/* Values made immortal by `immortalize`.  They are excluded from live_values
+   (they are intentionally never freed), which used to make a leak of an
+   immortalised allocation invisible to the harness; the separate counter
+   keeps that leak visible without turning intentional immortalisation into a
+   test failure. */
+static int64_t immortal_values = 0;
 
 static Value NIL_VALUE = { TAG_NIL, -1, 0, NULL };
 
@@ -240,55 +248,161 @@ static int rc_release_once(Value *v) {
 
 void lambda_release(Value *v);
 
-/* Called with v->rc already at zero.  Walks cons tails iteratively so a
-   million-element list does not consume C stack. */
-void lambda_release_zero(Value *v) {
-    int first = 1;
-    while (v) {
-        if (!first) {
-            int32_t rc = v->rc;
-            if (rc < 0) return;
-            if (--rc != 0) { v->rc = rc; return; }
-            v->rc = 0;
+/* Iterative teardown worklist.
+
+   Values used to be destroyed recursively: a cons chain freed its head with
+   lambda_release and a closure's generated environment destructor released
+   the closures it captured.  A chain of ~150k nested closures (or a
+   left-nested list in the boxed backend) then overflowed the 8 MB native
+   stack.  Now a value whose reference count just reached zero is only pushed
+   here; the outermost release call drains the worklist in a loop.  Nested
+   releases (from a destructor or a cons head) just push, so the C stack depth
+   no longer grows with the data structure.  The worklist is thread local, so
+   pmap workers cannot race on it. */
+typedef struct ReleaseWork {
+    Value **items;
+    size_t count;
+    size_t cap;
+    int busy;
+} ReleaseWork;
+
+#ifdef LAMBDA_ATOMIC_RC
+/* pmap workers release values concurrently, so each thread needs its own
+   worklist.  Static `__declspec(thread)` gave every Windows executable a
+   load-time TLS directory, which made the first launch of each freshly built
+   binary take ~14 s on a machine with real-time scanning.  Dynamic TLS keeps
+   the hot single-threaded runtime free of a TLS section while still giving
+   atomic builds a per-thread list. */
+#ifdef _WIN32
+static ReleaseWork *release_work_slot(void) {
+    static volatile LONG key = -1;
+    if (key == -1) {
+        DWORD fresh = TlsAlloc();
+        if (fresh == TLS_OUT_OF_INDEXES) fail("out of memory: TLS slot");
+        if (InterlockedCompareExchange(&key, (LONG)fresh, -1) != -1) {
+            TlsFree(fresh); /* another thread installed first */
         }
-        first = 0;
-        if (v->tag == TAG_CONS) {
-            Value *head = (Value *)(intptr_t)v->i;
-            Value *tail = (Value *)v->p;
-            lambda_release(head);
-            free(v);
-            STAT_ADD(value_frees, 1);
-            STAT_ADD(live_values, -1);
-            v = tail;
-            continue;
-        }
-        switch (v->tag) {
-        case TAG_CLOSURE:
-            if (v->i) {
-                EnvHeader *env = (EnvHeader *)(intptr_t)v->i;
-                if (env->dtor) env->dtor(env);
-            }
-            break;
-        case TAG_STRING:
-            free(v->p);
-            break;
-        case TAG_ARRAYF:
-        case TAG_ARRAYI:
-            pool_put(v->p, sizeof(double) * (size_t)(v->i > 0 ? v->i : 1));
-            v->p = NULL;
-            break;
-        case TAG_ARRAYB:
-            pool_put(v->p, (size_t)(v->i > 0 ? v->i : 1));
-            v->p = NULL;
-            break;
-        default:
-            break;
-        }
+    }
+    ReleaseWork *w = (ReleaseWork *)TlsGetValue((DWORD)key);
+    if (!w) {
+        w = (ReleaseWork *)calloc(1, sizeof(ReleaseWork));
+        if (!w) fail("out of memory: release worklist");
+        TlsSetValue((DWORD)key, w);
+    }
+    return w;
+}
+#else
+static pthread_key_t release_work_key;
+static pthread_once_t release_work_once = PTHREAD_ONCE_INIT;
+static void release_work_make(void) {
+    if (pthread_key_create(&release_work_key, NULL) != 0)
+        fail("out of memory: release worklist key");
+}
+static ReleaseWork *release_work_slot(void) {
+    pthread_once(&release_work_once, release_work_make);
+    ReleaseWork *w = (ReleaseWork *)pthread_getspecific(release_work_key);
+    if (!w) {
+        w = (ReleaseWork *)calloc(1, sizeof(ReleaseWork));
+        if (!w) fail("out of memory: release worklist");
+        pthread_setspecific(release_work_key, w);
+    }
+    return w;
+}
+#endif
+#else
+/* The non-atomic runtime is single-threaded; a plain static keeps the hot
+   path branch-free and avoids a TLS section in every executable. */
+static ReleaseWork g_release_work;
+static ReleaseWork *release_work_slot(void) {
+    return &g_release_work;
+}
+#endif
+
+static void release_push(Value *v) {
+    ReleaseWork *w = release_work_slot();
+    if (w->count == w->cap) {
+        size_t cap = w->cap ? w->cap * 2 : 32;
+        Value **items = (Value **)realloc(w->items, cap * sizeof(Value *));
+        if (!items) fail("out of memory growing the release worklist");
+        w->items = items;
+        w->cap = cap;
+    }
+    w->items[w->count++] = v;
+}
+
+/* Tear down one value whose reference count is already zero. */
+static void release_teardown(Value *v) {
+    switch (v->tag) {
+    case TAG_CONS: {
+        /* Queue the tail before the head: the LIFO worklist then visits the
+           head's subtree first, which keeps the worklist small for the common
+           right-nested list shape. */
+        Value *head = (Value *)(intptr_t)v->i;
+        Value *tail = (Value *)v->p;
         free(v);
         STAT_ADD(value_frees, 1);
         STAT_ADD(live_values, -1);
+        lambda_release(tail);
+        lambda_release(head);
         return;
     }
+    case TAG_CLOSURE:
+        if (v->i) {
+            EnvHeader *env = (EnvHeader *)(intptr_t)v->i;
+            if (env->dtor) env->dtor(env);
+        }
+        break;
+    case TAG_STRING:
+        free(v->p);
+        break;
+    case TAG_ARRAYF:
+    case TAG_ARRAYI:
+        /* Must use the same size rule as pool_take (checked_array_bytes):
+           an empty array's block was taken as a 1-byte, class-0 block, so
+           filing it under the 8-byte class made the next one-element array
+           write 8 bytes into it. */
+        pool_put(v->p, v->i > 0 ? sizeof(double) * (size_t)v->i : 1);
+        v->p = NULL;
+        break;
+    case TAG_ARRAYB:
+        pool_put(v->p, v->i > 0 ? (size_t)v->i : 1);
+        v->p = NULL;
+        break;
+    case TAG_ARRAYG:
+        /* Each slot owns one reference.  Releasing the elements may push
+           them onto this worklist; that is handled by the drain loop. */
+        if (v->p) {
+            Value **slots = (Value **)v->p;
+            int64_t n = v->i;
+            for (int64_t i = 0; i < n; i++) lambda_release(slots[i]);
+            pool_put(v->p, n > 0 ? sizeof(Value *) * (size_t)n : 1);
+            v->p = NULL;
+        }
+        break;
+    default:
+        break;
+    }
+    free(v);
+    STAT_ADD(value_frees, 1);
+    STAT_ADD(live_values, -1);
+}
+
+static void release_drain(void) {
+    ReleaseWork *w = release_work_slot();
+    if (w->busy) return; /* a nested release: the outermost caller drains */
+    w->busy = 1;
+    while (w->count) {
+        Value *v = w->items[--w->count];
+        release_teardown(v);
+    }
+    w->busy = 0;
+}
+
+/* Called with v->rc already at zero. */
+void lambda_release_zero(Value *v) {
+    if (!v) return;
+    release_push(v);
+    release_drain();
 }
 
 void lambda_release(Value *v) {
@@ -405,6 +519,7 @@ static const char *tag_name(int32_t tag) {
     case TAG_ARRAYF: return "ArrayF";
     case TAG_ARRAYI: return "ArrayI";
     case TAG_ARRAYB: return "ArrayB";
+    case TAG_ARRAYG: return "Array";
     default: return "?";
     }
 }
@@ -591,15 +706,93 @@ static void print_int(int64_t x) {
     out_write(tmp, (size_t)n);
 }
 
+/* Shortest decimal representation that round-trips to the same double.
+
+   "%.17g" exposed the binary noise of a value (0.1 printed as
+   0.10000000000000001 and 1e-7 as 9.9999999999999995e-08).  Try increasing
+   significant-digit counts until strtod() gives back the same bits, then
+   render that digit string in fixed or scientific notation the way Python's
+   repr does (fixed when the decimal point position is in (-4, 16]).
+   NaN is normalised to "nan" (a NaN can carry a sign bit, which made the
+   boxed backend print "-nan" while the typed one printed "nan"); infinities
+   print "inf"/"-inf".  The result always looks like a float ("6" -> "6.0")
+   unless it is in scientific notation. */
+static int format_double(char *buf, size_t cap, double x) {
+    if (isnan(x)) {
+        if (cap < 4) return snprintf(buf, cap, "%g", x);
+        memcpy(buf, "nan", 4);
+        return 3;
+    }
+    if (isinf(x)) {
+        const char *s = x < 0 ? "-inf" : "inf";
+        size_t n = strlen(s);
+        if (n + 1 > cap) return snprintf(buf, cap, "%g", x);
+        memcpy(buf, s, n + 1);
+        return (int)n;
+    }
+    char cand[64];
+    int precision;
+    for (precision = 1; precision <= 17; precision++) {
+        snprintf(cand, sizeof(cand), "%.*e", precision - 1, x);
+        if (strtod(cand, NULL) == x) break;
+    }
+    if (precision > 17) precision = 17;
+    /* cand is "-d.dddddde[+-]dd": split it into digits and exponent. */
+    const char *p = cand;
+    int neg = 0;
+    if (*p == '-') { neg = 1; p++; }
+    char digits[32];
+    size_t nd = 0;
+    int exp10 = 0;
+    for (; *p && *p != 'e' && *p != 'E'; p++) {
+        if (*p == '.' || *p == '+') continue;
+        if (nd < sizeof(digits) - 1) digits[nd++] = *p;
+    }
+    if (*p == 'e' || *p == 'E') exp10 = atoi(p + 1);
+    while (nd > 1 && digits[nd - 1] == '0') nd--;
+    digits[nd] = 0;
+    int decpt = exp10 + 1; /* value = 0.digits * 10^decpt */
+    size_t o = 0;
+#define FD_PUT(ch) do { if (o + 1 < cap) buf[o] = (char)(ch); o++; } while (0)
+    if (neg) FD_PUT('-');
+    if (decpt > -4 && decpt <= 16) {
+        if (decpt <= 0) {
+            FD_PUT('0'); FD_PUT('.');
+            for (int i = 0; i < -decpt; i++) FD_PUT('0');
+            for (size_t i = 0; i < nd; i++) FD_PUT(digits[i]);
+        } else if ((size_t)decpt >= nd) {
+            for (size_t i = 0; i < nd; i++) FD_PUT(digits[i]);
+            for (size_t i = nd; i < (size_t)decpt; i++) FD_PUT('0');
+            FD_PUT('.'); FD_PUT('0');
+        } else {
+            for (int i = 0; i < decpt; i++) FD_PUT(digits[i]);
+            FD_PUT('.');
+            for (size_t i = (size_t)decpt; i < nd; i++) FD_PUT(digits[i]);
+        }
+    } else {
+        FD_PUT(digits[0]);
+        if (nd > 1) {
+            FD_PUT('.');
+            for (size_t i = 1; i < nd; i++) FD_PUT(digits[i]);
+        }
+        FD_PUT('e');
+        int e = decpt - 1;
+        FD_PUT(e < 0 ? '-' : '+');
+        if (e < 0) e = -e;
+        char ebuf[8];
+        int en = snprintf(ebuf, sizeof(ebuf), "%d", e);
+        if (en < 2) FD_PUT('0');
+        for (int i = 0; i < en; i++) FD_PUT(ebuf[i]);
+    }
+#undef FD_PUT
+    if (o + 1 > cap) return snprintf(buf, cap, "%.17g", x);
+    buf[o] = 0;
+    return (int)o;
+}
+
 static void print_double(double x) {
     char tmp[64];
-    int n = snprintf(tmp, sizeof(tmp), "%.17g", x);
-    /* Make floats visually distinct from integers (6 -> 6.0). */
-    if (isfinite(x) && strpbrk(tmp, ".eE") == NULL && n < (int)sizeof(tmp) - 2) {
-        tmp[n++] = '.';
-        tmp[n++] = '0';
-        tmp[n] = 0;
-    }
+    int n = format_double(tmp, sizeof(tmp), x);
     out_write(tmp, (size_t)n);
 }
 
@@ -625,6 +818,17 @@ static void print_value_inner(Value *v, int nested) {
                          : v->tag == TAG_ARRAYI ? "arrayi" : "arrayb";
         snprintf(buf, sizeof(buf), "[%s %lld]", kind, (long long)v->i);
         out_puts(buf);
+        break;
+    }
+    case TAG_ARRAYG: {
+        /* Boxed generic arrays print as a list-like sequence of elements. */
+        Value **slots = (Value **)v->p;
+        out_ch('[');
+        for (int64_t i = 0; i < v->i; i++) {
+            if (i) out_puts(", ");
+            print_value_inner(slots[i], 1);
+        }
+        out_ch(']');
         break;
     }
     case TAG_CONS: {
@@ -659,9 +863,11 @@ void lambda_stats(void) {
     out_flush();
     fprintf(stderr,
             "lambda-stats: value_allocs=%" PRId64 " value_frees=%" PRId64
-            " env_allocs=%" PRId64 " env_frees=%" PRId64 " live=%" PRId64 "\n",
+            " env_allocs=%" PRId64 " env_frees=%" PRId64 " live=%" PRId64
+            " immortal=%" PRId64 "\n",
             STAT_LOAD(value_allocs), STAT_LOAD(value_frees),
-            STAT_LOAD(env_allocs), STAT_LOAD(env_frees), STAT_LOAD(live_values));
+            STAT_LOAD(env_allocs), STAT_LOAD(env_frees), STAT_LOAD(live_values),
+            STAT_LOAD(immortal_values));
 }
 
 /* ------------------------------------------------------------------ */
@@ -669,8 +875,18 @@ void lambda_stats(void) {
 /* ------------------------------------------------------------------ */
 static int value_equal(Value *a, Value *b) {
     while (1) {
-        if (a == b) return 1;
         if (!a || !b) return 0;
+        if (a == b) {
+            /* Same boxed object is usually equal, but IEEE NaN is not equal
+               to itself; ``(== n n)`` must agree between the typed and boxed
+               backends. */
+            if (a->tag == TAG_FLOAT) {
+                double x;
+                memcpy(&x, &a->i, sizeof(double));
+                return x == x;
+            }
+            return 1;
+        }
         if (a->tag != b->tag) return 0;
         switch (a->tag) {
         case TAG_INT:
@@ -689,6 +905,7 @@ static int value_equal(Value *a, Value *b) {
         case TAG_ARRAYF:
         case TAG_ARRAYI:
         case TAG_ARRAYB:
+        case TAG_ARRAYG:
             /* Arrays are mutable identity objects, not structural values. */
             return a == b;
         case TAG_CONS:
@@ -864,6 +1081,115 @@ Value *lambda_arrayb_clone(Value *a) {
     Value *b = lambda_arrayb_new(a->i, 0);
     memcpy(b->p, a->p, (size_t)a->i);
     return b;
+}
+
+/* ------------------------------------------------------------------ */
+/* boxed generic arrays (Array<T>)                                     */
+/*                                                                     */
+/* One RC header plus a contiguous array of owned %Value* slots: the   */
+/* generic counterpart of ArrayI/ArrayF for arbitrary element types.   */
+/* Every slot holds exactly one reference, so retains/releases follow  */
+/* the normal rules and the array itself counts as one live value.     */
+/* ------------------------------------------------------------------ */
+
+static int32_t value_rc_load(Value *v) {
+#ifdef LAMBDA_ATOMIC_RC
+    return __atomic_load_n(&v->rc, __ATOMIC_RELAXED);
+#else
+    return v->rc;
+#endif
+}
+
+/* Takes ownership of the list.  The element references are moved out of the
+   cons cells into the array (no retain/release per element); only the cons
+   cells are freed, exactly as a list release would do. */
+Value *lambda_arrayg_of(Value *list) {
+    if (!list) fail("array of null");
+    int64_t n = 0;
+    Value *cur = list;
+    while (cur && cur->tag == TAG_CONS) {
+        n++;
+        cur = (Value *)cur->p;
+    }
+    if (!cur || cur->tag != TAG_NIL) fail_type("List", cur);
+    Value *a = value_alloc(TAG_ARRAYG);
+    a->i = n;
+    size_t cap = 0;
+    a->p = pool_take(checked_array_bytes(n, sizeof(Value *)), &cap);
+    Value **slots = (Value **)a->p;
+    cur = list;
+    for (int64_t i = 0; i < n; i++) {
+        slots[i] = (Value *)(intptr_t)cur->i; /* ownership moves to the slot */
+        Value *next = (Value *)cur->p;
+        free(cur);
+        STAT_ADD(value_frees, 1);
+        STAT_ADD(live_values, -1);
+        cur = next;
+    }
+    return a;
+}
+
+/* Retains `init` once per slot; the caller keeps its own reference. */
+Value *lambda_arrayg_new(int64_t n, Value *init) {
+    if (n < 0) fail("array size must be non-negative");
+    Value *a = value_alloc(TAG_ARRAYG);
+    a->i = n;
+    size_t cap = 0;
+    a->p = pool_take(checked_array_bytes(n, sizeof(Value *)), &cap);
+    Value **slots = (Value **)a->p;
+    for (int64_t i = 0; i < n; i++) {
+        lambda_retain(init);
+        slots[i] = init;
+    }
+    return a;
+}
+
+int64_t lambda_arrayg_length(Value *a) {
+    if (!a || a->tag != TAG_ARRAYG) fail_type("Array", a);
+    return a->i;
+}
+
+/* Returns a retained reference to the element. */
+Value *lambda_arrayg_get(Value *a, int64_t idx) {
+    idx = array_index(a, TAG_ARRAYG, idx);
+    Value *e = ((Value **)a->p)[idx];
+    lambda_retain(e);
+    return e;
+}
+
+Value *lambda_arrayg_clone(Value *a) {
+    if (!a || a->tag != TAG_ARRAYG) fail_type("Array", a);
+    Value *b = value_alloc(TAG_ARRAYG);
+    b->i = a->i;
+    size_t cap = 0;
+    b->p = pool_take(checked_array_bytes(a->i, sizeof(Value *)), &cap);
+    Value **src = (Value **)a->p;
+    Value **dst = (Value **)b->p;
+    for (int64_t i = 0; i < a->i; i++) {
+        lambda_retain(src[i]);
+        dst[i] = src[i];
+    }
+    return b;
+}
+
+/* Bounds-checked write.  Takes ownership of both `a` (the caller's
+   reference) and `v`.  Copy-on-write when the buffer is shared: a copy is
+   made, the caller's reference to the old array is released, and the new
+   array is returned. */
+Value *lambda_arrayg_set(Value *a, int64_t idx, Value *v) {
+    idx = array_index(a, TAG_ARRAYG, idx);
+    if (value_rc_load(a) > 1) {
+        Value *b = lambda_arrayg_clone(a);
+        lambda_release(a); /* caller's reference to the shared buffer */
+        Value **slots = (Value **)b->p;
+        lambda_release(slots[idx]);
+        slots[idx] = v;
+        return b;
+    }
+    Value **slots = (Value **)a->p;
+    lambda_release(slots[idx]);
+    slots[idx] = v;
+    return a;
 }
 
 int64_t lambda_arrayi_sum(Value *a) {
@@ -1172,22 +1498,34 @@ typedef struct AdtArena {
     uint64_t *edges;
 } AdtArena;
 
+/* Data arenas grow on demand.  They used to reserve 2,097,152 rows up front
+   (16 MiB per word of row width, so about 176 MiB for a 10-field type and
+   1 GiB for the 64-field maximum) per arena before the program did anything;
+   that fails under a hard address-space limit even though most programs use a
+   few rows.  Start small and double. */
+#define LAMBDA_ARENA_INITIAL_ROWS 1024
+#define LAMBDA_ARENA_INITIAL_EDGES 1024
+
 AdtArena *lambda_arena_new(int64_t width) {
     if (width < 0 || width > 64) fail("ADT arena width out of range");
     AdtArena *a = (AdtArena *)xmalloc(sizeof(AdtArena));
-    a->cap = 2097152;
+    a->cap = LAMBDA_ARENA_INITIAL_ROWS;
     a->count = 0;
     a->width = width;
     a->words = (uint64_t *)xmalloc((size_t)a->cap * (size_t)(width + 1) * sizeof(uint64_t));
-    a->edge_cap = 65536;
+    a->edge_cap = LAMBDA_ARENA_INITIAL_EDGES;
     a->edge_count = 0;
     a->edges = (uint64_t *)xmalloc((size_t)a->edge_cap * sizeof(uint64_t));
     return a;
 }
 
 static void arena_grow(AdtArena *a) {
+    if (a->cap > INT64_MAX / 2) fail("ADT arena is too large");
     int64_t cap = a->cap * 2;
-    a->words = (uint64_t *)realloc(a->words, (size_t)cap * (size_t)(a->width + 1) * sizeof(uint64_t));
+    size_t row_words = (size_t)(a->width + 1);
+    if ((uint64_t)cap > (uint64_t)SIZE_MAX / (row_words * sizeof(uint64_t)))
+        fail("out of memory growing ADT arena");
+    a->words = (uint64_t *)realloc(a->words, (size_t)cap * row_words * sizeof(uint64_t));
     if (!a->words) fail("out of memory growing ADT arena");
     a->cap = cap;
 }
@@ -1254,7 +1592,10 @@ int64_t lambda_arena_tag(AdtArena *a, int64_t id) {
 }
 
 static void arena_edge_grow(AdtArena *a) {
+    if (a->edge_cap > INT64_MAX / 2) fail("ADT edge arena is too large");
     int64_t cap = a->edge_cap * 2;
+    if ((uint64_t)cap > (uint64_t)SIZE_MAX / sizeof(uint64_t))
+        fail("out of memory growing ADT edge arena");
     a->edges = (uint64_t *)realloc(a->edges, (size_t)cap * sizeof(uint64_t));
     if (!a->edges) fail("out of memory growing ADT edge arena");
     a->edge_cap = cap;
@@ -1582,23 +1923,76 @@ Value *lambda_op_utf16le_bytes_to_str(Value *b) {
     return lambda_utf16le_bytes_to_str(b);
 }
 
+/* Read a whole regular file into a malloc'd, NUL-terminated buffer.
+
+   Sizing the buffer with fseek(SEEK_END)/ftell aborted with "out of memory"
+   on directories, silently returned empty data for pipes and other unseekable
+   files, and mis-sized files over 2 GiB because `long` is 32-bit on Windows.
+   fstat plus a growing read handles all of those; non-regular files are
+   rejected (NULL) and callers return their normal "empty on error" value. */
+static char *read_regular_file(const char *path, size_t *out_len) {
+    *out_len = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+#ifdef _WIN32
+    struct _stat st;
+    int regular = _fstat(_fileno(f), &st) == 0 && (st.st_mode & _S_IFREG) != 0;
+#else
+    struct stat st;
+    int regular = fstat(fileno(f), &st) == 0 && S_ISREG(st.st_mode);
+#endif
+    if (!regular) {
+        fclose(f);
+        return NULL;
+    }
+    /* st_size is only a capacity hint (it is 0 for proc files and may be
+       truncated on Windows); the growing loop below always reads to EOF. */
+    size_t cap = 4096;
+    {
+        int64_t want = (int64_t)st.st_size;
+        if (want > 0 && (uint64_t)want <= (uint64_t)(1u << 20)) cap = (size_t)want;
+    }
+    char *buf = (char *)xmalloc(cap + 1);
+    size_t len = 0;
+    for (;;) {
+        if (len == cap) {
+            if (cap > SIZE_MAX / 2) { free(buf); fclose(f); return NULL; }
+            cap *= 2;
+            char *nb = (char *)realloc(buf, cap + 1);
+            if (!nb) { free(buf); fclose(f); return NULL; }
+            buf = nb;
+        }
+        size_t n = fread(buf + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    int read_error = ferror(f);
+    if (fclose(f) != 0 || read_error) {
+        free(buf);
+        return NULL;
+    }
+    buf[len] = 0;
+    *out_len = len;
+    return buf;
+}
+
 /* Raw file bytes without any Unicode interpretation. */
 Value *lambda_read_file_bytes_raw(Value *pathv) {
     if (!pathv || pathv->tag != TAG_STRING) fail_type("String", pathv);
-    FILE *f = fopen((const char *)pathv->p, "rb");
-    if (!f) {
+    const char *path = (const char *)pathv->p;
+    /* Lambda strings are length-tagged but fopen takes a C string: an
+       embedded NUL silently truncated the path to its prefix file. */
+    if (memchr(path, 0, (size_t)pathv->i) != NULL) {
         lambda_release(pathv);
         return lambda_arrayb_new(0, 0);
     }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    if (size < 0) size = 0;
-    fseek(f, 0, SEEK_SET);
-    Value *a = lambda_arrayb_new((int64_t)size, 0);
-    size_t got = fread(a->p, 1, (size_t)size, f);
-    fclose(f);
-    a->i = (int64_t)got;
+    size_t len = 0;
+    char *buf = read_regular_file(path, &len);
     lambda_release(pathv);
+    if (!buf) return lambda_arrayb_new(0, 0);
+    Value *a = lambda_arrayb_new((int64_t)len, 0);
+    if (len) memcpy(a->p, buf, len);
+    free(buf);
     return a;
 }
 
@@ -1667,7 +2061,10 @@ Value *lambda_op_str_to_list(Value *v) {
 }
 
 Value *lambda_op_str_len(Value *v) {
-    int64_t len = v->i;
+    /* The boxed backend can be reached by any program that fails type
+       inference, so primitives must not trust their argument's tag: reading
+       v->i from a non-string leaked a heap pointer to the program. */
+    int64_t len = lambda_str_byte_length(v);
     lambda_release(v);
     return lambda_box_int(len);
 }
@@ -1688,24 +2085,22 @@ Value *lambda_op_str_append(Value *a, Value *b) {
 }
 
 Value *lambda_op_read_file(Value *pathv) {
-    const char *path = string_data(pathv);
-    FILE *f = fopen(path, "rb");
-    if (!f) {
+    if (!pathv || pathv->tag != TAG_STRING) fail_type("String", pathv);
+    const char *path = (const char *)pathv->p;
+    /* Reject embedded NULs rather than silently truncating the path. */
+    if (memchr(path, 0, (size_t)pathv->i) != NULL) {
         lambda_release(pathv);
         return lambda_string_new_len("", 0);
     }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    if (size < 0) size = 0;
-    fseek(f, 0, SEEK_SET);
-    char *buf = (char *)xmalloc((size_t)size + 1);
-    size_t got = fread(buf, 1, (size_t)size, f);
-    fclose(f);
-    buf[got] = 0;
-    Value *r = value_alloc(TAG_STRING);
-    r->i = (int64_t)got;
-    r->p = buf;
+    size_t len = 0;
+    char *buf = read_regular_file(path, &len);
     lambda_release(pathv);
+    if (!buf) return lambda_string_new_len("", 0);
+    /* String payloads are free()d by the destructor, so hand the buffer
+       over directly (it is already NUL-terminated) instead of copying. */
+    Value *r = value_alloc(TAG_STRING);
+    r->i = (int64_t)len;
+    r->p = buf;
     return r;
 }
 
@@ -1764,6 +2159,12 @@ Value *lambda_op_argv(Value *v) {
 int64_t lambda_op_write_file(Value *pathv, Value *data) {
     if (!pathv || pathv->tag != TAG_STRING) fail_type("String", pathv);
     if (!data || data->tag != TAG_ARRAYB) fail_type("ArrayB", data);
+    /* Reject embedded NULs: fopen would silently write the prefix path. */
+    if (memchr(pathv->p, 0, (size_t)pathv->i) != NULL) {
+        lambda_release(pathv);
+        lambda_release(data);
+        return -1;
+    }
     FILE *f = fopen((const char *)pathv->p, "wb");
     if (!f) {
         lambda_release(pathv);
@@ -1772,7 +2173,9 @@ int64_t lambda_op_write_file(Value *pathv, Value *data) {
     }
     size_t n = fwrite(data->p, 1, (size_t)data->i, f);
     int64_t ok = (n == (size_t)data->i) ? (int64_t)n : -1;
-    fclose(f);
+    /* Buffered bytes are only flushed by fclose, so a close/flush failure
+       (full disk, closed pipe) must fail the call too. */
+    if (fclose(f) != 0) ok = -1;
     lambda_release(pathv);
     lambda_release(data);
     return ok;
@@ -1781,38 +2184,81 @@ int64_t lambda_op_write_file(Value *pathv, Value *data) {
 /* ------------------------------------------------------------------ */
 /* optional terminal input (compiled only with --input)                */
 /* ------------------------------------------------------------------ */
-static char *read_prompt_line(Value *prompt) {
+
+/* Read one line of arbitrary length with arbitrary bytes (NUL included).
+
+   fgets with a fixed 4096-byte buffer split longer lines into several reads
+   (and a line of exactly 4095 bytes was followed by a phantom empty read),
+   and both read-line and read-int went through strlen, so an embedded NUL
+   silently cut the line.  A dynamic fgetc loop has neither problem.
+
+   Returns NULL on end of input before any byte; otherwise a malloc'd buffer
+   with its exact length (the trailing newline and CR are not included).  The
+   buffer is NUL-terminated for convenience, but callers use the length. */
+static char *read_prompt_line(Value *prompt, size_t *len_out) {
+    *len_out = 0;
     if (prompt) {
         if (prompt->tag != TAG_STRING) fail_type("String", prompt);
         out_write((const char *)prompt->p, (size_t)prompt->i);
     }
     lambda_release(prompt);
     out_flush();
-    char buf[4096];
-    if (!fgets(buf, sizeof(buf), stdin)) return NULL;
-    size_t n = strlen(buf);
-    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
-    char *copy = (char *)xmalloc(n + 1);
-    memcpy(copy, buf, n + 1);
-    return copy;
+    size_t cap = 128, len = 0;
+    char *buf = (char *)xmalloc(cap + 1);
+    int c = EOF;
+    while ((c = fgetc(stdin)) != EOF) {
+        if (c == '\n') break;
+        if (len == cap) {
+            if (cap > SIZE_MAX / 2) {
+                free(buf);
+                fail("input line is too long");
+            }
+            cap *= 2;
+            char *nb = (char *)realloc(buf, cap + 1);
+            if (!nb) {
+                free(buf);
+                fail("out of memory reading input");
+            }
+            buf = nb;
+        }
+        buf[len++] = (char)c;
+    }
+    if (c == EOF && len == 0) {
+        free(buf);
+        return NULL;
+    }
+    while (len > 0 && buf[len - 1] == '\r') len--;
+    buf[len] = 0;
+    *len_out = len;
+    return buf;
 }
 
 Value *lambda_op_read_line(Value *prompt) {
-    char *line = read_prompt_line(prompt);
+    size_t len = 0;
+    char *line = read_prompt_line(prompt, &len);
     if (!line) return lambda_string_new_len("", 0);
-    Value *r = lambda_string_new(line);
+    Value *r = lambda_string_new_len(line, (int64_t)len);
     free(line);
     return r;
 }
 
 Value *lambda_op_read_int(Value *prompt) {
-    char *line = read_prompt_line(prompt);
+    size_t len = 0;
+    char *line = read_prompt_line(prompt, &len);
     if (!line) fail("read-int: end of input");
     char *end = NULL;
     errno = 0;
     long long x = strtoll(line, &end, 10);
-    while (end && *end && (*end == ' ' || *end == '\t' || *end == '\r')) end++;
-    if (end == line || (end && *end)) {
+    /* strtoll saturates to LLONG_MAX/LLONG_MIN and sets ERANGE; that used to
+       be accepted silently, turning a too-large number into INT64_MAX. */
+    if (errno == ERANGE) {
+        free(line);
+        fail("read-int: integer out of range");
+    }
+    while (end && *end && (*end == ' ' || *end == '\t')) end++;
+    /* Comparing against the length (not *end) rejects embedded NULs and
+       trailing junk instead of silently truncating the number. */
+    if (end == line || (end && (size_t)(end - line) != len)) {
         free(line);
         fail("read-int: invalid integer");
     }
@@ -1821,12 +2267,13 @@ Value *lambda_op_read_int(Value *prompt) {
 }
 
 Value *lambda_op_read_float(Value *prompt) {
-    char *line = read_prompt_line(prompt);
+    size_t len = 0;
+    char *line = read_prompt_line(prompt, &len);
     if (!line) fail("read-float: end of input");
     char *end = NULL;
     double x = strtod(line, &end);
-    while (end && *end && (*end == ' ' || *end == '\t' || *end == '\r')) end++;
-    if (end == line || (end && *end)) {
+    while (end && *end && (*end == ' ' || *end == '\t')) end++;
+    if (end == line || (end && (size_t)(end - line) != len)) {
         free(line);
         fail("read-float: invalid number");
     }
@@ -1872,16 +2319,6 @@ Value *lambda_op_str_to_float(Value *v) {
     if (end == s) x = 0.0;
     lambda_release(v);
     return lambda_box_float(x);
-}
-
-static int format_double(char *buf, size_t cap, double x) {
-    int n = snprintf(buf, cap, "%.17g", x);
-    if (isfinite(x) && strpbrk(buf, ".eE") == NULL && n < (int)cap - 2) {
-        buf[n++] = '.';
-        buf[n++] = '0';
-        buf[n] = 0;
-    }
-    return n;
 }
 
 Value *lambda_op_float_to_str(Value *v) {
@@ -1999,6 +2436,7 @@ int64_t lambda_sum_i64(Value *list) {
         acc = (int64_t)((uint64_t)acc + (uint64_t)as_int(h));
         cur = (Value *)cur->p;
     }
+    if (!cur || cur->tag != TAG_NIL) fail_type("List", cur);
     lambda_release(list);
     return acc;
 }
@@ -2011,6 +2449,7 @@ double lambda_sum_f64(Value *list) {
         acc += as_float(h);
         cur = (Value *)cur->p;
     }
+    if (!cur || cur->tag != TAG_NIL) fail_type("List", cur);
     lambda_release(list);
     return acc;
 }
@@ -2023,6 +2462,7 @@ int64_t lambda_product_i64(Value *list) {
         acc = (int64_t)((uint64_t)acc * (uint64_t)as_int(h));
         cur = (Value *)cur->p;
     }
+    if (!cur || cur->tag != TAG_NIL) fail_type("List", cur);
     lambda_release(list);
     return acc;
 }
@@ -2035,15 +2475,26 @@ double lambda_product_f64(Value *list) {
         acc *= as_float(h);
         cur = (Value *)cur->p;
     }
+    if (!cur || cur->tag != TAG_NIL) fail_type("List", cur);
     lambda_release(list);
     return acc;
 }
 
+/* Ranges, map/pmap and reductions.  A reduction must verify that the spine is
+   a proper list: the boxed backend is reachable through the type-error
+   fallback, so `sum` can be handed a non-list, and reading it as a list used
+   to dereference v->i as a pointer and crash instead of reporting a type
+   error. */
 Value *lambda_op_sum(Value *list) {
     if (!list) fail("sum of null");
     if (list->tag == TAG_NIL) {
         lambda_release(list);
         return lambda_box_int(0);
+    }
+    if (list->tag != TAG_CONS) {
+        lambda_release(list);
+        fail_type("List", list);
+        return NULL;
     }
     Value *h = (Value *)(intptr_t)list->i;
     if (h && h->tag == TAG_FLOAT) return lambda_box_float(lambda_sum_f64(list));
@@ -2055,6 +2506,11 @@ Value *lambda_op_product(Value *list) {
     if (list->tag == TAG_NIL) {
         lambda_release(list);
         return lambda_box_int(1);
+    }
+    if (list->tag != TAG_CONS) {
+        lambda_release(list);
+        fail_type("List", list);
+        return NULL;
     }
     Value *h = (Value *)(intptr_t)list->i;
     if (h && h->tag == TAG_FLOAT) return lambda_box_float(lambda_product_f64(list));
@@ -2088,7 +2544,10 @@ Value *lambda_op_range(Value *lo, Value *hi) {
    until process exit; use only for shared immutable constants. */
 static void immortalize_graph(Value *v) {
     while (v) {
-        if (v->rc > 0) STAT_ADD(live_values, -1);
+        if (v->rc > 0) {
+            STAT_ADD(live_values, -1);
+            STAT_ADD(immortal_values, 1);
+        }
         v->rc = -1;
         if (v->tag != TAG_CONS) return;
         immortalize_graph((Value *)(intptr_t)v->i);
@@ -2464,7 +2923,13 @@ Value *lambda_arrayf_pmap_raw_loop(void *env, RawLoopFn fn, int64_t n) {
             args[t].lo = t * n / threads;
             args[t].hi = (t + 1) * n / threads;
             HANDLE h = CreateThread(NULL, 0, rawloop_thread_main, &args[t], 0, NULL);
-            if (h) handles[created++] = h;
+            if (h) {
+                handles[created++] = h;
+            } else {
+                /* A failed thread creation must not leave its range
+                   uncomputed: run that chunk on this thread instead. */
+                rawloop_run(&arg, args[t].lo, args[t].hi);
+            }
         }
         rawloop_run(&arg, 0, n / threads);
         if (created > 0) WaitForMultipleObjects((DWORD)created, handles, TRUE, INFINITE);
@@ -2477,8 +2942,13 @@ Value *lambda_arrayf_pmap_raw_loop(void *env, RawLoopFn fn, int64_t n) {
             args[t].a = &arg;
             args[t].lo = t * n / threads;
             args[t].hi = (t + 1) * n / threads;
-            if (pthread_create(&th[created], NULL, rawloop_thread_main, &args[t]) == 0)
+            if (pthread_create(&th[created], NULL, rawloop_thread_main, &args[t]) == 0) {
                 created++;
+            } else {
+                /* A failed thread creation must not leave its range
+                   uncomputed: run that chunk on this thread instead. */
+                rawloop_run(&arg, args[t].lo, args[t].hi);
+            }
         }
         rawloop_run(&arg, 0, n / threads);
         for (int i = 0; i < created; i++) pthread_join(th[i], NULL);
@@ -2488,8 +2958,12 @@ Value *lambda_arrayf_pmap_raw_loop(void *env, RawLoopFn fn, int64_t n) {
     }
     EnvHeader *h = (EnvHeader *)env;
     if (h) {
+        /* The generated environment destructor already calls
+           lambda_free_env, so freeing it again here was a double free in the
+           LAMBDA_RAWLOOP path.  Keep a direct free only for a destructor-less
+           environment. */
         if (h->dtor) h->dtor(env);
-        free(env);
+        else lambda_free_env(env);
     }
     return out;
 }
@@ -2530,8 +3004,10 @@ Value *lambda_arrayf_pmap_raw(void *env, double (*fn)(void *, int64_t), int64_t 
     }
     EnvHeader *h = (EnvHeader *)env;
     if (h) {
+        /* The generated environment destructor already calls
+           lambda_free_env; freeing it again here was a double free. */
         if (h->dtor) h->dtor(env);
-        free(env);
+        else lambda_free_env(env);
     }
     return out;
 }
@@ -3347,6 +3823,12 @@ declare i64 @lambda_arrayi_sum(%Value*)
 declare double @lambda_arrayf_sum(%Value*)
 declare i64 @lambda_arrayb_length(%Value*)
 declare %Value* @lambda_arrayb_clone(%Value*)
+declare %Value* @lambda_arrayg_of(%Value*)
+declare %Value* @lambda_arrayg_new(i64, %Value*)
+declare %Value* @lambda_arrayg_get(%Value*, i64)
+declare %Value* @lambda_arrayg_set(%Value*, i64, %Value*)
+declare i64 @lambda_arrayg_length(%Value*)
+declare %Value* @lambda_arrayg_clone(%Value*)
 declare %Value* @lambda_arrayi_pmap(%Value*, i64)
 declare %Value* @lambda_arrayf_pmap(%Value*, i64)
 declare %Value* @lambda_arrayf_map(%Value*, i64)
