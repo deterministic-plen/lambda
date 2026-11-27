@@ -1,0 +1,7 @@
+﻿include "lib/io.lambda"
+s0 → (io-state 0)
+ev → (io-event "tests/io/input.txt")
+o1 → (io-step s0 ev)
+o2 → (io-step (IOOutcome-state o1) ev)
+[(IOState-reads (IOOutcome-state o2)),
+ (match (IOOutcome-result o2) with Ok v: (str-len v) | Err c: 0)]

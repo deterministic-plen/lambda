@@ -58,10 +58,10 @@ PRIMITIVES = {
     "str->int", "int->str", "str->list", "str-len", "str-append",
     "str->arrayb", "arrayb->str",
     "str-byte-at", "str-byte-length", "str-valid-utf8",
-    "str-utf8-at", "str-codepoint-at", "str-codepoint-length",
+    "str-utf8-at", "str-codepoint-at", "str-char-at", "str-codepoint-length",
     "str->utf16le", "utf16le->str",
     "str->utf16le-bytes", "utf16le-bytes->str",
-    "read-file", "read-file-bytes", "write-file",
+    "read-file", "read-file-bytes", "read-file-io", "write-file",
     # process arguments
     "argc", "argv",
     # io / misc
@@ -82,7 +82,7 @@ PRIMITIVES = {
     # state-cycle debugger/profiler
     "cycle",
     # explicit world objects (impure, written in place)
-    "world-new", "world-get", "world-set", "world-length",
+    "world-new", "world-get", "world-set", "world-length", "world-clone",
     # optional terminal input (requires --input)
     "read-line", "read-int", "read-float",
 }
@@ -126,12 +126,14 @@ OP_CANON = {
     "str-byte-at": "str_byte_at", "str-byte-length": "str_byte_length",
     "str-valid-utf8": "str_valid_utf8",
     "str-utf8-at": "str_utf8_at", "str-codepoint-at": "str_codepoint_at",
+    "str-char-at": "str_codepoint_at",
     "str-codepoint-length": "str_codepoint_length",
     "str->utf16le": "str_to_utf16le", "utf16le->str": "utf16le_to_str",
     "str->utf16le-bytes": "str_to_utf16le_bytes", "utf16le-bytes->str": "utf16le_bytes_to_str",
     "read-file-bytes": "read_file_bytes",
     "argc": "argc", "argv": "argv",
-    "str-append": "str_append", "read-file": "read_file", "write-file": "write_file",
+    "str-append": "str_append", "read-file": "read_file",
+    "read-file-io": "read_file_io", "write-file": "write_file",
     "print": "print", "println": "println", "not": "not",
     "and": "and", "or": "or",
     "fix": "fix",
@@ -155,6 +157,7 @@ OP_CANON = {
     "cycle": "cycle",
     "world-new": "world_new", "world-get": "world_get",
     "world-set": "world_set", "world-length": "world_length",
+    "world-clone": "world_clone",
     "read-line": "read_line", "read-int": "read_int",
     "read-float": "read_float",
 }
@@ -765,6 +768,7 @@ class Parser:
         # atom, then patterns follow immediately.  The legacy form uses the
         # `with` keyword as a delimiter; both are accepted.
         subject = self.parse_atom()
+        subject = self.parse_index_suffix(subject)
         if self.check("keyword", "with"):
             self.pop()
         arms = []
@@ -849,10 +853,6 @@ class Parser:
             raise SyntaxErr(
                 "a match cannot mix literal patterns with variant patterns",
                 start)
-        if any(pat == "_" for pat, _ in arms):
-            raise SyntaxErr(
-                "a default/wildcard arm is only supported for literal values; "
-                "list every variant of an enum, sum or data type", start)
         match = Match(subject, arms, start)
         match.binders = binders
         return match
@@ -911,19 +911,25 @@ class Parser:
         return Block([Def(loop_name, lam, start)],
                      App(Var(loop_name, start), values, start), start)
 
-    def parse_application(self) -> Node:
-        first = self.parse_atom()
-        # `name[index]` is sugar for the Unicode-codepoint accessor.  It is
-        # only recognised when the '[' is adjacent to the name, so `f [1,2]`
-        # remains ordinary application to a list.
+    def parse_index_suffix(self, first: Node) -> Node:
+        """Parse ``name[index]`` when the bracket is adjacent to the name."""
         if (isinstance(first, Var) and self.check("punct", "[")
                 and self.peek().loc.line == first.loc.line
                 and self.peek().loc.col == first.loc.col + len(first.name)):
             self.pop()
             index = self.parse_expr()
             self.expect("punct", "]", "']'")
-            first = App(Var("str-codepoint-at", first.loc), [first, index],
-                        first.loc)
+            return App(Var("str-char-at", first.loc), [first, index],
+                       first.loc)
+        return first
+
+    def parse_application(self) -> Node:
+        first = self.parse_atom()
+        # `name[index]` is sugar for the Unicode-codepoint accessor.  It is
+        # only recognised when the '[' is adjacent to the name, so `f [1,2]`
+        # remains ordinary application to a list.  The same helper is used for
+        # match subjects, so `match s[0] 'a' → ...` works.
+        first = self.parse_index_suffix(first)
         args: List[Node] = []
         while True:
             tok = self.peek()

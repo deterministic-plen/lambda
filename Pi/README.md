@@ -64,6 +64,7 @@ On Linux/macOS use `./pi` (a thin `python -m pilang` wrapper).
 | `pi run FILE [--out DIR]` | execute through the C++ AST runtime |
 | `pi test PATHS` | run `.pi` test programs |
 | `pi view PATH` | open the universal WebGL viewer for output/data |
+| `pi plot [FILE] [--headless] [--out PPM]` | compile and run a Lambda GUI plotter (`examples/plotter.lambda`) |
 | `pi analyze FILE` | schemas, recovery capability, static ops, scheduler table |
 | `pi aot FILE -o EXE` | compile the linear subset to a native C executable |
 | `pi cpp FILE` | alias for the C++ runtime |
@@ -273,6 +274,10 @@ downsampled to at most 120 frames at 256 px for the report; the full-resolution
 layers, so phase-space scatter plots and histograms do not need a new viewer.
 
 `emit` still prints small values; payloads above 32 values are abbreviated.
+For a Lambda-native screen, `pi plot --headless --out plot.ppm` compiles and
+runs `examples/plotter.lambda`; `pi plot` without `--headless` opens the native
+window on Windows (elsewhere the PPM is handed to the desktop viewer).
+
 For interactive use, `pi view DIR` opens the universal WebGL viewer
 (see [docs/viewer.md](docs/viewer.md)); `report.html` remains a compatibility
 artifact.  Reporting is off unless `--out` is given, so the coordination path

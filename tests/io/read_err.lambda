@@ -1,0 +1,5 @@
+﻿include "lib/io.lambda"
+s0 → (io-state 0)
+ev → (io-event "tests/io/missing.txt")
+out → (io-step s0 ev)
+match (IOOutcome-result out) with Ok v: 0 | Err c: c

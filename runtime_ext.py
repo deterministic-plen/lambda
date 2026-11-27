@@ -35,6 +35,32 @@ void *lambda_record_bytes(Value *v) {
     return v->p;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* IO: read-file as a tagged IOResult value                            */
+/* ------------------------------------------------------------------ */
+/* Layout matches the boxed data declaration
+     data IOResult = Ok (value: String) | Err (code: Int)
+   i.e. [tag, payload].  `read_regular_file` returns NULL for directories,
+   unseekable files and open/read errors; empty regular files succeed. */
+Value *lambda_read_file_io(Value *pathv) {
+    if (!pathv || pathv->tag != TAG_STRING) fail_type("String", pathv);
+    const char *path = (const char *)pathv->p;
+    if (memchr(path, 0, (size_t)pathv->i) != NULL) {
+        lambda_release(pathv);
+        return lambda_cons(lambda_box_int(1), lambda_cons(lambda_box_int(1), lambda_nil()));
+    }
+    size_t len = 0;
+    char *buf = read_regular_file(path, &len);
+    lambda_release(pathv);
+    if (!buf) {
+        return lambda_cons(lambda_box_int(1), lambda_cons(lambda_box_int(1), lambda_nil()));
+    }
+    Value *content = lambda_string_new_len(buf, (int64_t)len);
+    free(buf);
+    return lambda_cons(lambda_box_int(0), lambda_cons(content, lambda_nil()));
+}
+
 /* ------------------------------------------------------------------ */
 /* State-cycle debugger / profiler                                     */
 /* ------------------------------------------------------------------ */
@@ -234,6 +260,18 @@ void lambda_gui_show(Value *gui) {
         fwrite(bgr, 1, 3, f);
     }
     fclose(f);
+#ifndef _WIN32
+    if (!headless) {
+        /* Cross-platform GUI fallback: hand the PPM to the desktop image
+           viewer.  Headless CI sets LAMBDA_GUI_HEADLESS=1 and never forks. */
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("xdg-open", "xdg-open", out, (char *)NULL);
+            execlp("open", "open", out, (char *)NULL);
+            _exit(127);
+        }
+    }
+#endif
     fprintf(stderr, "lambda-gui: wrote %s (%lldx%lld)\n", out,
             (long long)w, (long long)h);
     fflush(stderr);

@@ -19,10 +19,11 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from lambda_ast import (
-    App, Binding, Block, Borrow, Def, If, Lam, Lit, Match, Node, PRIM, Var,
-    walk,
+    App, Binding, Block, Borrow, DataCtor, Def, If, Lam, Lit, Match, Node, PRIM,
+    RecordLit, SumLit, Var, walk,
 )
 from typecheck import BOX, TCon, TList, TNumVar, TVar, prune, rep_of
+from errors import TypeError_
 
 # Primitives that only inspect their arguments.  A parameter passed to one of
 # these does not escape the callee.  Scalar arithmetic/comparison is included;
@@ -31,9 +32,12 @@ READONLY_PRIMS = {
     "arrayf-get", "arrayi-get", "arrayb-get", "arrayf-get-ro",
     "arrayi-get-ro", "arrayb-get-ro", "arrayf-length", "arrayi-length",
     "arrayb-length", "arrayf-sum", "arrayi-sum",
+    "head", "tail", "empty?",
     "str-len", "str-byte-at", "str-byte-length", "str-utf8-at",
     "str-codepoint-at", "str-codepoint-length", "str-valid-utf8",
-    "str->utf16le", "str->list",
+    "str->utf16le", "str->list", "str->arrayb", "str->utf16le-bytes",
+    "str->int", "str->float", "str-append", "arrayb->str",
+    "utf16le->str", "utf16le-bytes->str",
     "+", "-", "*", "/", "%", "==", "<", "<=", ">", ">=",
     "not", "and", "or", "bit-and", "bit-or", "bit-xor", "shl", "shr",
     "popcount", "abs", "int->float", "float->int",
@@ -465,6 +469,21 @@ def infer_borrows(program: Node) -> int:
             if explicit[(uid, i)]:
                 borrowed[(uid, i)] = True
 
+    # Tail calls with a temporary argument cannot use ``musttail`` when the
+    # callee parameter is borrowed: the temporary needs a caller-side release,
+    # which a tail call cannot perform.  Demote such parameters so recursive
+    # functions keep constant-stack behaviour (e.g. string/list accumulators).
+    forced_consume: Set[Tuple[int, int]] = set()
+    for uid, (d, lam) in funcs.items():
+        calls: List[App] = []
+        _collect_calls(lam.body, uid, calls)
+        for call in calls:
+            for pos, arg in enumerate(call.args):
+                if pos < len(lam.param_bindings) and not isinstance(arg, Var):
+                    forced_consume.add((uid, pos))
+    for key in forced_consume:
+        borrowed[key] = False
+
     changed = True
     while changed:
         changed = False
@@ -499,7 +518,7 @@ def infer_borrows(program: Node) -> int:
                 if isinstance(ptype, TList):
                     boxed = True
                 elif isinstance(ptype, TCon) and ptype.name in (
-                        "ArrayF", "ArrayI", "ArrayB"):
+                        "ArrayF", "ArrayI", "ArrayB", "String"):
                     boxed = True
             if borrowed.get((uid, i)) and not explicit.get((uid, i)):
                 if not boxed:
@@ -513,3 +532,83 @@ def infer_borrows(program: Node) -> int:
                     lam.param_borrows[i] = True
                 b.borrowed = True
     return count
+
+# ---------------------------------------------------------------------------
+# World linearity
+# ---------------------------------------------------------------------------
+def _is_world(t) -> bool:
+    t = prune(t) if t is not None else None
+    return isinstance(t, TCon) and t.name == "World"
+
+
+def check_world_linearity(program: Node) -> int:
+    """Enforce the nominal, consumed-world discipline.
+
+    World objects are linear per step: no alias bindings, no passing one world
+    twice to the same call, no storing a world in a container, and no returning
+    a parameter without an explicit ``world-clone``.  Array-style use-after-
+    consume is already rejected by code generation; this pass closes the alias
+    and retention holes that type inference alone cannot see.
+    """
+
+    errors: List[TypeError_] = []
+
+    def fail(message: str, loc) -> None:
+        errors.append(TypeError_(message, loc))
+
+    # Alias bindings and storing constructors.
+    for d in _iter_defs(program):
+        if d.binding is None or not _is_world(d.binding.type):
+            continue
+        if isinstance(d.value, Var) and _is_world(d.value.type):
+            fail(
+                f"world value '{d.name}' aliases another world; worlds are "
+                f"linear per step (use world-clone only to retain a snapshot)",
+                d.loc)
+        if isinstance(d.value, Borrow):
+            fail(f"cannot bind a borrow of a world as '{d.name}'", d.loc)
+
+    for n in walk(program):
+        if isinstance(n, App):
+            seen = set()
+            for a in n.args:
+                if not (isinstance(a, Var) and _is_world(a.type)):
+                    continue
+                if a.binding is None:
+                    continue
+                if a.binding.uid in seen:
+                    fail(
+                        "the same world value is passed twice to one call; "
+                        "worlds are consumed once per step", a.loc)
+                seen.add(a.binding.uid)
+            func = n.func
+            if (isinstance(func, Var) and func.binding is not None
+                    and func.binding.kind == PRIM
+                    and func.binding.name in ("cons", "array-set", "array-new",
+                                              "array-of")
+                    and any(_is_world(a.type) for a in n.args)):
+                fail("cannot store a world in a container; worlds are nominal "
+                     "linear state", n.loc)
+        if isinstance(n, (DataCtor, RecordLit, SumLit)):
+            if any(_is_world(a.type) for a in getattr(n, "args", ())):
+                fail("cannot store a world in a nominal value", n.loc)
+
+    # Returning a world parameter without cloning retains the previous state.
+    for n in walk(program):
+        if not isinstance(n, Lam):
+            continue
+        param_uids = {b.uid for b in n.param_bindings}
+        tail = n.body
+        while isinstance(tail, Block):
+            tail = tail.body
+        if isinstance(tail, Var) and tail.binding is not None:
+            if tail.binding.uid in param_uids and _is_world(tail.type):
+                fail(
+                    "returning a world parameter without world-clone retains "
+                    "the previous state; use world-clone for an explicit "
+                    "snapshot", tail.loc)
+
+    for err in errors[:20]:
+        raise err
+    return len(errors)
+

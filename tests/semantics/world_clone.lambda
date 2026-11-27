@@ -1,0 +1,5 @@
+﻿; The explicit retention path is world-clone; world-set consumes the original.
+w → (world-new 1)
+snapshot → (world-clone w)
+next → (world-set w 0 5)
+[(world-get snapshot 0), (world-get next 0)]

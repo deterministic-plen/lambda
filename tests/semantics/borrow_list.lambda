@@ -1,0 +1,2 @@
+﻿sum-list → (λxs. if (empty? xs) then 0 else (+ (head xs) (sum-list (tail xs))))
+(sum-list [1, 2, 3, 4])

@@ -530,7 +530,7 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TSTR], TBOOL))
     if name == "str-utf8-at":
         return mono(tfun([TSTR, TINT], TINT))
-    if name == "str-codepoint-at":
+    if name in ("str-codepoint-at", "str-char-at"):
         return mono(tfun([TSTR, TINT], TINT))
     if name == "str-codepoint-length":
         return mono(tfun([TSTR], TINT))
@@ -606,6 +606,8 @@ def primitive_scheme(name: str, mapping: Optional[Dict[str, Type]] = None) -> TS
         return mono(tfun([TCON_WORLD, TINT, TINT], TCON_WORLD))
     if name == "world-length":
         return mono(tfun([TCON_WORLD], TINT))
+    if name == "world-clone":
+        return mono(tfun([TCON_WORLD], TCON_WORLD))
     # Flat arrays: one RC buffer, no per-element wrappers.  `set` consumes the
     # array and returns the same buffer, so callers treat it linearly.
     # General boxed arrays.  Applications are typed by
@@ -1155,6 +1157,25 @@ class Inferencer:
         if isinstance(node, App):
             if (isinstance(node.func, Var) and node.func.binding is not None
                     and node.func.binding.kind == PRIM
+                    and node.func.binding.name == "read-file-io"):
+                io = self.adt_schemas.get("IOResult")
+                if io is None:
+                    raise TypeError_(
+                        "read-file-io needs the IOResult type; include "
+                        "\"lib/io.lambda\"", node.loc)
+                if len(node.args) != 1:
+                    raise TypeError_(
+                        "read-file-io expects one path argument", node.loc)
+                arg_t = self.infer(node.args[0], env)
+                try:
+                    unify(arg_t, TSTR)
+                except UnifyError as exc:
+                    raise TypeError_(
+                        f"read-file-io path must be String: {exc.message}",
+                        node.args[0].loc) from None
+                return io
+            if (isinstance(node.func, Var) and node.func.binding is not None
+                    and node.func.binding.kind == PRIM
                     and node.func.binding.name in ARRAY_PRIMS):
                 return self._infer_array_prim(node, env)
             func_t = self.infer(node.func, env)
@@ -1187,8 +1208,28 @@ class Inferencer:
                 seen = set()
                 tags = []
                 result_t = None
+                default_arm = None
                 for arm_idx, ((pattern, arm), binders) in enumerate(
                         zip(node.arms, node.arm_bindings)):
+                    if pattern in ("_", "default"):
+                        if default_arm is not None:
+                            raise TypeError_("duplicate default match arm", arm.loc)
+                        if binders:
+                            raise TypeError_(
+                                "a default arm cannot bind variant fields", arm.loc)
+                        default_arm = arm
+                        arm_t = self.infer(arm, env)
+                        if result_t is None:
+                            result_t = arm_t
+                        else:
+                            try:
+                                unify(result_t, arm_t)
+                            except UnifyError as exc:
+                                raise TypeError_(
+                                    f"match arms have different types: "
+                                    f"{show_type(result_t)} vs {show_type(arm_t)}",
+                                    arm.loc) from None
+                        continue
                     info = by_name.get(pattern)
                     if info is None:
                         raise TypeError_(
@@ -1217,10 +1258,22 @@ class Inferencer:
                                 f"match arms have different types: "
                                 f"{show_type(result_t)} vs {show_type(arm_t)}", arm.loc) from None
                 missing = [v for v, t, _ in pr.variants if t not in seen]
-                if missing:
+                if missing and default_arm is None:
                     raise TypeError_(
                         "non-exhaustive match; missing " + ", ".join(sorted(missing)),
                         node.loc)
+                if default_arm is not None:
+                    for variant, tag, _fields in pr.variants:
+                        if tag not in seen:
+                            node.arms.append((variant, default_arm))
+                            node.arm_bindings.append([])
+                            tags.append(tag)
+                            seen.add(tag)
+                pairs = list(zip(node.arms, node.arm_bindings))
+                node.arms = [(pat, arm) for (pat, arm), _b in pairs
+                             if pat not in ("_", "default")]
+                node.arm_bindings = [b for (pat, _arm), b in pairs
+                                     if pat not in ("_", "default")]
                 node.pattern_tags = tags
                 return result_t if result_t is not None else TUNIT
             if isinstance(pr, TSum):
@@ -1229,8 +1282,28 @@ class Inferencer:
                 seen = set()
                 tags = []
                 result_t = None
+                default_arm = None
                 for arm_idx, ((pattern, arm), binders) in enumerate(
                         zip(node.arms, node.arm_bindings)):
+                    if pattern in ("_", "default"):
+                        if default_arm is not None:
+                            raise TypeError_("duplicate default match arm", arm.loc)
+                        if binders:
+                            raise TypeError_(
+                                "a default arm cannot bind payload fields", arm.loc)
+                        default_arm = arm
+                        arm_t = self.infer(arm, env)
+                        if result_t is None:
+                            result_t = arm_t
+                        else:
+                            try:
+                                unify(result_t, arm_t)
+                            except UnifyError as exc:
+                                raise TypeError_(
+                                    f"match arms have different types: "
+                                    f"{show_type(result_t)} vs {show_type(arm_t)}",
+                                    arm.loc) from None
+                        continue
                     info = by_name.get(pattern)
                     if info is None:
                         raise TypeError_(
@@ -1262,10 +1335,22 @@ class Inferencer:
                                 arm.loc) from None
                 missing = [variant for variant, tag, _ in pr.variants
                            if tag not in seen]
-                if missing:
+                if missing and default_arm is None:
                     raise TypeError_(
                         "non-exhaustive match; missing "
                         + ", ".join(sorted(missing)), node.loc)
+                if default_arm is not None:
+                    for variant, tag, _fields in pr.variants:
+                        if tag not in seen:
+                            node.arms.append((variant, default_arm))
+                            node.arm_bindings.append([])
+                            tags.append(tag)
+                            seen.add(tag)
+                pairs = list(zip(node.arms, node.arm_bindings))
+                node.arms = [(pat, arm) for (pat, arm), _b in pairs
+                             if pat not in ("_", "default")]
+                node.arm_bindings = [b for (pat, _arm), b in pairs
+                                     if pat not in ("_", "default")]
                 node.pattern_tags = tags
                 return result_t if result_t is not None else TUNIT
 
@@ -1295,7 +1380,27 @@ class Inferencer:
             seen = set()
             tags = []
             result_t = None
+            default_arm = None
             for arm_idx, (pattern, arm) in enumerate(node.arms):
+                if pattern in ("_", "default"):
+                    if default_arm is not None:
+                        raise TypeError_("duplicate default match arm", arm.loc)
+                    if arm_idx < len(node.binders) and node.binders[arm_idx]:
+                        raise TypeError_(
+                            "a default arm cannot bind enum fields", arm.loc)
+                    default_arm = arm
+                    arm_t = self.infer(arm, env)
+                    if result_t is None:
+                        result_t = arm_t
+                    else:
+                        try:
+                            unify(result_t, arm_t)
+                        except UnifyError as exc:
+                            raise TypeError_(
+                                f"match arms have different types: "
+                                f"{show_type(result_t)} vs {show_type(arm_t)}",
+                                arm.loc) from None
+                    continue
                 if pattern not in variants:
                     raise TypeError_(
                         f"'{pattern}' is not a variant of enum {enum_name}",
@@ -1322,10 +1427,22 @@ class Inferencer:
                             f"{show_type(result_t)} vs {show_type(arm_t)}",
                             arm.loc) from None
             missing = [name for name, tag in variants.items() if tag not in seen]
-            if missing:
+            if missing and default_arm is None:
                 raise TypeError_(
                     "non-exhaustive match; missing "
                     + ", ".join(sorted(missing)), node.loc)
+            if default_arm is not None:
+                for name, tag in sorted(variants.items(), key=lambda kv: kv[1]):
+                    if tag not in seen:
+                        node.arms.append((name, default_arm))
+                        node.binders.append([])
+                        tags.append(tag)
+                        seen.add(tag)
+            pairs = list(zip(node.arms, node.binders))
+            node.arms = [(pat, arm) for (pat, arm), _b in pairs
+                         if pat not in ("_", "default")]
+            node.binders = [b for (pat, _arm), b in pairs
+                            if pat not in ("_", "default")]
             if not tags:
                 raise TypeError_("match needs at least one arm", node.loc)
             node.pattern_tags = tags

@@ -13,6 +13,10 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+python_bin="${PYTHON:-}"
+if [ -z "$python_bin" ]; then
+  if command -v python >/dev/null 2>&1; then python_bin=python; else python_bin=python3; fi
+fi
 cd "$root"
 
 cases=(
@@ -40,7 +44,7 @@ for src in "${cases[@]}"; do
   name="${name%.lambda}"
   exe="$workdir/$name"
   echo "== compile $src"
-  python lambda.py "$src" -o "$exe"
+  "$python_bin" lambda.py "$src" -o "$exe"
 
   log="$workdir/$name.valgrind.log"
   err="$workdir/$name.stderr"

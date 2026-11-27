@@ -185,6 +185,7 @@ def build(input_file: str, output: str, *, dynamic: bool = False,
     # Infer non-consuming parameters for functions whose parameters never
     # escape.  Explicit & annotations are preserved; `: linear` opts out.
     if not is_dynamic:
+        semantics.check_world_linearity(program)
         semantics.infer_borrows(program)
 
     compiler = Compiler(dynamic=is_dynamic, use_musttail=use_musttail, debug=debug,

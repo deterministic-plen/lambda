@@ -23,8 +23,8 @@ from parser import OP_CANON, PRIMITIVES
 
 IMPURE_PRIMITIVES = {
     "cycle",
-    "world_new", "world_get", "world_set", "world_length",
-    "print", "println", "read_file", "read_file_bytes", "read_line", "read_int", "read_float",
+    "world_new", "world_get", "world_set", "world_length", "world_clone",
+    "print", "println", "read_file", "read_file_bytes", "read_file_io", "read_line", "read_int", "read_float",
     "fix", "immortalize",
     "map", "pmap",
     # Arrays are a controlled low-level effect: a set consumes and mutates its
@@ -46,7 +46,7 @@ PRIM_ARITY = {
     "eq": 2, "lt": 2, "le": 2, "gt": 2, "ge": 2,
     "cons": 2, "head": 1, "tail": 1, "empty": 1, "nil": 0,
     "str_to_int": 1, "int_to_str": 1, "str_to_list": 1, "str_len": 1,
-    "str_append": 2, "read_file": 1, "print": 1, "println": 1, "not": 1,
+    "str_append": 2, "read_file": 1, "read_file_io": 1, "print": 1, "println": 1, "not": 1,
     "str_to_arrayb": 1, "arrayb_to_str": 1, "argc": 0, "argv": 1,
     "str_byte_at": 2, "str_byte_length": 1, "str_valid_utf8": 1,
     "str_utf8_at": 2, "str_codepoint_at": 2, "str_codepoint_length": 1,
@@ -61,7 +61,7 @@ PRIM_ARITY = {
     "bit_and": 2, "bit_or": 2, "bit_xor": 2, "bit_not": 1, "and": 2, "or": 2,
     "shl": 2, "shr": 2, "popcount": 1,
     "range": 2, "map": 2, "pmap": 2, "immortalize": 1, "cycle": 1,
-    "world_new": 1, "world_get": 2, "world_set": 3, "world_length": 1,
+    "world_new": 1, "world_get": 2, "world_set": 3, "world_length": 1, "world_clone": 1,
     "arrayf": 2, "arrayi": 2, "arrayb": 2,
     "array_of": 1, "array_new": 2, "array_get": 2, "array_set": 3,
     "array_length": 1, "array_clone": 1,

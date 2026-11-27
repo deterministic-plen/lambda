@@ -1,0 +1,4 @@
+﻿; Worlds are linear per step: aliasing a world binding is rejected.
+w → (world-new 1)
+w2 → w
+(world-get w2 0)

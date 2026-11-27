@@ -1,0 +1,27 @@
+; io.lambda -- input/output as an explicit state machine.
+;
+;   io-step : (IOState, IOEvent) -> IOOutcome
+;
+; The world is nominal and consumed: `IOState` is threaded through steps and
+; `IOEvent` (a path/request) is consumed by the step.  The result is a tagged
+; union (`Ok` with the file contents, or `Err` with an error code), so callers
+; never have to guess whether an empty string meant success or failure.
+;
+; `read-file` remains as a legacy convenience primitive; new code should use
+; `io-step`.  File reads are regular-file reads (directories and unseekable
+; files are errors).
+
+data IOResult = Ok (value: String) | Err (code: Int)
+
+type IOState = (reads: Int)
+type IOEvent = (path: String)
+type IOOutcome = (state: IOState, result: IOResult)
+
+io-state → (λn: Int. (IOState n))
+io-event → (λpath: String. (IOEvent path))
+
+; One cycle: consume the state and event, return the next state plus result.
+io-step → (λstate: IOState event: IOEvent.
+  (IOOutcome
+    (IOState (+ (IOState-reads state) 1))
+    (read-file-io (IOEvent-path event))))

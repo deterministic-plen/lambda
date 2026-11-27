@@ -1,0 +1,15 @@
+description: 'IO as f(state, event) -> (new_state, tagged result)'
+cases:
+- name: read_ok
+  stdout: '5
+
+    '
+- name: read_err
+  stdout: '1
+
+    '
+
+- name: state_thread
+  stdout: '[2, 5]
+
+    '

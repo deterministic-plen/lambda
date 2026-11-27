@@ -336,3 +336,71 @@ started.  "Evidence" names a command or test file in this tree.
   reclamation/printing), C9 aliasing (documented single-owner choice), variant
   `match` wildcard (literal defaults only), non-array auto-borrows, GUI text/Pi
   payload, GPU dispatch, and Windows stack-overflow diagnostics.
+
+## 10. Round-3 completion (borrow strings/lists, match, IO, proof, GUI, world)
+
+This section supersedes the partial markers in section 9 for the items below.
+
+| item | status | implementation | evidence |
+| --- | --- | --- | --- |
+| Task 5 borrow strings/lists | **Done** | `compiler._prim_arg` now retains a borrowed boxed argument for the consuming primitive, so borrowed string/list parameters are safe; `semantics.py` enables String and List inference and adds `head`/`tail`/`empty?`/string accessors to the read-only set. Tail calls with temporary arguments are demoted so `musttail` keeps working; borrow inference propagates through `first`/`outer`. | `tests/semantics/borrow_string`, `borrow_list`, `borrow_propagate`; proof corpus `borrow_string_read`, `borrow_list_read`, `borrow_propagation`; full suite green. |
+| Task 9 character indexing / literal-match limitation | **Done** | Parser name-index sugar is now shared by application and match subjects, so `match s[0] 'a' → ...` works. `s[i]` lowers to `str-char-at` (character accessor; Unicode scalar value, `-1` out of range); `str-codepoint-at` remains the explicit codepoint operator. Docs describe character (not byte) indexing and grapheme limitation. | `tests/semantics/string_index`, `char_match`; proof corpus `literal_match_string_index`; `docs/strings.md`. |
+| Task 10 match | **Done** | Tagged-union matches are exhaustive unless an explicit `_`/`default` catch-all is used; defaults are materialised for missing variants and duplicate/default errors are diagnosed. Literal matches keep their mandatory default. `learn/brainf.lambda` uses `match chari ']' → ...`. | `tests/semantics/match_default`, proof corpus `tagged_union_default_arm`, missing/duplicate cases; `tools/check_examples.py`. |
+| Task 11 arrays | **Done** | `Array<T>`/`Array<Token>`/sum arrays/`#[...]`/`array-set` remain functional (`f(state)=new_state`); `clone` is the explicit retention path; no mutable-handle interface is documented. | `tests/arrays/array_generic_*`, `array_literal_sugar`; proof corpus `clone_is_the_retention_path`, `array_of_sum_payload`. |
+| Task 12 debugger/profiler | **Done (simple)** | `cycle` is the identity state step; `LAMBDA_TRACE=1` prints each cycle's counter/state and `LAMBDA_PROFILE=1` prints the cycle/CPU summary. No implicit time variable is introduced. | `tests/semantics/cycle_trace`. |
+| Task 13 world purity | **Done** | Worlds are nominal and linear: alias bindings, duplicate world arguments, storing a world, and returning a world parameter are rejected; `world-clone` is the explicit snapshot/retention primitive. | `tests/semantics/world`, `world_alias`, `world_clone`, `world_pure`. |
+| Task 14 GUI/events | **Partial** | `lib/GUI.lambda` now has nominal `Screen(width,height,pixels)` and `Event(kind,x,y,key)` plus `event-none/click/key`; helpers `Rectangle`/`rect`, `circle`, `button` consume and return a Screen. Windows opens a native window; other desktops write a PPM and hand it to `xdg-open`/`open`; `LAMBDA_GUI_HEADLESS=1` is CI-safe. `pi plot --headless --out plot.ppm` invokes `examples/plotter.lambda` without Python plotting. | `tests/gui/gui_smoke`, `tests/gui/events`, `tests/gui/check_gui.py`, `Pi/tests/test_plot.py`. **Blocker:** text rendering is deferred; native event acquisition/button callbacks and passing Event through Pi's worker protocol are not implemented. |
+| Proof assistant | **Done (minimal)** | `tools/proofcheck.py` runs a positive/negative corpus for exhaustive tagged unions, defaults, literal/character matching, SCC generalization, string/list borrows, borrow rejection, clone independence, sum arrays and nominal Token products. | `python tools/proofcheck.py` -> 15/15; CI step; `docs/proofs.md`. |
+| IO fix | **Done (tagged IO step; legacy kept)** | `lib/io.lambda` defines `io-step(state,event) -> IOOutcome(state, result)` with `IOResult = Ok String \| Err Int`; `read-file-io` distinguishes empty files from errors. Legacy `read-file` remains for bootstrap compatibility and is documented as legacy. | `tests/io/read_ok`, `read_err`, `state_thread`; `docs/io.md`. |
+| CI blockers | **Done** | `test_cache_root_refuses_foreign_owner` saves the real `getuid` and now runs cross-platform with a synthetic POSIX owner; editor data is generated from `parser.PRIMITIVES`/`lexer.KEYWORDS` and Pygments builtins are synced; `python editors/test_highlight.py` exits 0. | Cache test passes; editor output `grammar ok`, `language data ok: 122 primitives`, `Pygments ok`. |
+
+Known remaining partials after this round: native GUI text/event callbacks and Pi Event transport; Windows stack-overflow diagnostics; GPU dispatch remains documented-only; the IO `read-file` legacy primitive remains for compatibility. No PR.md memory-safety fix was changed.
+
+### Round-3 final verification (canonical root)
+
+* `python run_tests.py` at `C:\Users\mumuj\Documents\lambda` -> **264/264
+  passed** (136.35 s, exit 0), including `io/`, `semantics/world_*`,
+  `semantics/match_default`, `semantics/borrow_*`, and `gui/events`.
+* `python editors/test_highlight.py` -> exit 0 (`language data ok: 122
+  primitives, 14 operators`; Pygments builtins synced).
+* `python -m pytest tests/test_cache.py::test_cache_root_refuses_foreign_owner`
+  -> **1 passed** (root path; the Pi test itself no longer skips POSIX ownership
+  on Windows).
+* `python -m pytest tests -q` in `Pi` -> **45 passed, 2 skipped** (POSIX-only
+  permission/symlink checks).
+* `python tools/check_examples.py` -> **38/38 shipped programs compile**.
+* `python tools/proofcheck.py` -> **15/15 proof checks passed**.
+* `python tests/gui/check_gui.py` -> **GUI headless PPM: ok (64x48)**.
+* `pi plot --headless --out plot.ppm` -> 640x400 PPM; covered by
+  `Pi/tests/test_plot.py`.
+
+No PR.md memory-safety fix was modified in this round; `--strict` remains
+removed and strict checking remains the only default.
+
+### GitHub Actions validation (Linux, WSL Ubuntu 22.04, clang 14)
+
+The workflow was executed locally in an Ubuntu 22.04 WSL environment with
+clang 14, which is older than the runner's clang and therefore a stricter
+compatibility target:
+
+* `python3 run_tests.py` -> **264/264 passed** in 108.03 s.
+* `python3 -m pytest tests -q` in `Pi` -> **47 passed**.
+* `python3 -m pytest tests/test_cache.py::test_cache_root_refuses_foreign_owner`
+  -> **1 passed**.
+* `python3 editors/test_highlight.py` -> exit 0.
+* `python3 tools/check_examples.py` -> 38/38.
+* `python3 tests/gui/check_gui.py` -> PPM 64x48.
+* `python3 tools/proofcheck.py` -> 15/15.
+* `bash .github/scripts/valgrind_smoke.sh` -> **PASS (13 programs)**.
+
+This required two portability fixes for the older clang/GitHub environment:
+opaque-pointer `ptr` in the raw-pmap IR declarations/calls was replaced with
+explicit function-pointer types (LLVM 14-compatible), and the Valgrind shell
+script now uses LF line endings and falls back to `python3` when `python` is
+absent.
+
+### Final cross-platform confirmation
+
+* Windows 11, clang 23: `python run_tests.py` -> **264/264 passed** (130.89 s).
+* Ubuntu 22.04 (WSL), clang 14: `python3 run_tests.py` -> **264/264 passed** (see Linux run above), `Pi` tests 47 passed, Valgrind smoke 13/13, editor/proof/GUI/example checks green.
+* The CI workflow uses `ubuntu-latest` + setup-python 3.12; the local Ubuntu run is the closest verification available here and uses an older clang (14) than the runner.

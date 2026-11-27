@@ -1,0 +1,3 @@
+﻿len → (λs: String. (str-len s))
+a → (str-append "ab" "cd")
+(len a)

@@ -1,0 +1,3 @@
+﻿first → (λxs. (head xs))
+outer → (λxs. (first xs))
+outer [7, 8, 9]

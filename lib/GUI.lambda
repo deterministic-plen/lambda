@@ -1,7 +1,7 @@
 ; GUI.lambda -- a tiny framebuffer GUI library.
 ;
-; The screen is a `GUI` product carrying a width, a height and an ArrayB of
-; width*height*3 bytes in B,G,R order.  Drawing functions consume the GUI and
+; The screen is a `Screen` product carrying a width, a height and an ArrayB of
+; width*height*3 bytes in B,G,R order.  Drawing functions consume the Screen and
 ; return the updated value (arrays are single-owner), so a scene is built as a
 ; linear chain of calls:
 ;
@@ -10,13 +10,15 @@
 ;   g2 → (button g1 150 10 120 40 "Go")
 ;   g2
 ;
-; Returning a GUI value from the program opens a native window on Windows.
+; Returning a Screen value from the program opens a native window on Windows.
 ; On other platforms (or with LAMBDA_GUI_HEADLESS=1) it writes a PPM image to
 ; LAMBDA_GUI_OUT (default gui.ppm), which keeps programs testable in CI.
 
-type GUI = (width: Int, height: Int, pixels: ArrayB)
+enum EventKind (None, Click, Key, Quit)
+type Event = (kind: EventKind, x: Int, y: Int, key: Int)
+type Screen = (width: Int, height: Int, pixels: ArrayB)
 
-canvas → (λw: Int h: Int. (GUI w h (arrayb (* (* w h) 3) 0)))
+canvas → (λw: Int h: Int. (Screen w h (arrayb (* (* w h) 3) 0)))
 
 ; plot one pixel into an existing buffer, without re-matching the GUI wrapper
 plot-px → (λw: Int px: ArrayB x: Int y: Int color: Int.
@@ -53,24 +55,32 @@ circle-rows → (λw: Int px: ArrayB cx: Int cy: Int r: Int r2: Int y: Int color
   else (circle-rows w (circle-row w px cx cy r2 (- cx r) (+ cx r) y color)
                      cx cy r r2 (+ y 1) color))
 
-gui-plot → (λg: GUI x: Int y: Int color: Int.
-  match g with GUI w h px:
-    (GUI w h (plot-px w px x y color)))
+gui-plot → (λg: Screen x: Int y: Int color: Int.
+  match g with Screen w h px:
+    (Screen w h (plot-px w px x y color)))
 
 ; Filled axis-aligned rectangle.
-Rectangle → (λg: GUI x0: Int y0: Int rw: Int rh: Int color: Int.
-  match g with GUI w h px:
-    (GUI w h (rect-fill w px x0 y0 rw rh y0 color)))
+Rectangle → (λg: Screen x0: Int y0: Int rw: Int rh: Int color: Int.
+  match g with Screen w h px:
+    (Screen w h (rect-fill w px x0 y0 rw rh y0 color)))
 
 ; Filled circle (integer squared-distance test).
-circle → (λg: GUI cx: Int cy: Int r: Int color: Int.
-  match g with GUI w h px:
-    (GUI w h (circle-rows w px cx cy r (* r r) (- cy r) color)))
+circle → (λg: Screen cx: Int cy: Int r: Int color: Int.
+  match g with Screen w h px:
+    (Screen w h (circle-rows w px cx cy r (* r r) (- cy r) color)))
+
+rect → Rectangle
 
 ; A beveled button rectangle.  The label is accepted for API stability; this
 ; framebuffer layer draws the widget chrome and leaves glyph rasterisation to
 ; the native windowing layer.
-button → (λg: GUI x: Int y: Int w: Int h: Int label: String.
+button → (λg: Screen x: Int y: Int w: Int h: Int label: String.
   shaded → (Rectangle g x y w h 2105376)
   inner → (Rectangle shaded (+ x 2) (+ y 2) (- w 4) (- h 4) 14737632)
   (Rectangle inner (+ x 2) (+ y 2) (- w 4) 2 16777215))
+
+; Event values are nominal inputs: a button/pointer event carries screen
+; coordinates; key events carry the character codepoint in `key`.
+event-none → (Event None 0 0 0)
+event-click → (λx: Int y: Int. (Event Click x y 0))
+event-key → (λch: Int. (Event Key 0 0 ch))

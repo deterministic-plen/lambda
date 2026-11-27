@@ -67,3 +67,33 @@ cases:
   stdout: 's
 
     '
+
+- name: borrow_string
+  stdout: '4
+
+    '
+- name: borrow_list
+  stdout: '10
+
+    '
+- name: char_match
+  stdout: '[1, 2, 0]
+
+    '
+
+- name: world_alias
+  compile_fail: worlds are linear per step
+- name: world_clone
+  stdout: '[0, 5]
+
+    '
+
+- name: match_default
+  stdout: '[7, 0]
+
+    '
+
+- name: borrow_propagate
+  stdout: '7
+
+    '

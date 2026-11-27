@@ -74,12 +74,37 @@ def test_cache_root_refuses_symlink(tmp_path, monkeypatch):
 
 
 def test_cache_root_refuses_foreign_owner(tmp_path, monkeypatch):
-    if os.name == "nt":
-        pytest.skip("POSIX ownership")
     root = tmp_path / "cache"
     root.mkdir()
     monkeypatch.setenv("PI_CACHE_DIR", str(root))
-    monkeypatch.setattr(cache_mod.os, "getuid", lambda: os.getuid() + 1)
+    if os.name == "nt":
+        # Windows has no POSIX uid; exercise the same ownership branch with a
+        # synthetic POSIX stat so the security check is covered on every host.
+        import stat as stat_mod
+        import types
+        fake = types.SimpleNamespace(
+            st_mode=stat_mod.S_IFDIR | 0o700, st_uid=1001,
+            st_file_attributes=0)
+
+        class PosixOS:
+            name = "posix"
+
+            def __getattr__(self, attr):
+                return getattr(os, attr)
+
+            def lstat(self, path):
+                return fake
+
+            def getuid(self):
+                return 1000
+
+        monkeypatch.setattr(cache_mod, "os", PosixOS())
+    else:
+        # Save the real function before patching: a lambda that calls
+        # os.getuid() would resolve to the patched attribute and recurse.
+        real_getuid = os.getuid
+        monkeypatch.setattr(cache_mod.os, "getuid",
+                            lambda real=real_getuid: real() + 1)
     with pytest.raises(CacheError):
         cache_root()
 

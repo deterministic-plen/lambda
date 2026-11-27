@@ -1,4 +1,4 @@
-"""The `pi` command: check | build | run | test | analyze  (spec 15.3)."""
+"""The `pi` command: check | build | run | plot | test | analyze  (spec 15.3)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import subprocess
+import tempfile
 from typing import List
 
 from . import syntax as S
@@ -148,6 +149,38 @@ def cmd_view(a) -> int:
     return subprocess.call(cmd)
 
 
+
+def cmd_plot(a) -> int:
+    """Compile and run a Lambda GUI plotter (no Python plotting code).
+
+    The compiled plotter returns a Screen/GUI value.  On Windows it opens a
+    window; with --headless (or --out) the runtime writes a PPM image instead,
+    which is the CI-safe path.  Pi only orchestrates; rendering is Lambda's.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    source = a.file
+    if not os.path.isabs(source):
+        source = os.path.join(root, source)
+    if not os.path.exists(source):
+        print(f"pi plot: no such plotter: {source}", file=sys.stderr)
+        return 1
+    workdir = tempfile.mkdtemp(prefix="pi-plot-")
+    exe = os.path.join(workdir, "plotter.exe" if os.name == "nt" else "plotter")
+    compile_cmd = [sys.executable, os.path.join(root, "lambda.py"), source,
+                   "-o", exe]
+    proc = subprocess.run(compile_cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
+        return 1
+    env = dict(os.environ)
+    if a.out:
+        env["LAMBDA_GUI_HEADLESS"] = "1"
+        env["LAMBDA_GUI_OUT"] = a.out
+    elif a.headless:
+        env["LAMBDA_GUI_HEADLESS"] = "1"
+    return subprocess.call([exe], env=env)
+
+
 def cmd_test(a) -> int:
     """Run every `*.pi` program named test_* / *_test under the given paths (each must exit 0)."""
     files: List[str] = []
@@ -246,6 +279,14 @@ def main(argv=None) -> int:
     p.add_argument("--no-open", action="store_true", dest="no_open", help="do not open a browser")
     p.add_argument("--port", type=int, default=0, help="port (0 chooses a free port)")
     p.set_defaults(fn=cmd_view)
+
+    p = sub.add_parser("plot", help="compile and run a Lambda GUI plotter")
+    p.add_argument("file", nargs="?", default="examples/plotter.lambda",
+                   help="Lambda plotter source (default examples/plotter.lambda)")
+    p.add_argument("--out", metavar="FILE", help="write a PPM image here (headless)")
+    p.add_argument("--headless", action="store_true",
+                   help="do not open a native window; write gui.ppm")
+    p.set_defaults(fn=cmd_plot)
 
     p = sub.add_parser("test", help="run .pi test programs")
     p.add_argument("paths", nargs="+")

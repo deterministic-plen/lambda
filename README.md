@@ -243,8 +243,11 @@ area → (λs: Shape.
     | _ → "other")
   ```
 
-  Character literals are Ints: `'['` is 91 and `']'` is 93.  This replaces the
-  old `if (== c 91)` chains; see `learn/brainf.lambda`.
+  Character literals are Ints: `'['` is 91 and `']'` is 93.  The subject may
+  use character indexing: `match s[0] 'a' → ... | _ → ...`.  Tagged-union
+  matches must list every variant unless a `_`/`default` catch-all is
+  explicitly intended; a missing arm without a default is a compile error.
+  This replaces the old `if (== c 91)` chains; see `learn/brainf.lambda`.
 
 A named data product with an enum field is the Token idiom:
 
@@ -404,7 +407,11 @@ ss → #["a", "b"]              ; Array<String>, boxed ArrayG
 
 `#[...]` is Array literal sugar (Lean-style).  `array-new n init` creates `n`
 slots holding `init`; `array-set` follows the same single-owner convention as
-the numeric setters, while `array-get` returns a retained element.
+the numeric setters and returns the new array, while `array-get` returns a
+retained element.  Every user-facing array operation has the
+`f(state) = new_state` shape; there is no mutable-handle API.  Copy-on-write
+inside `Array<T>` and bump allocation inside the flat arrays are implementation
+details behind that interface.
 
 `Array<Complex>` / `Array<Vec3>` of float-only products is still the planar
 `ArrayF` SoA convention with one component plane per field (see
@@ -486,18 +493,23 @@ accepts trailing junk, with no failure signal (PR 3B).
 ```
 
 **String indexing.**  `s[i]` (no space before `[`) is sugar for
-`(str-codepoint-at s i)`: it returns the Unicode codepoint at *codepoint* index
-`i`, or `-1` when out of range.  Byte offsets remain available through
-`str-byte-at`; UTF-8 byte offsets through `str-utf8-at`.
+`(str-char-at s i)`: it returns the **character** at character index `i` (its
+Unicode scalar value, an `Int`), or `-1` when out of range.  Indexing counts
+characters, not UTF-8 bytes: `'→'` and `'λ'` are one index each.  A combining
+mark is a separate scalar, so grapheme-cluster segmentation is not attempted.
+`str-codepoint-at` is the explicit codepoint operator (same scalar index);
+`str-byte-at` and `str-utf8-at` expose byte offsets for binary formats.  A space
+before `[` keeps ordinary application (`f [1,2]` passes a list), and a match can
+use indexing directly: `match s[0] 'a' → ... | _ → ...`.
 
 ```lambda
 s → "A😀é"
 [s[0], s[1], s[2], s[9]]       ; [65, 128512, 233, -1]
 ```
 
-Because both bytes and codepoints are exposed, an FSM can choose its alphabet
-explicitly: `s[i]` for codepoints, `(str-byte-at s i)` for bytes.  A space
-before `[` keeps ordinary application (`f [1,2]` passes a list).
+An FSM can choose its alphabet explicitly: `s[i]`/`(str-char-at s i)` for
+characters, `(str-codepoint-at s i)` for the same Unicode scalar values, and
+`(str-byte-at s i)` for raw bytes.
 
 See [`docs/strings.md`](docs/strings.md) for the full byte/UTF-8/UTF-16 API.
 
@@ -556,13 +568,15 @@ a → (arrayi-set (arrayi 3 0) 1 9)
 
 `&` is the borrow marker; `bit-and` is bitwise-and.  `&x` requires adjacency (`& x`
 is the binary operator).  Borrow inspection is typed-mode only; the boxed
-fallback clears borrow markers.  Borrows are also inferred: an `ArrayF`/`ArrayI`/
-`ArrayB` parameter that is only inspected (not returned, stored, captured or
-passed to a consuming parameter) is treated as borrowed automatically, and the
-inference propagates through calls to other inferred-borrowed parameters.  Use
+fallback clears borrow markers.  Borrows are also inferred: an `ArrayF`/`ArrayI`/`ArrayB`, `String` or list
+parameter that is only inspected (not returned, stored, captured or passed to a
+consuming parameter) is treated as borrowed automatically, and the inference
+propagates through calls to other inferred-borrowed parameters.  A primitive
+that needs ownership receives a retained copy while the caller keeps its
+borrow, so string/list primitives no longer consume the inspected wrapper.  Use
 `: linear` to keep a parameter consuming, or `&` to require a borrow
-explicitly.  Strings, lists and data values still need an explicit `&` because
-their primitive ABI currently consumes the wrapper.
+explicitly; data-backed products still use `&` when a non-consuming view is
+wanted.
 
 ### Recursion and blocks
 
@@ -605,10 +619,21 @@ w → (world-new 1)
 ```
 
 `world-set` consumes the world and returns it (the same buffer when it is
-uniquely owned), so a loop threads the world through its tail calls.  A `pure`
-parameter rejects functions that touch a world; that is the type checker's
-enforcement point for keeping logic pure.  Like arrays, a world must not be
-aliased after a write.
+uniquely owned), so a loop threads the world through its tail calls.  Worlds
+are nominal and linear per step: alias bindings (`w2 → w`), passing the same
+world twice to one call, storing a world in a container, and returning a world
+parameter without `world-clone` are all rejected.  The only explicit retention
+path is `world-clone`, which returns an independent snapshot:
+
+```lambda
+w0 → (world-new 1)
+snapshot → (world-clone w0)
+next → (world-set w0 0 5)
+[(world-get snapshot 0), (world-get next 0)]   ; [0, 5]
+```
+
+A `pure` parameter rejects functions that touch a world; that is the type
+checker's enforcement point for keeping logic pure.
 
 ### Debugger and profiler
 
@@ -637,9 +662,10 @@ counters are a future extension.
 
 ### GUI
 
-`lib/GUI.lambda` is a framebuffer library.  A GUI is a data-backed product
-`type GUI = (width: Int, height: Int, pixels: ArrayB)` holding
-`width*height*3` B,G,R bytes; helpers consume and return the GUI:
+`lib/GUI.lambda` is a framebuffer library.  A screen is a nominal data-backed
+product `type Screen = (width: Int, height: Int, pixels: ArrayB)` holding
+`width*height*3` B,G,R bytes, plus a nominal `Event` (`EventKind`, coordinates,
+key) for input; helpers consume and return the Screen:
 
 ```lambda
 include "lib/GUI.lambda"
@@ -651,15 +677,15 @@ g3 → (button g2 10 120 120 40 "OK")
 g3
 ```
 
-Returning a GUI value from the program opens a Win32 window (close it or press
-Escape).  On other platforms, or with `LAMBDA_GUI_HEADLESS=1`, the runtime
-writes a binary PPM to `LAMBDA_GUI_OUT` (default `gui.ppm`) instead, which keeps
-GUI programs testable in CI.  The helpers are `Rectangle`, `circle` and
+Returning a Screen/GUI value from the program opens a Win32 window (close it or
+press Escape).  On other platforms, or with `LAMBDA_GUI_HEADLESS=1`, the runtime writes a
+binary PPM to `LAMBDA_GUI_OUT` (default `gui.ppm`) and hands it to the desktop
+image viewer when a display is present; headless CI stays file-only.  The helpers are `Rectangle`/`rect`, `circle` and
 `button`; all three are ordinary Lambda functions in `lib/GUI.lambda`.
 [`examples/plotter.lambda`](examples/plotter.lambda) draws a sine plot this way;
 the full API is in [`docs/gui.md`](docs/gui.md).
-Pi can invoke a Lambda plotter by compiling and running it; passing a GUI back
-through the Pi worker protocol is not implemented yet.
+Pi invokes the same Lambda plotter with `pi plot --headless --out plot.ppm`;
+passing an `Event` back through the worker protocol is deferred.
 
 ### Includes
 
@@ -776,13 +802,20 @@ data-parallel primitive, and there are no domain-specific stencil primitives.
 
 ## Files and streams
 
-`read-file : String -> String` reads a **regular** file and returns its bytes as
-a string (the string is empty on error; directories and unseekable files are
-rejected by the PR 2.2 fix).  `write-file : String × ArrayB -> Int` writes
-bytes and returns the count, or `-1` on failure (including a failed `fclose`,
-PR 2.1); it is the bootstrap-oriented file writer.  Path strings must not embed
-NUL bytes: the file primitives reject such paths instead of silently truncating
-them (PR 2.3).
+New code should model IO as a state machine: `lib/io.lambda` provides
+`io-step : (IOState, IOEvent) -> IOOutcome`, where the outcome carries the next
+nominal state and a **tagged** `IOResult` (`Ok String` / `Err Int`).  This makes
+an empty file distinguishable from a failed read and keeps effects in the
+`f(state, event) = new_state` discipline.  See [`docs/io.md`](docs/io.md) and
+`tests/io/`.
+
+`read-file : String -> String` is the legacy convenience primitive: it reads a
+**regular** file and returns its bytes as a string (empty on error; directories
+and unseekable files are rejected).  `write-file : String × ArrayB -> Int`
+writes bytes and returns the count, or `-1` on failure (including a failed
+`fclose`, PR 2.1); it is the bootstrap-oriented file writer.  Path strings must
+not embed NUL bytes: the file primitives reject such paths instead of silently
+truncating them.
 
 `argc`/`argv` expose the command line: `(argc)` is the argument count and
 `(argv i)` is argument `i` (the program name is argument 0).  An out-of-range
@@ -823,6 +856,7 @@ and `.frames.bin` animations; `pi view PATH` is the Pi shortcut.  See
 | `lib/numerics.lambda` | integer powers and numerical differentiation |
 | `lib/statistics.lambda` | mean, variance, min/max |
 | `lib/list.lambda` | list utilities |
+| `lib/io.lambda` | `io-step(state,event) -> IOOutcome`, tagged `IOResult` |
 | `lib/prime.lambda` | primality and sieving helpers |
 | `lib/stream.lambda` | binary stream framing |
 | `lib/GUI.lambda` | framebuffer GUI: `canvas`, `Rectangle`, `circle`, `button` |
@@ -892,6 +926,9 @@ item; this checkout has no Git metadata, so the bit cannot be set here).
 ```sh
 python run_tests.py            # run the whole suite (needs PyYAML)
 python run_tests.py --list     # show discovered cases; prints the current count
+python tools/proofcheck.py     # type-system soundness corpus (see docs/proofs.md)
+python tools/check_examples.py # compile every shipped program
+python tests/gui/check_gui.py  # headless GUI/PPM smoke test
 ```
 
 The suite compiles, runs and leak-checks every discovered case; successful runs

@@ -30,6 +30,7 @@ of the string; prefer `str-byte-length` for inspection).
 (str-codepoint-at s 0)     ; 65
 (str-codepoint-at s 1)     ; 128512 (😀)
 (str-codepoint-at s 2)     ; 233 (é)
+(str-char-at s 1)          ; 128512 — the character accessor used by s[1]
 (str-utf8-at s 1)          ; 128512 — byte offset -> scalar
 (str-valid-utf8 s)         ; true / false
 ```
@@ -39,11 +40,14 @@ Invalid UTF-8 bytes are exposed as `-1`; they count as one position for
 offset; `str-codepoint-at` takes a **scalar index**.
 
 Ruby-style `string[a]` indexing is supported when the `[` is adjacent to a
-string-valued name: `s[2]` is `(str-codepoint-at s 2)` and returns the Unicode
-codepoint at **scalar index** 2, or `-1` when out of range.  It is deliberately
-the codepoint operation, matching `str-codepoint-at`; use `str-byte-at` and
-`str-utf8-at` when an FSM needs byte or UTF-8 offsets.  A space before `[`
-keeps ordinary application (`f [1, 2]` passes a list).
+string-valued name: `s[2]` is `(str-char-at s 2)` and returns the **character**
+at character index 2 as its Unicode scalar value (an `Int`), or `-1` when out of
+range.  Indexing counts characters, not UTF-8 bytes, so `'→'` and `'λ'` are one
+index each; a combining mark is a separate scalar (grapheme clusters are not
+segmented).  `str-codepoint-at` is the explicit codepoint operator and returns
+the same scalar index; use `str-byte-at`/`str-utf8-at` for byte offsets.  A
+space before `[` keeps ordinary application (`f [1, 2]` passes a list), and
+`match s[0] 'a' → ... | _ → ...` works directly.
 
 ## UTF-16
 

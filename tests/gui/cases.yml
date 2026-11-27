@@ -2,3 +2,8 @@
 cases:
 - name: gui_smoke
   compile_only: true
+
+- name: events
+  stdout: '[0, 1, 4, 5, 0]
+
+    '

@@ -1,0 +1,2 @@
+﻿include "lib/GUI.lambda"
+(event-click 4 5)

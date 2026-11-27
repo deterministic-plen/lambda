@@ -103,9 +103,17 @@ def check_pygments() -> None:
 
     files = sorted(ROOT.glob("**/*.lambda"))
     bad = []
+    skipped = []
     for path in files:
         try:
-            tokens = list(lex(path.read_text(encoding="utf-8"), LambdaLexer()))
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # One diagnostics fixture is deliberately invalid UTF-8; the
+            # compiler rejects it and it has no meaningful lexer input.
+            skipped.append(path)
+            continue
+        try:
+            tokens = list(lex(text, LambdaLexer()))
         except Exception as exc:  # pragma: no cover - diagnostic path
             bad.append(f"{path}: {exc!r}")
             continue
@@ -113,7 +121,8 @@ def check_pygments() -> None:
             bad.append(f"{path}: Error token")
     if bad:
         raise SystemExit("Pygments lexer failures:\n" + "\n".join(bad))
-    print(f"Pygments ok: {len(files)} .lambda files")
+    print(f"Pygments ok: {len(files) - len(skipped)} .lambda files"
+          f" ({len(skipped)} non-UTF-8 fixture(s) skipped)")
 
 
 if __name__ == "__main__":

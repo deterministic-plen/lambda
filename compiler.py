@@ -572,6 +572,7 @@ class Compiler:
             "\ndeclare %Value* @lambda_box_record_bytes(i8*, i64)"
             "\ndeclare i8* @lambda_record_bytes(%Value*)"
             "\ndeclare %Value* @lambda_cycle(%Value*)"
+            "\ndeclare %Value* @lambda_read_file_io(%Value*)"
             "\ndeclare void @lambda_profile_report()"
             "\ndeclare void @lambda_stack_guard()")
         parts.append("\ndeclare void @lambda_gui_show(%Value*)")
@@ -848,7 +849,7 @@ class Compiler:
             env_raw = b.new_reg()
             b.emit(f"{env_raw} = bitcast {nty}* {nenv} to i8*")
             code = b.new_reg()
-            b.emit(f"{code} = bitcast ptr {info.wrapper_names[nxt - 1]} to i8*")
+            b.emit(f"{code} = bitcast %Value* (i8*, %Value*)* {info.wrapper_names[nxt - 1]} to i8*")
             res = b.new_reg()
             b.emit(f"{res} = call %Value* @lambda_make_closure(i8* {code}, i8* {env_raw})")
             b.emit(f"ret %Value* {res}")
@@ -1782,11 +1783,10 @@ class Compiler:
                 self._store_env_field(self.builder, ty, env, idx, "%Value*", val.name)
         env_raw = self.new_reg()
         self.emit_inst(f"{env_raw} = bitcast {ty}* {env} to i8*")
-        code = self.new_reg()
-        self.emit_inst(f"{code} = bitcast ptr {raw} to ptr")
         res = self.new_reg()
         self.emit_inst(
-            f"{res} = call %Value* @lambda_arrayf_pmap_raw_loop(i8* {env_raw}, ptr {code}, i64 {n.name})")
+            f"{res} = call %Value* @lambda_arrayf_pmap_raw_loop(i8* {env_raw}, "
+            f"void (i8*, double*, i64, i64)* {raw}, i64 {n.name})")
         return Val(BOX, res, owned=True)
 
     def compile_pmap_raw(self, lam: Lam, n: Val) -> Val:
@@ -1809,11 +1809,10 @@ class Compiler:
                 self._store_env_field(self.builder, ty, env, idx, "%Value*", val.name)
         env_raw = self.new_reg()
         self.emit_inst(f"{env_raw} = bitcast {ty}* {env} to i8*")
-        code = self.new_reg()
-        self.emit_inst(f"{code} = bitcast ptr {raw} to ptr")
         res = self.new_reg()
         self.emit_inst(
-            f"{res} = call %Value* @lambda_arrayf_pmap_raw(i8* {env_raw}, ptr {code}, i64 {n.name})")
+            f"{res} = call %Value* @lambda_arrayf_pmap_raw(i8* {env_raw}, "
+            f"double (i8*, i64)* {raw}, i64 {n.name})")
         return Val(BOX, res, owned=True)
 
     def _capture_value(self, b: Binding, loc) -> Val:
@@ -1910,7 +1909,7 @@ class Compiler:
         env_raw = self.new_reg()
         self.emit_inst(f"{env_raw} = bitcast {ty}* {env} to i8*")
         code = self.new_reg()
-        self.emit_inst(f"{code} = bitcast ptr {info.wrapper_names[0]} to i8*")
+        self.emit_inst(f"{code} = bitcast %Value* (i8*, %Value*)* {info.wrapper_names[0]} to i8*")
         res = self.new_reg()
         self.emit_inst(f"{res} = call %Value* @lambda_make_closure(i8* {code}, i8* {env_raw})")
         return Val(BOX, res, owned=True)
@@ -2955,7 +2954,13 @@ class Compiler:
             env = self.new_reg()
             self.emit_inst(f"{env} = inttoptr i64 {env_i} to i8*")
             res = self.new_reg("res")
-            self.emit_inst(f"{res} = call %Value* {code}(i8* {env}, %Value* {argval.name})")
+            # Closure code pointers are stored as i8*; LLVM 14 needs an
+            # explicit function-pointer cast before an indirect call.
+            fnptr = self.new_reg("fnp")
+            self.emit_inst(
+                f"{fnptr} = bitcast i8* {code} to %Value* (i8*, %Value*)*")
+            self.emit_inst(
+                f"{res} = call %Value* {fnptr}(i8* {env}, %Value* {argval.name})")
             self.release(cur)
             cur = Val(BOX, res, owned=True)
         target = BOX if self.dynamic else rep_of(result_type)
@@ -3171,6 +3176,13 @@ class Compiler:
         if val is None:
             raise CompileError("primitive argument did not produce a value", node.loc)
         val = self.coerce(val, rep, hint if hint is not None else node.type)
+        if rep == BOX and val.borrowed:
+            # A primitive takes ownership of its boxed argument.  When the
+            # source is a borrowed inspection, pass a retained copy and let
+            # the primitive consume that copy; the caller's borrow itself
+            # stays untouched.  Array/world mutation paths reject borrowed
+            # handles explicitly before reaching here.
+            return self.retain(Val(BOX, val.name, owned=False))
         return self.ensure_owned(val) if rep == BOX else val
 
     def _move_tail_capture(self, b: Binding) -> Optional[Val]:
@@ -3660,6 +3672,12 @@ class Compiler:
             res = self.new_reg()
             self.emit_inst(f"{res} = call %Value* @lambda_utf16le_to_str(%Value* {a.name})")
             return Val(BOX, res, owned=True)
+        if op == "read_file_io":
+            a = self._prim_arg(args[0], BOX, args[0].type)
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_read_file_io(%Value* {a.name})")
+            return Val(BOX, res, owned=True)
         if op == "read_file_bytes":
             a = self._prim_arg(args[0], BOX, args[0].type)
             res = self.new_reg()
@@ -4041,6 +4059,13 @@ class Compiler:
                 f"{res} = call i64 @lambda_arrayi_length(%Value* {a.name})")
             self.release(a)
             return Val(I64, res)
+        if op == "world_clone":
+            a = self._array_borrow(args[0])
+            res = self.new_reg()
+            self.emit_inst(
+                f"{res} = call %Value* @lambda_arrayi_clone(%Value* {a.name})")
+            self.release(a)
+            return Val(BOX, res, owned=True)
         if op in ("arrayf_of", "arrayi_of", "arrayb_of"):
             lst = self._prim_arg(args[0], BOX, args[0].type)
             fn = {"arrayf_of": "@lambda_arrayf_of",
@@ -4275,7 +4300,7 @@ class Compiler:
         rep = self.node_rep(program.body)
         result = self.coerce(result, rep, program.body.type)
         body_type = prune(program.body.type)
-        is_gui = isinstance(body_type, TAdt) and body_type.name == "GUI"
+        is_gui = isinstance(body_type, TAdt) and body_type.name in ("GUI", "Screen")
         if is_gui:
             result = self.coerce(result, BOX, program.body.type)
             self.emit_inst(

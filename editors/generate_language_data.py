@@ -24,7 +24,7 @@ from parser import PRIMITIVES  # noqa: E402
 # These are the nominal built-in types accepted by the type checker.
 BUILTIN_TYPES = [
     "Int", "Float", "Bool", "String",
-    "ArrayF", "ArrayI", "ArrayB",
+    "ArrayF", "ArrayI", "ArrayB", "World",
 ]
 CONSTANTS = ["true", "false", "nil"]
 WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_?!<>-]*$")

@@ -1,0 +1,4 @@
+﻿; A tagged-union match may use a default when a catch-all is intended.
+type Opt (Some (x: Int) | None)
+f → (λo: Opt. match o Some x → x | _ → 0)
+[(f (Some 7)), (f None)]

@@ -44,6 +44,9 @@ jobs:
       - name: GUI headless PPM smoke test
         run: python tests/gui/check_gui.py
 
+      - name: Type-system proof corpus
+        run: python tools/proofcheck.py
+
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@v4
@@ -72,6 +75,9 @@ jobs:
       - name: Run Pi static tests
         working-directory: Pi
         run: python -m pytest tests -q
+
+      - name: Cache ownership regression (root path)
+        run: python -m pytest tests/test_cache.py::test_cache_root_refuses_foreign_owner -q
 
   editor-tests:
     name: Editor grammar and lexer tests
